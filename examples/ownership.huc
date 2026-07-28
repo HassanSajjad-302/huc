@@ -2,37 +2,54 @@ module examples.ownership;
 
 import std.io as io;
 
+// probable_open_widget and probable_close_widget stand in for a future
+// platform or standard-library resource API.
 struct Widget {
-    i32 value;
+    let i32 value;
+    let i32 mod native_handle;
 
-    fn clone() const -> Widget {
-        return Widget{this->value};
+    fn init(i32 value)
+        : value(value),
+          native_handle(probable_open_widget(value)) {
+    }
+
+    // This customizes explicit `copy`. Declaring clone makes Widget Move.
+    fn clone() -> Widget {
+        return Widget(this->value); // opens an independent native handle
+    }
+
+    // This customizes destruction. Fields are cleaned after drop returns.
+    fn drop() mod -> void {
+        if (this->native_handle >= 0) {
+            probable_close_widget(this->native_handle);
+            this->native_handle = -1;
+        }
     }
 }
 
-fn inspect(const Widget* widget) -> void {
+fn inspect(Widget* widget) -> void {
     io::println(widget->value);
 }
 
-fn consume(Widget*& widget) -> void {
+fn consume(Widget& widget) -> void {
     inspect(widget);
-} // widget owns its argument and destroys it here
+} // widget owns its argument and calls Widget.drop here
 
 export fn main() -> i32 {
-    Widget*& first = new Widget{42};
+    let Widget& mod first = new Widget(42);
 
     inspect(first);
     inspect(first);
 
-    Widget* observer = first;
-    Widget*& second = first;
+    let Widget* observer = first;
+    let Widget& mod second = first; // synthesized move; first becomes null
 
     // first is now null. observer still points at the Widget owned by second.
-    Widget*& independent = copy second;
+    let Widget& independent = copy second; // allocates and calls Widget.clone
 
     consume(second);
-    // observer is now dangling; dereferencing it would be undefined behavior.
+    // second is null. Its former Widget was dropped, so observer is dangling.
 
     inspect(independent);
     return 0;
-} // independent destroys its separate Widget
+} // independent calls drop on its separately cloned Widget

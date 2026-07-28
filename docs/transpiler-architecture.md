@@ -13,7 +13,7 @@ lowering, and intermediate representation. C++ is used only as the first
 portable machine-code backend.
 
 The decisive reason is deterministic cleanup. A C++ backend can map HUC
-`T*&` to a one-word move-only RAII wrapper and can use generated C++ scopes to
+`T&` to a one-word move-only RAII wrapper and can use generated C++ scopes to
 handle normal exits. A C backend would require the first compiler to lower
 every scope exit, early return, partial initialization, and conditional drop
 into explicit cleanup branches before even the smallest useful HUC program
@@ -27,7 +27,7 @@ straightforward.
 
 | Concern | C17 backend | C++20 backend |
 |---|---|---|
-| `T*&` cleanup | Compiler emits all cleanup paths | One-word generated RAII wrapper |
+| `T&` cleanup | Compiler emits all cleanup paths | One-word generated RAII wrapper |
 | Methods and namespaces | Lower immediately | Direct mapping |
 | Move-only values | Manual structs/functions/drop flags | Generated special members |
 | Generic specializations | Name-mangled functions and structs | Name-mangled concrete types; no templates required |
@@ -38,7 +38,7 @@ straightforward.
 | Future backend neutrality | Good if IR exists | Equally good if IR exists |
 
 The C++ emitter must not translate HUC source by token substitution. In
-particular, HUC `T*&` must never be emitted as C++ `T*&`; it is emitted as
+particular, HUC `T&` must never be emitted as C++ `T&`; it is emitted as
 `::huc_rt::owner<T>`.
 
 ## 3. Compiler overview
@@ -93,6 +93,7 @@ such work is complete before C++ is emitted.
 huc/
   README.md
   docs/
+    value-semantics.md
     language-specification.md
     transpiler-architecture.md
     huc.ebnf
@@ -172,7 +173,7 @@ The lexer should:
 - recognize numbered keywords as dedicated tokens;
 - preserve comments and trivia when formatter support is enabled;
 - diagnose unsupported phase spellings such as `fn3`;
-- tokenize `*&` as one token;
+- tokenize `&` as one token;
 - retain the raw spelling of numeric and string literals;
 - never depend on semantic type information.
 
@@ -188,18 +189,19 @@ enum class TokenKind {
     KwFn, KwFn1, KwFn2,
     KwStruct, KwStruct1, KwStruct2,
     KwIf, KwIf1, KwFor, KwFor1, KwWhile, KwWhile1,
-    KwLet1, KwVar1, KwWhere1,
+    KwLet1, KwLet2, KwWhere1,
 
     Star,
-    OwnerSuffix, // *&
+    Ampersand, // owner suffix in a type; address-of in an expression
     Arrow,
     DollarLParen,
     // ...
 };
 ```
 
-`OwnerSuffix` avoids ever constructing a misleading AST equivalent to a C++
-reference-to-pointer.
+The parser turns `Ampersand` into an owner-type node only in postfix type
+position. In prefix expression position, the same token is raw address-of. No
+AST node represents a C++ reference.
 
 ### 5.3 Parser
 
@@ -360,7 +362,7 @@ The resolver implements only the ranking specified by the language:
 2. lossless built-in numeric promotion;
 3. owner-to-observer conversion.
 
-Before ranking, normalize each signature by replacing `T*&` with its observing
+Before ranking, normalize each signature by replacing `T&` with its observing
 form. Two otherwise identical normalized signatures form a forbidden
 ownership-only overload set.
 
@@ -598,9 +600,12 @@ Representative MIR statements:
 StorageLive place
 StorageDead place
 Copy destination, source
+Clone destination, source
 Move destination, source
 OwnerMove destination, source
 OwnerObserve destination_raw, source_owner
+Activate place
+Deactivate place
 Drop place
 OwnerDrop place
 Adopt destination_owner, source_raw
@@ -646,6 +651,11 @@ undefined behavior.
 - Moves update the relevant state or flag.
 - Reinitialization marks the place active.
 
+A conditional flag belongs to one MIR storage place. It is emitted as a
+sidecar local or guard state and never becomes a field of the nominal HUC type.
+Consequently it does not change `sizeof(T)`, field offsets, FFI layout, or the
+one-word representation of `T&`.
+
 ### 12.3 Cleanup edges
 
 The pass adds cleanup before:
@@ -668,6 +678,26 @@ cleanup is still valuable:
 The first emitter may coalesce explicit cleanup into generated RAII where the
 result is provably equivalent.
 
+### 12.4 Special-operation elaboration
+
+Semantic analysis classifies a structure as Copy only when every field is Copy
+and it declares neither `clone` nor `drop`. Declaring either method makes the
+structure Move.
+
+Elaboration handles the operations as follows:
+
+- ordinary Copy binding becomes fieldwise `Copy`;
+- `copy` of a Move structure becomes `Clone` into a fresh temporary;
+- Move binding becomes fixed fieldwise `Move` followed by `Deactivate`;
+- Move assignment checks exact self-assignment, drops a distinct active
+  destination, then performs the fixed move;
+- `destination = copy source` completes `Clone` before dropping destination;
+- destruction calls user `drop`, then drops fields in reverse order.
+
+No HIR or MIR operation performs overload resolution for move. A C++ move
+constructor emitted for backend convenience is compiler machinery, not a HUC
+customization point. See [Value Semantics and Special Operations](value-semantics.md).
+
 ## 13. C++20 lowering
 
 ### 13.1 Runtime owner
@@ -676,6 +706,15 @@ The generated runtime support contains conceptually:
 
 ```cpp
 namespace huc_rt {
+
+namespace generated {
+
+// Specialized/generated for every owned HUC pointee type. It runs HUC
+// drop-in-place logic, ends the C++ storage lifetime, and deallocates.
+template<class T>
+void destroy_owned(T* pointer) noexcept;
+
+}
 
 template<class T>
 class owner {
@@ -712,26 +751,29 @@ public:
     void reset(T* replacement = nullptr) noexcept {
         T* old = pointer_;
         pointer_ = replacement;
-        delete old;
+        if (old != nullptr) {
+            generated::destroy_owned(old);
+        }
     }
 };
 
 }
 ```
 
-The real implementation must handle incomplete generated types carefully and
-must use type-specific destroy/deallocate thunks if HUC layout ceases to match
-ordinary C++ object construction. The wrapper remains one pointer.
+`destroy_owned<T>` is selected statically from `T`; no deleter or function
+pointer is stored in `owner<T>`. The real implementation must handle incomplete
+generated types, over-aligned allocation, and partially emitted modules
+carefully. The wrapper remains one pointer.
 
 ### 13.2 Operation mapping
 
 | HUC operation | Generated C++ |
 |---|---|
 | `T*` | `T*` |
-| `T*&` | `huc_rt::owner<T>` |
+| `T&` | `huc_rt::owner<T>` |
 | owner observation | `.get()` |
 | owner move | `std::move(owner)` or `.release()` into a wrapper |
-| `new T{values}` | `huc_rt::owner<T>{new T{values}}` |
+| `new T(values)` | `huc_rt::owner<T>{new T(values)}` |
 | `copy owner` | generated clone plus allocation |
 | `adopt[T](raw)` | explicit owner construction |
 | `release(owner)` | `.release()` |
@@ -742,8 +784,9 @@ not HUC semantics.
 
 ### 13.3 Sequencing
 
-Although C++20 sequences function arguments left to right only in limited ways,
-HUC requires full left-to-right argument evaluation. The emitter therefore
+Although C++20 does not choose a left-to-right order for all function arguments,
+HUC requires each argument and corresponding parameter initialization to
+complete left-to-right. The emitter therefore
 materializes argument temporaries:
 
 ```huc
@@ -766,18 +809,48 @@ preserve HUC temporary destruction order.
 
 ### 13.4 Generated special members
 
-For each HUC Move structure, the emitter generates:
+HUC destruction cannot be implemented by placing the user `drop` body directly
+in an unconditional C++ destructor. Consider a HUC structure that contains one
+raw operating-system handle and declares `drop`. Its synthesized HUC move copies
+the handle and marks the source storage inactive; it is not required to rewrite
+the raw integer to a sentinel. An unconditional C++ destructor on the source
+would therefore close the transferred handle.
+
+For each HUC Move structure, the emitter instead generates:
 
 - deleted C++ copy constructor and copy assignment;
-- compiler-private move constructor and assignment matching HUC relocation;
-- a C++ destructor matching HUC `drop` and field destruction;
+- compiler-only fieldwise move construction/assignment machinery that never
+  invokes user code;
+- a `huc_drop_in_place(T*)` helper that runs user `drop` and then recursively
+  cleans fields in reverse order;
+- a backend C++ destructor shell that never invokes HUC `drop` merely because
+  C++ storage leaves scope;
 - an explicit clone helper when the HUC clone protocol exists.
 
-User code never overload-selects these members. They exist solely to make
-generated C++ carry HUC's already-resolved operations.
+MIR calls `huc_drop_in_place` only for an active HUC place. It then neutralizes
+generated owner/Move fields so the later C++ destructor shell is a no-op. A
+moved-from raw handle may retain its old bits, but its HUC place is inactive and
+never receives the HUC drop call.
 
-For a `copy struct`, generated C++ may use defaulted copy operations after
-layout checks.
+When conditional control flow prevents static cleanup selection, the emitter
+uses a sidecar `slot_guard<T>` or boolean that refers to the value without
+changing its representation. HUC temporaries are handled by the same MIR
+liveness rules rather than by C++ full-expression lifetime rules.
+
+Generated source never asks C++ overload resolution to choose these members.
+They exist solely to carry already-resolved HUC operations. The backend may
+replace special members with generated free functions where that produces more
+obviously correct code.
+
+HUC fixed-by-default permission is enforced before emission. The backend must
+not add C++ `const` to physical storage when doing so would prevent synthesized
+move assignment, cleanup neutralization, or reinitialization of an inactive HUC
+place. Read-only access remains a HUC semantic property even when generated C++
+storage is physically writable.
+
+For a HUC Copy structure—one whose fields are all Copy and which declares
+neither `clone` nor `drop`—generated C++ may use defaulted copy operations
+after layout and ordering checks.
 
 ### 13.5 Namespaces and modules
 
@@ -916,7 +989,7 @@ symbol hashes must be identical across processes for identical inputs.
 
 ### 17.1 Unit tests
 
-- tokenization, including `*&` and numbered keywords;
+- tokenization, including `&` and numbered keywords;
 - Pratt precedence and recovery;
 - canonical type interning;
 - overload ranking;
@@ -1000,7 +1073,7 @@ left-to-right evaluation.
 
 ### Milestone 2: ownership
 
-- `T*`, `const T*`, and `T*&`;
+- `T*`, `mod T*`, and `T&`;
 - one-word runtime owner;
 - new/adopt/release/reset/swap;
 - observing versus consuming parameter binding;
@@ -1025,7 +1098,7 @@ produce concrete runtime HIR without backend templates.
 
 ### Milestone 4: meta execution
 
-- `fn2`, `struct2`, `let1`, and `var1`;
+- `fn2`, `struct2`, `let1`, and `let2`;
 - `@` forced evaluation;
 - deterministic HIR interpreter;
 - resource limits and evaluation traces;
@@ -1064,7 +1137,7 @@ module/import
 fn
 struct
 bool, integer, float, void
-T*, const T*, T*&
+T*, mod T*, T&
 local declarations
 if/while/return
 ordinary calls
@@ -1094,6 +1167,6 @@ The following should be enforced in code review and tests:
 5. Compile-time evaluation has no ambient untracked host effects.
 6. Generated code uses syntax nodes and hygiene, never source concatenation.
 7. Backend output preserves HUC left-to-right sequencing.
-8. `T*&` remains one word under the default allocator.
+8. `T&` remains one word under the default allocator.
 9. Diagnostics retain source and expansion chains across every pass.
 10. A future C backend can consume MIR without recreating semantic analysis.

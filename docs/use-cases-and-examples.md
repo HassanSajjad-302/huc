@@ -22,7 +22,7 @@ Core syntax and semantics in these examples are intended to be normative:
 
 - `let`, `let1`, and `let2`;
 - `mod`;
-- `T*` and `T*&`;
+- `T*` and `T&`;
 - `fn`, `fn1`, and `fn2`;
 - `struct`, `struct1`, and `struct2`;
 - `if1`, `for1`, and `while1`;
@@ -77,8 +77,8 @@ Notable HUC-specific combinations are:
    followed by a separately inspectable and independently parsed HUC0 round.
 5. A normal `fn1` call that residualizes a runtime specialization and the same
    call prefixed by `@` that must execute completely during translation.
-6. Const-by-default, layer-specific `mod`, and a one-word unique owner expressed
-   directly as `T*&`.
+6. Fixed/read-only-by-default declarations, layer-specific `mod`, and a
+   one-word unique owner expressed directly as `T&`.
 
 ## 2. Use-case catalog
 
@@ -92,11 +92,16 @@ The examples below cover these use cases:
 | Runtime | Automatic unique ownership and deterministic cleanup |
 | Runtime | Explicit consumption through an owner parameter |
 | Runtime | Owner-containing structures and synthesized moves |
+| Runtime | Ordinary fieldwise-Copy value semantics |
 | Runtime | Explicit deep copying with `copy` and `clone` |
+| Runtime | Custom clone opting a type into Move semantics |
+| Runtime | Fixed, non-overridable fieldwise move semantics |
+| Runtime | Move assignment, self-move, and reinitialization |
 | Runtime | Constructor-required fixed fields |
 | Runtime | Deterministic default initialization |
 | Runtime | Read-only and writable methods |
 | Runtime | User `drop` plus automatic reverse field cleanup |
+| Runtime | Direct correspondence with common C++20 RAII value types |
 | Runtime | Left-to-right calls and expressions |
 | Runtime | Conditional moves without a borrow checker |
 | Runtime | File, socket, and graphics-resource wrappers |
@@ -180,7 +185,7 @@ fn mutate(mod Counter* counter) -> void {
 }
 
 fn example() -> i32 {
-    let mod Counter*& mod owner = new Counter();
+    let mod Counter& mod owner = new Counter();
 
     let Counter* fixed_readonly = owner;
     let mod Counter* fixed_writable = owner;
@@ -232,7 +237,7 @@ fn inspect(FileHandle* file) -> bool {
     return file->valid();
 }
 
-fn consume(FileHandle*& file) -> void {
+fn consume(FileHandle& file) -> void {
     // file owns the allocation for the duration of this call.
     if (file) {
         probable_log_file(file);
@@ -240,7 +245,7 @@ fn consume(FileHandle*& file) -> void {
 } // file and its pointee are destroyed here
 
 fn run(i32 native) -> bool {
-    let FileHandle*& mod file = new FileHandle(native);
+    let FileHandle& mod file = new FileHandle(native);
     let bool was_valid = inspect(file); // observation
     consume(file);                      // move; file becomes null
     return was_valid;
@@ -261,8 +266,8 @@ module examples.tree;
 
 struct Node {
     let i32 value;
-    let Node*& mod left;
-    let Node*& mod right;
+    let Node& mod left;
+    let Node& mod right;
 
     fn init(i32 value) : value(value) {
         // left and right default to null.
@@ -313,8 +318,8 @@ module examples.tree_copy;
 
 struct Node {
     let i32 value;
-    let Node*& mod left;
-    let Node*& mod right;
+    let Node& mod left;
+    let Node& mod right;
 
     fn init(i32 value) : value(value) {
     }
@@ -423,7 +428,131 @@ When `Texture` is destroyed:
 3. `PixelBuffer.drop` releases the byte allocation.
 4. Remaining fields are cleaned in reverse declaration order.
 
-### 3.8 Left-to-right evaluation
+### 3.8 Custom copy, fixed move, and custom destruction
+
+HUC has three user-visible lifecycle declarations:
+
+| Declaration | What it customizes |
+|---|---|
+| `fn init(...)` | Construction |
+| `fn clone() -> T` | Explicit `copy` of a Move structure |
+| `fn drop() mod -> void` | Cleanup before automatic field destruction |
+
+Move construction and move assignment have no hook. They are always synthesized
+by copying Copy fields, moving Move fields, and deactivating the source.
+
+```huc
+module examples.native_lease;
+
+struct NativeLease {
+    let i32 mod handle;
+    let u64 identity;
+
+    fn init(i32 handle, u64 identity)
+        : handle(handle),
+          identity(identity) {
+    }
+
+    fn clone() -> NativeLease {
+        return NativeLease(
+            probable_duplicate_handle(this->handle),
+            this->identity
+        );
+    }
+
+    fn drop() mod -> void {
+        if (this->handle >= 0) {
+            probable_close_handle(this->handle);
+            this->handle = -1;
+        }
+    }
+}
+
+fn lifecycle() -> void {
+    let NativeLease mod original = NativeLease(
+        probable_open_handle(),
+        1001
+    );
+
+    let NativeLease duplicate = copy original; // calls clone
+    let NativeLease moved = original;           // synthesized move
+    // original is inactive; moved holds the original handle.
+
+    let NativeLease mod current = NativeLease(
+        probable_open_handle(),
+        2002
+    );
+    current = copy duplicate; // clone, drop old current, move clone into current
+    current = current;        // exact self-move is a no-op
+}
+```
+
+Declaring either `clone` or `drop` makes `NativeLease` Move. The logical copy
+duplicates the operating-system resource. Ordinary binding never calls
+`clone`, and ordinary movement never calls user code.
+
+A conventional C++20 counterpart exposes the same resource behavior through
+its special members:
+
+```cpp
+class NativeLease {
+public:
+    NativeLease(int handle, std::uint64_t identity)
+        : handle_(handle), identity_(identity) {}
+
+    NativeLease(const NativeLease& source)
+        : handle_(probable_duplicate_handle(source.handle_)),
+          identity_(source.identity_) {}
+
+    NativeLease& operator=(const NativeLease& source) {
+        if (this != &source) {
+            NativeLease temporary(source);
+            *this = std::move(temporary);
+        }
+        return *this;
+    }
+
+    NativeLease(NativeLease&& source) noexcept
+        : handle_(std::exchange(source.handle_, -1)),
+          identity_(source.identity_) {}
+
+    NativeLease& operator=(NativeLease&& source) noexcept {
+        if (this != &source) {
+            close();
+            handle_ = std::exchange(source.handle_, -1);
+            identity_ = source.identity_;
+        }
+        return *this;
+    }
+
+    ~NativeLease() {
+        close();
+    }
+
+private:
+    void close() noexcept {
+        if (handle_ >= 0) {
+            probable_close_handle(handle_);
+            handle_ = -1;
+        }
+    }
+
+    int handle_;
+    std::uint64_t identity_;
+};
+
+NativeLease original(probable_open_handle(), 1001);
+NativeLease duplicate = original;
+NativeLease moved = std::move(original);
+```
+
+The HUC and C++ values have comparable RAII, deep-copy, move, and deterministic
+cleanup behavior. HUC makes the potentially expensive copy explicit and makes
+move behavior compiler-defined. The detailed comparison, including parameters,
+returns, owner values, assignment, self-move, and a complete image type, is in
+[Value Semantics and Special Operations](value-semantics.md).
+
+### 3.9 Left-to-right evaluation
 
 ```huc
 module examples.order;
@@ -464,7 +593,7 @@ auto __huc_arg2 = next(3);
 auto result = combine(__huc_arg0, __huc_arg1, __huc_arg2);
 ```
 
-### 3.9 Moving the same owner twice in one call
+### 3.10 Moving the same owner twice in one call
 
 ```huc
 module examples.double_move;
@@ -476,7 +605,7 @@ struct Item {
     }
 }
 
-fn take(Item*& first, Item*& second) -> i32 {
+fn take(Item& first, Item& second) -> i32 {
     let i32 mod result = 0;
 
     if (first) {
@@ -491,7 +620,7 @@ fn take(Item*& first, Item*& second) -> i32 {
 }
 
 fn run() -> i32 {
-    let Item*& mod item = new Item(7);
+    let Item& mod item = new Item(7);
     return take(item, item);
 }
 ```
@@ -500,7 +629,7 @@ The first argument moves the address and clears `item`. The second argument
 therefore receives null. The result is `7`. This behavior is defined by HUC’s
 left-to-right rule rather than by backend argument ordering.
 
-### 3.10 Conditional moves remain unchecked
+### 3.11 Conditional moves remain unchecked
 
 ```huc
 module examples.conditional_move;
@@ -510,11 +639,11 @@ struct Job {
     fn init(i32 id) : id(id) {}
 }
 
-fn consume(Job*& job) -> void {
+fn consume(Job& job) -> void {
 }
 
 fn run(bool transfer) -> i32 {
-    let Job*& mod job = new Job(9);
+    let Job& mod job = new Job(9);
 
     if (transfer) {
         consume(job);
@@ -532,7 +661,7 @@ HUC does not require a borrow checker to reject the final access. The owner is
 either non-null or null. Dereferencing it without the explicit condition would
 be unchecked and potentially undefined.
 
-### 3.11 Probable file-processing application
+### 3.12 Probable file-processing application
 
 This larger example uses illustrative standard-library APIs:
 
@@ -557,7 +686,7 @@ struct CopyStats {
     }
 }
 
-fn copy_stream(fs::Reader*& input, fs::Writer*& output)
+fn copy_stream(fs::Reader& input, fs::Writer& output)
     -> result::Result<CopyStats, fs::Error> {
     let CopyStats mod stats = CopyStats();
     let fs::Buffer mod buffer = fs::Buffer(64 * 1024);
@@ -590,7 +719,7 @@ fn copy_stream(fs::Reader*& input, fs::Writer*& output)
 }
 
 fn run(text::Text source, text::Text destination) -> i32 {
-    let result::Result<fs::Reader*&, fs::Error> mod opened_input =
+    let result::Result<fs::Reader&, fs::Error> mod opened_input =
         fs::open_reader(source);
 
     if (opened_input.is_error()) {
@@ -598,9 +727,9 @@ fn run(text::Text source, text::Text destination) -> i32 {
         return 1;
     }
 
-    let fs::Reader*& mod input = opened_input.take_value();
+    let fs::Reader& mod input = opened_input.take_value();
 
-    let result::Result<fs::Writer*&, fs::Error> mod opened_output =
+    let result::Result<fs::Writer&, fs::Error> mod opened_output =
         fs::create_writer(destination);
 
     if (opened_output.is_error()) {
@@ -608,7 +737,7 @@ fn run(text::Text source, text::Text destination) -> i32 {
         return 1;
     }
 
-    let fs::Writer*& mod output = opened_output.take_value();
+    let fs::Writer& mod output = opened_output.take_value();
     let result::Result<CopyStats, fs::Error> copied =
         copy_stream(input, output);
 
@@ -975,7 +1104,7 @@ fn run() -> i32 {
     }
 
     let1()<Widget> slot {
-        let Widget*& mod slot = new Widget(99);
+        let Widget& mod slot = new Widget(99);
     }
 
     let i32 first = slot<i32>;
@@ -995,7 +1124,7 @@ Illustrative HUC0 at the family declaration site:
 ```huc
 let i32 __huc_slot_i32 = i32();
 let Widget* __huc_slot_Widget_ptr;
-let Widget*& mod __huc_slot_Widget = new Widget(99);
+let Widget& mod __huc_slot_Widget = new Widget(99);
 
 let i32 first = __huc_slot_i32;
 let Widget* second = __huc_slot_Widget_ptr;
@@ -1006,7 +1135,7 @@ The same family source name denotes:
 
 - an inline `i32`;
 - a raw `Widget*`;
-- an owning `Widget*&`.
+- an owning `Widget&`.
 
 This is one of HUC’s most unusual direct facilities. C++ variable templates can
 also be explicitly/partially specialized, but HUC integrates the selected
@@ -1245,7 +1374,7 @@ struct1 HeapArray(auto T) {
 
 struct1 SmallVector(auto T, usize Inline) {
     let [Inline]T mod inline_values;
-    let HeapArray<T>*& mod heap_values;
+    let HeapArray<T>& mod heap_values;
     let usize mod size;
     let usize mod capacity;
 
@@ -1283,7 +1412,7 @@ struct1 SmallVector(auto T, usize Inline) {
             next_capacity = requested;
         }
 
-        let HeapArray<T>*& mod replacement =
+        let HeapArray<T>& mod replacement =
             new HeapArray<T>(next_capacity);
 
         let usize mod index = 0;
@@ -1504,15 +1633,15 @@ struct MessageHeader {
 
 struct Packet {
     let MessageHeader header;
-    let net::ByteBuffer*& mod payload;
+    let net::ByteBuffer& mod payload;
 
-    fn init(MessageHeader header, net::ByteBuffer*& mod payload)
+    fn init(MessageHeader header, net::ByteBuffer& mod payload)
         : header(header),
           payload(payload) {
     }
 }
 
-fn send_packet(net::Socket* socket, Packet*& packet)
+fn send_packet(net::Socket* socket, Packet& packet)
     -> result::Result<void, net::Error> {
     let result::Result<void, net::Error> mod header_result =
         socket->write(probable_bytes_of(&packet->header));
@@ -1529,13 +1658,13 @@ fn send_packet(net::Socket* socket, Packet*& packet)
 
 fn run(
     net::Socket* socket,
-    net::ByteBuffer*& mod payload,
+    net::ByteBuffer& mod payload,
     usize size
 ) -> i32 {
     let u32 checksum = probable_checksum(payload->bytes(0, size));
     let MessageHeader header =
         MessageHeader(7, as<u16>(size), checksum);
-    let Packet*& mod packet = new Packet(header, payload);
+    let Packet& mod packet = new Packet(header, payload);
 
     let result::Result<void, net::Error> sent =
         send_packet(socket, packet);
@@ -1629,9 +1758,9 @@ struct Position {
 
 struct Sprite {
     let u32 texture;
-    let memory::ByteBuffer*& mod pixels;
+    let memory::ByteBuffer& mod pixels;
 
-    fn init(u32 texture, memory::ByteBuffer*& mod pixels)
+    fn init(u32 texture, memory::ByteBuffer& mod pixels)
         : texture(texture),
           pixels(pixels) {
     }
@@ -1639,9 +1768,9 @@ struct Sprite {
 
 struct1 ComponentStore(auto T) {
     if1 (@compiler::type<T>().is_move()) {
-        let collections::Vector<T*&> mod values;
+        let collections::Vector<T&> mod values;
 
-        fn add(T*& mod value) mod -> usize {
+        fn add(T& mod value) mod -> usize {
             this->values.push(value);
             return this->values.size() - 1;
         }
@@ -1814,7 +1943,9 @@ Possible tools include:
 
 | HUC facility | Typical alternative elsewhere | HUC’s direct contract |
 |---|---|---|
-| `T*&` | `unique_ptr`, owned boxes, library wrapper | One-word unique ownership integrated with move-by-binding |
+| `T&` | `unique_ptr`, owned boxes, library wrapper | One-word unique ownership integrated with move-by-binding |
+| `init` / `clone` / `drop` | C++ special members, RAII wrappers | Custom construction, explicit logical copy, and cleanup |
+| Fixed synthesized move | C++ move constructors and move assignment | Fieldwise non-failing move with no user hook or value-category overload |
 | Layered `mod` | const qualifiers, mutable references, capabilities | Slot and pointee permissions remain visually separate |
 | `if1` in a type body | conditional members, macros, template/static conditionals | Selected declarations become normal HUC0; discarded body is not parsed |
 | `fn1` partial specialization | overloads, traits, macros | Same primary/partial/full mechanism as structure and variable families |

@@ -1,6 +1,8 @@
-(* HUC 0.1 bootstrap grammar.
-   Semantic restrictions, phase checking, and precedence details are in the
-   language specification. This grammar intentionally omits error productions. *)
+(* HUC 0.1 bootstrap grammar snapshot.
+   The controlling implementation plan remains authoritative while this file
+   is split into final HUC0 and HUC1 start symbols. This snapshot uses current
+   let/mod syntax and postfix & unique ownership. HUC & is not a C++ reference.
+   Semantic restrictions and precedence details are outside this grammar. *)
 
 compilation-unit  = module-decl, { import-decl }, { declaration } ;
 
@@ -17,9 +19,9 @@ declaration       = [ "export" ],
 
 function-decl     = function-head, ( block | ";" ) ;
 function-head     = function-keyword, identifier,
-                    [ compile-parameter-list ],
-                    parameter-list,
-                    [ "const" ],
+                     [ compile-parameter-list ],
+                     parameter-list,
+                     [ "mod" ],
                     "->", type,
                     [ where-clause ] ;
 function-keyword  = "fn" | "fn1" | "fn2" ;
@@ -30,10 +32,10 @@ compile-parameter-list
 compile-parameter = type, identifier, [ "=", expression ] ;
 
 parameter-list    = "(", [ parameter, { ",", parameter }, [ "," ] ], ")" ;
-parameter         = ( type | "auto" ), [ "..." ], identifier ;
+parameter         = ( type | "auto" ), [ "mod" ], [ "..." ], identifier ;
 where-clause      = "where1", "(", expression, ")" ;
 
-struct-decl       = [ "copy" ], struct-keyword, identifier,
+struct-decl       = struct-keyword, identifier,
                     [ compile-parameter-list ], struct-body, [ ";" ] ;
 struct-keyword    = "struct" | "struct1" | "struct2" ;
 struct-body       = "{", { member-decl }, "}" ;
@@ -41,7 +43,8 @@ member-decl       = field-decl
                   | function-decl
                   | visibility-label
                   | phase-if-decl ;
-field-decl        = type, identifier, [ "=", expression ], ";" ;
+field-decl        = "let", type, [ "mod" ], identifier,
+                    [ "=", expression ], ";" ;
 visibility-label  = ( "public" | "private" ), ":" ;
 
 type-alias        = "type", identifier, "=", type, ";" ;
@@ -51,12 +54,11 @@ phase-if-decl     = "if1", "(", expression, ")", declaration-block,
                     [ "else", declaration-block ] ;
 declaration-block = "{", { declaration | member-decl }, "}" ;
 
-type              = type-primary, { type-suffix } ;
+type              = [ "mod" ], type-primary, { type-suffix } ;
 type-primary      = builtin-type
                   | symbol-path, [ compile-argument-list ]
-                  | "const", type-primary
                   | "[", expression, "]", type ;
-type-suffix       = "*" | "*&" ;
+type-suffix       = "*" | "&" ;
 builtin-type      = "bool" | "c8"
                   | "i8" | "i16" | "i32" | "i64" | "isize"
                   | "u8" | "u16" | "u32" | "u64" | "usize"
@@ -82,11 +84,11 @@ statement         = block
                   | emit-stmt
                   | expression-stmt ;
 
-local-decl        = [ "const" ], ( type | "auto" ), identifier,
-                    [ "=", expression ], ";" ;
+local-decl        = "let", ( type | "auto" ), [ "mod" ], identifier,
+                     [ "=", expression ], ";" ;
 compile-local-decl
-                  = ( "let1" | "var1" ), ( type | "auto" ), identifier,
-                    "=", expression, ";" ;
+                  = "let2", ( type | "auto" ), [ "mod" ], identifier,
+                     "=", expression, ";" ;
 
 if-stmt           = "if", "(", expression, ")", statement,
                     [ "else", statement ] ;
@@ -147,7 +149,7 @@ unary-expression  = postfix-expression
                   | ( "+" | "-" | "!" | "~" | "*" | "&" | "@" ),
                     unary-expression
                   | "copy", unary-expression
-                  | "new", type, aggregate-initializer ;
+                  | "new", type, argument-list ;
 
 postfix-expression
                   = primary-expression,

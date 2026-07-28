@@ -1,0 +1,107 @@
+module examples.value_semantics;
+
+import std.io as io;
+import std.memory as memory;
+
+// Point is Copy: every field is Copy and it declares neither clone nor drop.
+struct Point {
+    let i32 x;
+    let i32 y;
+
+    fn init(i32 x, i32 y)
+        : x(x),
+          y(y) {
+    }
+}
+
+// NativeBuffer is Move because it declares clone and drop.
+struct NativeBuffer {
+    let mod u8* mod data;
+    let usize size;
+
+    fn init(usize size)
+        : data(memory::allocate_zeroed_bytes(size)),
+          size(size) {
+    }
+
+    fn first() -> u8 {
+        if (this->size == 0) {
+            return 0;
+        }
+        return this->data[0];
+    }
+
+    fn fill(u8 value) mod -> void {
+        memory::fill_bytes(this->data, value, this->size);
+    }
+
+    // Only an explicit copy expression selects this method.
+    fn clone() -> NativeBuffer {
+        let NativeBuffer mod result = NativeBuffer(this->size);
+        memory::copy_bytes(result.data, this->data, this->size);
+        return result;
+    }
+
+    // The compiler invokes this before reverse field cleanup.
+    fn drop() mod -> void {
+        if (this->data) {
+            memory::free_raw_bytes(this->data, this->size);
+            this->data = null;
+        }
+    }
+}
+
+fn receive(NativeBuffer* observed, NativeBuffer& owned) -> u8 {
+    // owned keeps the allocation alive for the duration of this call.
+    if (!owned) {
+        return 0;
+    }
+    return observed->first();
+} // owned is dropped here
+
+fn demonstrate_copy_values() -> void {
+    let Point first = Point(10, 20);
+    let Point second = first;       // implicit fieldwise copy
+    let Point third = copy second;  // equivalent for a Copy type
+
+    io::println(first.x, second.x, third.x);
+}
+
+fn demonstrate_inline_move_values() -> void {
+    let NativeBuffer mod original = NativeBuffer(64);
+    original.fill(7);
+
+    let NativeBuffer duplicate = copy original; // calls clone
+    let NativeBuffer mod moved = original;       // fixed synthesized move
+    // original is inactive here.
+
+    moved = moved;                  // exact self-move is a no-op
+    original = NativeBuffer(32);    // reinitializes inactive storage
+
+    let NativeBuffer mod target = NativeBuffer(8);
+    target = copy duplicate;        // clone, drop old target, move replacement
+
+    io::println(duplicate.first(), moved.first(), target.first());
+}
+
+fn demonstrate_owner_values() -> void {
+    let mod NativeBuffer& mod buffer = new NativeBuffer(128);
+    buffer->fill(42);
+
+    let NativeBuffer* observer = buffer;
+    let NativeBuffer& duplicate = copy buffer; // deep owner copy
+
+    // Arguments are evaluated left-to-right. The observer is captured first;
+    // ownership is then moved into receive's second parameter.
+    let u8 first_byte = receive(buffer, buffer);
+    // buffer is null and observer is dangling after receive returns.
+
+    io::println(first_byte, duplicate->first());
+}
+
+export fn main() -> i32 {
+    demonstrate_copy_values();
+    demonstrate_inline_move_values();
+    demonstrate_owner_values();
+    return 0;
+}

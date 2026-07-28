@@ -6,6 +6,15 @@ Revision: 0.1
 
 Target audience: compiler implementers, library authors, and language reviewers
 
+> **Reconciliation notice:** this document predates several accepted syntax
+> decisions and is being rewritten incrementally. The
+> [controlling implementation plan](implementation-plan.md) and
+> [value-semantics specification](value-semantics.md) take precedence. In
+> particular, current HUC uses `let`, fixed-by-default storage, layer-specific
+> `mod`, `T&` unique ownership, `fn clone() -> T`, and
+> `fn drop() mod -> void`; it has no source-level `const`, `var`, `copy struct`,
+> or C++ reference type.
+
 ## 1. Purpose and scope
 
 HUC is an unchecked, ahead-of-time systems programming language. It is intended
@@ -17,7 +26,7 @@ HUC has two defining mechanisms:
 1. A numbered phase model unifies ordinary runtime code, generic
    specialization, compile-time evaluation, reflection, and code generation.
 2. A small ownership model distinguishes unchecked observation (`T*`) from
-   automatic unique ownership (`T*&`).
+   automatic unique ownership (`T&`).
 
 HUC is not a memory-safe language. In particular, HUC does not have a borrow
 checker, lifetime parameters, mandatory bounds checks, or automatic data-race
@@ -40,8 +49,8 @@ location.
 HUC 0.1 makes these promises:
 
 - `T*` is pointer-sized and has no ownership or lifetime tracking.
-- `T*&` is pointer-sized when the default allocator is used.
-- Moving a `T*&` transfers its address and clears the source to null.
+- `T&` is pointer-sized when the default allocator is used.
+- Moving a `T&` transfers its address and clears the source to null.
 - Destruction is deterministic and occurs at statically defined scope exits.
 - Function arguments and subexpressions evaluate from left to right.
 - A move is a compiler-defined transfer, never an overload-selected user call.
@@ -101,7 +110,7 @@ these signatures:
 
 ```huc
 export fn main() -> i32;
-export fn main(i32 argc, const c8** argv) -> i32;
+export fn main(i32 argc, c8** argv) -> i32;
 ```
 
 ### 2.2 Declaration order
@@ -176,10 +185,10 @@ f32 f64
 void
 never
 T
-const T
 T*
-const T*
-T*&
+mod T*
+T&
+mod T&
 ```
 
 `usize` and `isize` have the target pointer width. Integer widths are exact.
@@ -196,22 +205,29 @@ Every value type has one of two transfer modes:
   source.
 
 Built-in scalars, enums, function handles, and raw pointers are Copy. A
-user-defined structure is Move unless declared `copy struct`.
+structure is Copy when every field is Copy and it declares neither `clone` nor
+`drop`. Otherwise it is Move.
 
 ```huc
-copy struct Point {
-    i32 x;
-    i32 y;
+struct Point {
+    let i32 x;
+    let i32 y;
 }
 
 struct Buffer {
-    u8*& data;
-    usize size;
+    let mod u8* mod data;
+    let usize size;
+
+    fn drop() mod -> void {
+        probable_free(this->data);
+        this->data = null;
+    }
 }
 ```
 
-A `copy struct` is valid only if every field is Copy and the type has no
-`drop` method. The compiler derives the copy operation field by field.
+The compiler derives Copy operations field by field. Declaring `clone` makes
+the type Move so an ordinary fieldwise copy cannot bypass custom logical-copy
+behavior.
 
 A Move value may be duplicated only by the explicit `copy` expression, which
 uses the clone protocol in section 6.6.
@@ -228,13 +244,13 @@ uses the clone protocol in section 6.6.
 - Dereferencing null, dangling, misaligned, one-past-the-end, or otherwise
   invalid pointers is undefined behavior.
 
-`const T*` prohibits mutation of `T` through that pointer. It does not extend
-the pointee lifetime and does not imply exclusive access.
+`T*` prohibits mutation of `T` through that pointer. `mod T*` permits mutation.
+Neither form extends the pointee lifetime or implies exclusive access.
 
-### 4.3 Unique owning pointers: `T*&`
+### 4.3 Unique owning pointers: `T&`
 
-In HUC, `T*&` is a primitive unique-owner type. It does not mean C++'s
-“lvalue reference to a pointer,” and HUC has no general `T&` type in 0.1.
+In HUC, `T&` is a primitive unique-owner type. It does not mean C++'s lvalue
+reference, and HUC has no general reference type or `T&&` type.
 
 An owner has these states:
 
@@ -254,26 +270,25 @@ When a non-null owner is destroyed, HUC:
 Destroying a null owner does nothing.
 
 An owner cannot participate in pointer arithmetic. It converts implicitly to
-`T*` or `const T*` only in an observing context. The reverse conversion is
-never implicit.
+a permission-compatible `T*` only in an observing context. The reverse
+conversion is never implicit.
 
 ### 4.4 Pointer layering
 
-`*&` is parsed as an owner constructor. Examples:
+Postfix `&` in a type is parsed as an owner constructor. Examples:
 
 ```text
 T*      RawPtr<T>
-T*&     Owner<T>
+T&      Owner<T>
 T**     RawPtr<RawPtr<T>>
-T**&    Owner<RawPtr<T>>
 ```
 
-The characters `*&` must be adjacent. There is no postfix reference declarator
-and therefore no C++ declarator ambiguity.
+Prefix `&expression` remains raw address-of. Type and expression positions are
+grammatically distinct; neither form introduces a C++ reference.
 
 ### 4.5 Nullability
 
-Both `T*` and `T*&` may contain null. They convert explicitly to `bool` in a
+Both `T*` and `T&` may contain null. They convert explicitly to `bool` in a
 condition:
 
 ```huc
@@ -291,8 +306,8 @@ order, subject to target ABI alignment and padding.
 
 ```huc
 struct Pair {
-    i32 first;
-    i32 second;
+    let i32 first;
+    let i32 second;
 
     fn sum() -> i32 {
         return this->first + this->second;
@@ -305,8 +320,8 @@ Inheritance and virtual dispatch are not part of 0.1.
 
 Methods receive an implicit non-owning `this`:
 
-- `T* this` for an ordinary method;
-- `const T* this` for a method declared `const`.
+- `T* this` for a read-only method, which is the default;
+- `mod T* this` for a method with trailing `mod`.
 
 Calling a method on an owner observes the pointee and never moves the owner:
 
@@ -319,18 +334,19 @@ widget->update(); // no ownership binding, therefore no move
 A Move structure may declare exactly one lifecycle method:
 
 ```huc
-fn drop() -> void {
+fn drop() mod -> void {
     // release non-field resources
 }
 ```
 
 `drop` must be a runtime, zero-parameter method returning `void`. It cannot be
 called directly; the compiler invokes it during destruction. Its implicit
-receiver is `T* this`. The body runs before fields are destroyed in reverse
-order. HUC has no user-defined move constructor, copy constructor, assignment
-operator, or C++-style destructor overload.
+receiver is `mod T* this`. The body runs before fields are destroyed in reverse
+order. HUC has no user-defined move constructor, assignment operator, or
+C++-style destructor overload. Explicit logical copying is customized only by
+`clone`.
 
-A `copy struct` cannot declare `drop`.
+Declaring `drop` makes the structure Move.
 
 ### 4.7 Arrays and slices
 
@@ -342,7 +358,7 @@ The standard `Array[T]` owns its allocation; `Slice[T]` contains a raw pointer
 and a length. Neither primitive indexing nor `Slice[T]` indexing is required
 to check bounds in the unchecked HUC profile.
 
-This avoids an ambiguous `new[]`/`delete[]` distinction for `T*&`: a `T*&`
+This avoids an ambiguous `new[]`/`delete[]` distinction for `T&`: a `T&`
 always owns exactly one `T`.
 
 ### 4.8 Type aliases
@@ -394,7 +410,7 @@ object through an incompatible pointer type is undefined except through `u8*`
 or `c8*`.
 
 The compiler shall not infer non-aliasing merely because an address originated
-from `T*&`; raw observers may exist.
+from `T&`; raw observers may exist.
 
 ### 5.4 Member access
 
@@ -429,15 +445,15 @@ that value:
 Merely naming, testing, dereferencing, or observing an owner does not move it.
 
 ```huc
-Widget*& owner = new Widget{};
+let mod Widget& mod owner = new Widget();
 
 owner->update();        // observe
 if (owner) {}           // test
-Widget* raw = owner;    // observe
+let Widget* raw = owner; // observe
 inspect(owner);         // observe if parameter is Widget*
 
-Widget*& next = owner;  // move
-consume(next);          // move if parameter is Widget*&
+let mod Widget& mod next = owner; // move
+consume(next);          // move if parameter is Widget&
 ```
 
 ### 6.2 Owner move initialization
@@ -445,8 +461,11 @@ consume(next);          // move if parameter is Widget*&
 For:
 
 ```huc
-T*& destination = source;
+let T& destination = source;
 ```
+
+Here `source` must be a writable owner slot, such as a parameter or local with
+trailing `mod`.
 
 the abstract operation is:
 
@@ -494,7 +513,7 @@ static control-flow facts or hidden drop flags at joins where a value is only
 conditionally active. Such flags are an implementation detail, not runtime
 lifetime checking. Straight-line moves require no flag.
 
-`T*&` uses its null representation instead of an additional drop flag whenever
+`T&` uses its null representation instead of an additional drop flag whenever
 possible.
 
 ### 6.5 Destruction order
@@ -519,44 +538,48 @@ implementation-defined diagnostic output; it need not run pending destructors.
 
 - For a Copy type, it performs the ordinary copy.
 - For a Move structure, it calls a method with the effective signature
-  `fn clone() const -> T`.
-- For `T*&`, null produces a null owner. A non-null owner allocates a new `T`
+  `fn clone() -> T`.
+- For `T&`, null produces a null owner. A non-null owner allocates a new `T`
   and initializes it with `copy *source`.
 - For a raw pointer, it copies the address and never clones the pointee.
 
 ```huc
 struct Text {
-    Array[u8] bytes;
+    let Array[u8] bytes;
 
-    fn clone() const -> Text {
-        return Text{copy this->bytes};
+    fn clone() -> Text {
+        return Text(copy this->bytes);
     }
 }
 
-Text a = make_text("hello");
-Text b = copy a;
+let Text a = make_text("hello");
+let Text b = copy a;
 
-Widget*& first = new Widget{};
-Widget*& second = copy first;
+let Widget& first = new Widget();
+let Widget& second = copy first;
 ```
 
-The explicit syntax exposes that logical copying may allocate or execute
-arbitrary code. Move itself remains non-overloadable and non-failing.
+Declaring `clone` makes the type Move, even if all fields are Copy. The explicit
+syntax exposes that logical copying may allocate or execute arbitrary code.
+Source code cannot call `clone` directly or take its address; it requests the
+operation with `copy`. Move itself remains non-overloadable and non-failing.
+Full assignment, self-move, and backend rules are specified in
+[Value Semantics and Special Operations](value-semantics.md).
 
 ### 6.7 Allocation
 
 ```huc
-T*& aggregate = new T{field_initializers};
+let T& aggregate = new T(constructor_arguments);
 ```
 
-`new T{...}` allocates suitably aligned storage, aggregate-initializes one `T`,
-and returns a unique owner. Every field without a default initializer must be
-provided. Constructor overloading is not part of 0.1; named factory functions
-express validated or fallible construction. Allocation failure terminates in
-0.1. A later standard library may provide a recoverable `try_new`.
+`new T(...)` allocates suitably aligned storage, invokes the selected `init`,
+and returns a unique owner. Constructor initializer obligations follow section
+5 of the implementation plan. Named factory functions express validated or
+fallible construction. Allocation failure terminates in 0.1. A later standard
+library may provide a recoverable `try_new`.
 
 Advanced allocation policies use ordinary library owner types. Stateful custom
-deleters are deliberately not stored in primitive `T*&`, preserving its
+deleters are deliberately not stored in primitive `T&`, preserving its
 one-word representation.
 
 ### 6.8 Adoption, release, reset, and swap
@@ -564,8 +587,8 @@ one-word representation.
 Low-level ownership transitions are explicit:
 
 ```huc
-T*& owner = adopt[T](raw); // raw must designate one compatible allocation
-T* raw = release(owner);   // owner becomes null
+let T& mod owner = adopt[T](raw); // raw must designate one compatible allocation
+let T* raw = release(owner);      // owner becomes null
 reset(owner);              // destroy pointee and set null
 swap(first, second);       // exchange addresses
 ```
@@ -578,9 +601,9 @@ behavior. `release` transfers the cleanup obligation to the programmer.
 The parameter type communicates transfer intent:
 
 ```huc
-fn inspect(const Widget* widget) -> void; // observe
-fn mutate(Widget* widget) -> void;        // observe and mutate
-fn consume(Widget*& widget) -> void;      // consume
+fn inspect(Widget* widget) -> void;      // read-only observation
+fn mutate(mod Widget* widget) -> void;   // writable observation
+fn consume(Widget& widget) -> void;      // consume
 ```
 
 Supplying an owner to a raw-pointer parameter is an implicit observation.
@@ -604,7 +627,7 @@ Returning `T*` never transfers or extends ownership.
 ### 6.11 Ownership and overload resolution
 
 An overload set must not contain two candidates whose corresponding parameter
-types differ only between `T*`/`const T*` and `T*&`. Such a set would make
+types differ only between `T*`/`mod T*` and `T&`. Such a set would make
 observation versus consumption depend on overload ranking and is a diagnostic.
 
 Use different names when the ownership behavior differs.
@@ -625,26 +648,27 @@ reference collapsing, or perfect forwarding.
 
 ### 7.2 Local declarations
 
-Runtime locals use type-first declarations:
+Runtime locals begin with `let`:
 
 ```huc
-i32 count = 0;
-auto result = compute();
-const i32 limit = 100;
+let i32 mod count = 0;
+let auto result = compute();
+let i32 limit = 100;
 ```
 
 `auto` requires an initializer and deduces exactly one type. It does not retain
 a reference or expression-category qualifier.
 
-Compile-time locals use `let1` or `var1`:
+Compiler-only locals use `let2`:
 
 ```huc
-let1 Type element = type_of(value);
-var1 usize generated = 0;
+let2 Type element = type_of(value);
+let2 usize mod generated = 0;
 ```
 
-`let1` cannot be reassigned. `var1` is mutable during translation. Neither
-creates runtime storage.
+`let2` never creates runtime storage. A trailing `mod` permits reassignment
+during translation. `let1` instead names a specialization family whose
+selected body must residualize one ordinary runtime `let`.
 
 ### 7.3 Conditions and loops
 
@@ -675,14 +699,14 @@ of HUC's contract.
 ### 8.1 Raw observers are unchecked
 
 ```huc
-Widget* saved;
+let Widget* mod saved;
 
 fn remember(Widget* widget) -> void {
     saved = widget;
 }
 
 fn example() -> void {
-    Widget*& owner = new Widget{};
+    let Widget& owner = new Widget();
     remember(owner);
 } // owner destroys Widget
 
@@ -695,10 +719,10 @@ The compiler does not infer or check a relationship between `saved` and
 ### 8.2 Conditional moves
 
 ```huc
-Widget*& owner = new Widget{};
+let Widget& mod owner = new Widget();
 
 if (condition) {
-    Widget*& local = owner;
+    let Widget& mod local = owner;
     consume(local);
 }
 
@@ -1029,7 +1053,7 @@ List[Function] Type.methods();
 usize Type.size();
 usize Type.align();
 bool Type.is_copy();
-bool Type.has_field(const c8* name);
+bool Type.has_field(c8* name);
 ```
 
 Metadata lists have stable source-declaration order. Handles are immutable and
@@ -1122,7 +1146,7 @@ translation-time behavior.
 HUC's first stable interoperation boundary is C:
 
 ```huc
-extern "C" fn fwrite(const u8* data, usize size, usize count, File* file)
+extern "C" fn fwrite(u8* data, usize size, usize count, File* file)
     -> usize;
 ```
 
@@ -1134,7 +1158,7 @@ An exported/imported C function may use:
 - explicitly C-layout structures;
 - C variadics where the platform ABI supports them.
 
-It must not expose `T*&`, HUC Move values with `drop`, phase-1/2 types, or
+It must not expose `T&`, HUC Move values with `drop`, phase-1/2 types, or
 compiler metadata. Ownership across C boundaries is expressed by documented
 functions returning or accepting raw pointers and explicit `adopt`/`release`
 at the HUC side.
@@ -1175,7 +1199,7 @@ The following require separate proposals:
 - arbitrary implicit conversions;
 - user-defined operator overloading;
 - dynamic runtime reflection;
-- stateful deleters in `T*&`;
+- stateful deleters in `T&`;
 - a stable HUC-to-HUC binary ABI;
 - compile-time network access or untracked host execution.
 
@@ -1190,10 +1214,10 @@ The closest C++ equivalents are:
 | HUC | Approximate C++ |
 |---|---|
 | `T*` | `T*` |
-| `T*&` | `std::unique_ptr<T>` |
-| `T*& b = a` | `auto b = std::move(a)` |
+| `T&` | `std::unique_ptr<T>` |
+| `let T& b = a` with writable `a` | `auto b = std::move(a)` |
 | `inspect(a)` where parameter is `T*` | `inspect(a.get())` |
-| `consume(a)` where parameter is `T*&` | `consume(std::move(a))` |
+| `consume(a)` where parameter is `T&` | `consume(std::move(a))` |
 | `copy a` | clone/copy construction, explicitly selected |
 | `fn1` | a subset spanning templates and `constexpr` |
 | `fn2` | roughly `consteval` plus meta facilities |
@@ -1231,18 +1255,21 @@ module demo.main;
 import std.io as io;
 
 struct Widget {
-    i32 value;
+    let i32 value;
 
-    fn clone() const -> Widget {
-        return Widget{this->value};
+    fn init(i32 value) : value(value) {
+    }
+
+    fn clone() -> Widget {
+        return Widget(this->value);
     }
 }
 
-fn inspect(const Widget* widget) -> void {
+fn inspect(Widget* widget) -> void {
     io::println(widget->value);
 }
 
-fn consume(Widget*& widget) -> void {
+fn consume(Widget& widget) -> void {
     inspect(widget);
 }
 
@@ -1261,14 +1288,14 @@ fn1 choose(bool greater = true)(auto left, auto right) -> auto {
 }
 
 export fn main() -> i32 {
-    Widget*& first = new Widget{7};
+    let Widget& mod first = new Widget(7);
     inspect(first);
 
-    Widget*& second = first;
-    Widget*& independent = copy second;
+    let Widget& mod second = first;
+    let Widget& independent = copy second;
 
-    i32 a = 3;
-    i32 b = 5;
+    let i32 a = 3;
+    let i32 b = 5;
     io::println(choose[true](a, b));
     io::println(@choose[false](3, 5));
 

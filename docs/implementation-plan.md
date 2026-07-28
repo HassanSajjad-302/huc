@@ -101,8 +101,8 @@ HUC0 contains:
 - `let` declarations;
 - `mod` permissions;
 - raw pointers `T*`;
-- unique owners `T*&`;
-- constructors, methods, and `drop`;
+- unique owners `T&`;
+- constructors, methods, `clone`, and `drop`;
 - runtime expressions and control flow;
 - local `let auto` inference.
 
@@ -148,10 +148,10 @@ let mod T* observer;       // fixed pointer; mutable T through it
 let T* mod observer;       // reseatable pointer; immutable T through it
 let mod T* mod observer;   // reseatable pointer; mutable T through it
 
-let T*& owner;             // fixed owner; immutable T through it
-let mod T*& owner;         // fixed owner; mutable T through it
-let T*& mod owner;         // movable/reseatable owner; immutable T
-let mod T*& mod owner;     // movable/reseatable owner; mutable T
+let T& owner;              // fixed owner; immutable T through it
+let mod T& owner;          // fixed owner; mutable T through it
+let T& mod owner;          // movable/reseatable owner; immutable T
+let mod T& mod owner;      // movable/reseatable owner; mutable T
 ```
 
 A containing object must itself be writable before a writable field or
@@ -173,8 +173,12 @@ HUC performs no lifetime tracking between a raw pointer and an owner.
 
 ### 5.3 Unique owners
 
-`T*&` is a primitive unique owner, not a C++ reference declarator. General
-`T&` does not exist.
+`T&` is a primitive unique owner, not a C++ reference declarator. General
+aliasing-reference types do not exist, and HUC has no `T&&` type. An owner may
+be null even though the same spelling denotes a reference in C++.
+
+Prefix `&expression` remains the raw address-of operation and produces `T*`.
+Its expression position is grammatically distinct from postfix `&` in a type.
 
 The default representation is one address-sized word:
 
@@ -189,8 +193,8 @@ The default representation is one address-sized word:
 Moving requires a writable source slot because moving modifies the source.
 
 ```huc
-let Widget*& mod source = new Widget(7);
-let Widget*& destination = source; // move; source becomes null
+let Widget& mod source = new Widget(7);
+let Widget& destination = source; // move; source becomes null
 ```
 
 Attempting to move from a fixed owner is a compile-time diagnostic.
@@ -201,12 +205,16 @@ Copy types include:
 
 - scalar arithmetic and boolean types;
 - raw pointers;
-- structures whose fields are all Copy and which do not declare `drop`.
+- fixed-size arrays of Copy elements;
+- structures whose fields are all Copy and which declare neither `clone` nor
+  `drop`.
 
 Move types include:
 
 - owners;
+- fixed-size arrays of Move elements;
 - structures containing a Move field;
+- structures declaring `clone`;
 - structures declaring `drop`.
 
 Synthesized moves copy Copy fields and move Move fields. A moved-from owner is
@@ -219,9 +227,16 @@ flow-sensitive use-after-move prevention.
 - a Copy type is copied;
 - a non-null owner allocates and copies its pointee;
 - a Move structure must supply a read-only `fn clone() -> T`;
+- a Move array is copied elementwise when its element type supports `copy`;
 - a raw pointer copy duplicates only the address.
 
-Move behavior cannot be overloaded.
+Declaring `clone` opts an otherwise fieldwise-Copy structure into Move. This
+prevents an ordinary binding from bypassing custom logical-copy behavior.
+
+Move behavior cannot be overloaded. The compiler always synthesizes it by
+copying Copy fields, moving Move fields, and deactivating the source. Exact
+self-move assignment is a no-op. A type requiring address stability should be
+placed behind `T&` or use an explicitly named relocation operation.
 
 ### 5.5 Construction and initialization
 
@@ -229,7 +244,7 @@ HUC0 uses constructors rather than aggregate brace initialization:
 
 ```huc
 let Widget value = Widget(7);
-let Widget*& mod owner = new Widget(7);
+let Widget& mod owner = new Widget(7);
 ```
 
 A constructor is named `init`:
@@ -281,6 +296,25 @@ fn drop() mod -> void {
 `drop` cannot be called directly. It executes before fields are destroyed in
 reverse declaration order.
 
+A Move structure may customize explicit logical copying with exactly one
+read-only method:
+
+```huc
+fn clone() -> T {
+    // return an independent T without modifying this
+}
+```
+
+Only an evaluated `copy` expression selects `clone`; ordinary binding never
+does, and source code cannot call `clone` directly or take its address. Copy
+assignment of a Move type is expressed as `destination = copy source`, which
+clones to a temporary, destroys the old destination, and moves the temporary
+into place. Users cannot customize implicit move construction or move
+assignment.
+
+The complete rules, diagnostics, and side-by-side C++20 examples are in
+[Value Semantics and Special Operations](value-semantics.md).
+
 HUC 0.1 has no exception unwinding. Process termination through panic need not
 run pending cleanup.
 
@@ -294,10 +328,17 @@ HUC evaluation is left-to-right for:
 - initializer expressions;
 - aggregate elements if aggregate syntax is added later.
 
+For a call, each argument expression and its corresponding parameter
+initialization complete before evaluation of the next argument begins. This
+makes combinations such as `receive(owner, owner)` deterministic: observation
+for the first parameter occurs before ownership transfer into the second.
+
 Earlier side effects complete before later operands begin. `&&` and `||`
 short-circuit, and only the selected arm of `?:` executes.
 
-The backend must insert temporaries rather than inherit a different C++ order.
+The backend must insert temporaries rather than inherit C++20's unspecified
+choice of argument order. Optimizers may still reorder pure computation when
+the change is not observable.
 
 ### 5.8 Runtime overloading
 
@@ -857,9 +898,12 @@ Implement:
 - `new T(args)`;
 - owner observation;
 - owner move initialization and assignment;
+- structural Copy/Move classification, including `clone` opting into Move;
 - self-move as a no-op;
 - `copy`;
 - `clone`;
+- clone-then-replace assignment;
+- fixed fieldwise movement with no user move hook;
 - user `drop`;
 - reverse field cleanup;
 - `adopt`, `release`, `reset`, and `swap` only if retained by the reconciled
@@ -870,6 +914,8 @@ Acceptance:
 - `sizeof(owner<T>) == sizeof(void*)`;
 - straight-line owner moves require no hidden state;
 - conditional aggregate moves use flags only when necessary;
+- raw-handle `drop` types move without duplicate cleanup;
+- ordinary binding never invokes `clone`;
 - sanitizers find no backend double destruction;
 - optimized operation counts match equivalent simple C++ owner code.
 
@@ -1082,6 +1128,9 @@ Include:
 - phase leaks;
 - move from fixed storage;
 - mutation without `mod`;
+- copying a Move type without `clone`;
+- malformed or duplicate `clone` and `drop` methods;
+- attempted custom move hooks;
 - constructor obligation failures;
 - ambiguous partial specialization;
 - false predicates leaving no candidate;
@@ -1098,7 +1147,9 @@ Compile generated C++20 and test:
 - constructors and field initialization order;
 - owner observation and consumption;
 - conditional moves;
-- explicit copy/clone;
+- Copy-value binding and assignment;
+- explicit copy/clone and clone-then-replace assignment;
+- synthesized fieldwise move, source deactivation, and self-move;
 - user `drop` and reverse field cleanup;
 - module imports;
 - full HUC1-to-program examples.

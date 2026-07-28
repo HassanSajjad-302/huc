@@ -25,12 +25,12 @@ fn1 print_all(auto... arguments) -> void {
 }
 
 struct1 FixedBuffer(Type T, usize count) {
-    [count]T values;
+    let [count]T mod values;
 }
 
 export fn main() -> i32 {
-    i32 left = 3;
-    i32 right = 5;
+    let i32 left = 3;
+    let i32 right = 5;
 
     // Generates and calls one concrete choose[true](i32, i32).
     io::println(choose[true](left, right));
@@ -41,7 +41,7 @@ export fn main() -> i32 {
     // Generates a concrete function with three runtime parameters.
     print_all(7, 2.5, "HUC");
 
-    FixedBuffer[i32, 16] buffer;
+    let FixedBuffer[i32, 16] mod buffer;
     buffer.values[0] = 11;
     return 0;
 }

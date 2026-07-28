@@ -11,8 +11,11 @@ Its two central ideas are:
   execution, generics, reflection, and code generation: `fn`, `fn1`, `fn2`,
   `if1`, `for1`, `struct1`, and `struct2`.
 - A small ownership model in which `T*` is an unchecked non-owning pointer and
-  `T*&` is a pointer-sized unique owner that moves automatically and destroys
+  `T&` is a pointer-sized unique owner that moves automatically and destroys
   its pointee automatically.
+
+HUC `T&` is an owning handle, not a C++ reference. HUC has no general reference
+type and no `T&&`.
 
 ```huc
 module readme.example;
@@ -30,16 +33,16 @@ fn inspect(Widget* widget) -> void {
     io::println(widget->value);
 }
 
-fn consume(Widget*& widget) -> void {
+fn consume(Widget& widget) -> void {
     inspect(widget);
 } // destroys widget unless it was moved elsewhere
 
 fn main() -> i32 {
-    let Widget*& mod first = new Widget(42);
+    let Widget& mod first = new Widget(42);
     inspect(first);                       // observes; first still owns
 
-    let Widget*& mod second = first;      // moves; first becomes null
-    let Widget*& third = copy second;     // explicit pointee duplication
+    let Widget& mod second = first;      // moves; first becomes null
+    let Widget& third = copy second;     // explicit pointee duplication
     consume(second);                      // consumes; second becomes null
     return 0;
 }
@@ -53,19 +56,22 @@ runtime cost, not static memory safety.
 ## Documents
 
 - [Controlling implementation plan](docs/implementation-plan.md)
+- [Value semantics and special operations](docs/value-semantics.md)
 - [Detailed use cases and examples](docs/use-cases-and-examples.md)
 - [HUC 0.1 language specification](docs/language-specification.md)
 - [Bootstrap transpiler architecture](docs/transpiler-architecture.md)
 - [Initial grammar](docs/huc.ebnf)
 - [Ownership example](examples/ownership.huc)
+- [Value-semantics example](examples/value-semantics.huc)
 - [Numbered-phase example](examples/phases.huc)
 
 ## Status
 
 HUC is at the design stage. There is not yet a compiler and the syntax is not
 stable. The implementation plan records the latest decisions and takes
-precedence where the older specification, grammar, architecture, or examples
-still show superseded syntax.
+precedence for staging and implementation. The value-semantics document records
+the current runtime lifecycle rules. Together they take precedence where the
+older specification, grammar, or architecture still shows superseded syntax.
 
 The implementation order is:
 
