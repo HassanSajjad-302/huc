@@ -1,195 +1,445 @@
-(* HUC 0.1 bootstrap grammar snapshot.
-   The controlling implementation plan remains authoritative while this file
-   is split into final HUC0 and HUC1 start symbols. This snapshot uses current
-   let/mod syntax and postfix & unique ownership. HUC & is not a C++ reference.
-   Semantic restrictions and precedence details are outside this grammar. *)
+(* HUC 0.1 bootstrap grammar.
 
-compilation-unit  = module-decl, { import-decl }, { declaration } ;
+   HUC0 and HUC1 have separate start symbols. Productions whose names end in
+   "-0" are accepted by the standalone HUC0 parser. Productions whose names
+   end in "-1" are accepted only by the HUC1 staging parser.
 
-module-decl       = "module", qualified-name, ";" ;
-import-decl       = "import", qualified-name, [ "as", identifier ], ";" ;
-qualified-name    = identifier, { ".", identifier } ;
+   A deferred-body is not tokenized during indexing. A delimiter scanner finds
+   its matching outer brace while accounting for nested braces, literals, and
+   comments. If selected, its contents are parsed later using the grammar
+   required by its inherited module, type, function, or block context.
 
-declaration       = [ "export" ],
-                    ( function-decl
-                    | struct-decl
-                    | type-alias
-                    | extern-decl
-                    | phase-if-decl ) ;
+   Semantic restrictions such as phase availability, fixed-global
+   initialization, family partial ordering, and addressof permissions remain
+   normative in the language specification. *)
 
-function-decl     = function-head, ( block | ";" ) ;
-function-head     = function-keyword, identifier,
-                     [ compile-parameter-list ],
-                     parameter-list,
-                     [ "mod" ],
-                    "->", type,
-                    [ where-clause ] ;
-function-keyword  = "fn" | "fn1" | "fn2" ;
+huc0-compilation-unit
+                  = module-decl, { runtime-import }, { module-item-0 } ;
 
-compile-parameter-list
-                  = "(", compile-parameter,
-                    { ",", compile-parameter }, [ "," ], ")" ;
-compile-parameter = type, identifier, [ "=", expression ] ;
+huc1-compilation-unit
+                  = module-decl, { import-decl-1 }, { module-item-1 } ;
 
-parameter-list    = "(", [ parameter, { ",", parameter }, [ "," ] ], ")" ;
-parameter         = ( type | "auto" ), [ "mod" ], [ "..." ], identifier ;
-where-clause      = "where1", "(", expression, ")" ;
+module-decl       = "module", qualified-module-name, ";" ;
+runtime-import    = "import", qualified-module-name,
+                    [ "as", identifier ], ";" ;
+compiler-import   = "import2", qualified-module-name,
+                    [ "as", identifier ], ";" ;
+import-decl-1     = runtime-import | compiler-import ;
 
-struct-decl       = struct-keyword, identifier,
-                    [ compile-parameter-list ], struct-body, [ ";" ] ;
-struct-keyword    = "struct" | "struct1" | "struct2" ;
-struct-body       = "{", { member-decl }, "}" ;
-member-decl       = field-decl
-                  | function-decl
-                  | visibility-label
-                  | phase-if-decl ;
-field-decl        = "let", type, [ "mod" ], identifier,
-                    [ "=", expression ], ";" ;
-visibility-label  = ( "public" | "private" ), ":" ;
+qualified-module-name
+                  = identifier, { ".", identifier } ;
+symbol-path       = identifier, { "::", identifier } ;
 
-type-alias        = "type", identifier, "=", type, ";" ;
-extern-decl       = "extern", string-literal, function-decl ;
+(* ---------- HUC0 module and type declarations ---------- *)
 
-phase-if-decl     = "if1", "(", expression, ")", declaration-block,
-                    [ "else", declaration-block ] ;
-declaration-block = "{", { declaration | member-decl }, "}" ;
+module-item-0     = runtime-declaration-0 ;
 
-type              = [ "mod" ], type-primary, { type-suffix } ;
-type-primary      = builtin-type
-                  | symbol-path, [ compile-argument-list ]
-                  | "[", expression, "]", type ;
-type-suffix       = "*" | "&" ;
+runtime-declaration-0
+                  = function-decl-0
+                  | struct-decl-0
+                  | global-let-decl-0
+                  | type-alias-decl-0
+                  | extern-function-decl-0 ;
+
+function-decl-0   = function-signature-0, ( block-0 | ";" ) ;
+function-signature-0
+                  = "fn", identifier, parameter-list-0,
+                    [ "mod" ], "->", type-0 ;
+
+constructor-decl-0
+                  = "fn", "init", parameter-list-0,
+                    [ constructor-initializer-list-0 ], block-0 ;
+
+constructor-initializer-list-0
+                  = ":", field-initializer-0,
+                    { ",", field-initializer-0 } ;
+field-initializer-0
+                  = identifier, argument-list-0 ;
+
+struct-decl-0     = "struct", identifier, "{",
+                    { struct-member-0 }, "}", [ ";" ] ;
+struct-member-0   = field-decl-0
+                  | function-decl-0
+                  | constructor-decl-0 ;
+
+field-decl-0      = "let", type-0, [ "mod" ], identifier,
+                    [ "=", expression-0 ], ";" ;
+global-let-decl-0 = field-decl-0 ;
+
+type-alias-decl-0 = "type", identifier, "=", type-0, ";" ;
+
+extern-function-decl-0
+                  = "extern", string-literal,
+                    function-signature-0, ";" ;
+
+(* ---------- HUC1 module and type declarations ---------- *)
+
+module-item-1     = runtime-declaration-1
+                  | phase1-family-decl
+                  | phase2-function-decl
+                  | phase2-struct-decl
+                  | global-let2-decl
+                  | phase-control-item
+                  | phase-expression-item ;
+
+runtime-declaration-1
+                  = function-decl-1
+                  | struct-decl-1
+                  | global-let-decl-1
+                  | type-alias-decl-1
+                  | extern-function-decl-1 ;
+
+function-decl-1   = function-signature-1, ( block-1 | ";" ) ;
+function-signature-1
+                  = "fn", identifier, parameter-list-1,
+                    [ "mod" ], "->", type-1 ;
+
+constructor-decl-1
+                  = "fn", "init", parameter-list-1,
+                    [ constructor-initializer-list-1 ], block-1 ;
+
+constructor-initializer-list-1
+                  = ":", field-initializer-1,
+                    { ",", field-initializer-1 } ;
+field-initializer-1
+                  = identifier, argument-list-1 ;
+
+struct-decl-1     = "struct", identifier, "{",
+                    { struct-member-1 }, "}", [ ";" ] ;
+struct-member-1   = field-decl-1
+                  | function-decl-1
+                  | constructor-decl-1
+                  | phase1-function-decl
+                  | phase-control-item
+                  | phase-expression-item ;
+
+field-decl-1      = "let", type-1, [ "mod" ], identifier,
+                    [ "=", expression-1 ], ";" ;
+global-let-decl-1 = field-decl-1 ;
+type-alias-decl-1 = "type", identifier, "=", type-1, ";" ;
+
+extern-function-decl-1
+                  = "extern", string-literal,
+                    function-signature-1, ";" ;
+
+(* ---------- Phase-1 families ---------- *)
+
+phase1-family-decl
+                  = phase1-function-decl
+                  | phase1-struct-decl
+                  | phase1-let-decl ;
+
+phase1-function-decl
+                  = "fn1", identifier, phase-binder-list,
+                    [ specialization-header ],
+                    parameter-list-1, [ "mod" ], "->", type-1,
+                    deferred-body ;
+
+phase1-struct-decl
+                  = "struct1", identifier, phase-binder-list,
+                    [ specialization-header ], deferred-body ;
+
+phase1-let-decl   = "let1", phase-binder-list,
+                    [ specialization-header ], identifier,
+                    deferred-body ;
+
+phase-binder-list = "(", [ phase-binder,
+                    { ",", phase-binder }, [ "," ] ], ")" ;
+phase-binder      = ( "auto" | type-1 ), identifier,
+                    [ "=", expression-1 ] ;
+
+specialization-header
+                  = phase-pattern-list, [ phase-predicate ] ;
+phase-pattern-list
+                  = "<", phase-argument,
+                    { ",", phase-argument }, [ "," ], ">" ;
+phase-predicate   = "(", expression-1, ")" ;
+
+phase-argument-list
+                  = "<", [ phase-argument,
+                    { ",", phase-argument }, [ "," ] ], ">" ;
+phase-argument    = type-pattern | expression-1 ;
+
+type-pattern      = [ "mod" ], type-pattern-primary, [ "*" | "&" ] ;
+type-pattern-primary
+                  = builtin-type
+                  | symbol-path, [ phase-argument-list ] ;
+
+(* Open-ended phase packs are intentionally absent from 0.1. *)
+
+(* ---------- Phase-2 declarations ---------- *)
+
+phase2-function-decl
+                  = phase2-function-signature, ( block-1 | ";" ) ;
+phase2-function-signature
+                  = "fn2", identifier, parameter-list-1,
+                    [ "mod" ], "->", type-1 ;
+
+phase2-constructor-decl
+                  = "fn2", "init", parameter-list-1,
+                    [ constructor-initializer-list-1 ], block-1 ;
+
+phase2-struct-decl
+                  = "struct2", identifier, "{",
+                    { phase2-struct-member }, "}", [ ";" ] ;
+phase2-struct-member
+                  = let2-decl
+                  | phase2-function-decl
+                  | phase2-constructor-decl
+                  | phase-control-item
+                  | phase-expression-item ;
+
+let2-decl         = "let2", ( type-1 | "auto" ), [ "mod" ], identifier,
+                    [ "=", expression-1 ], ";" ;
+global-let2-decl  = let2-decl ;
+
+(* ---------- Phase control and erased expression items ---------- *)
+
+phase-control-item
+                  = phase-if-item
+                  | phase-for-item
+                  | phase-while-item ;
+
+phase-if-item     = "if1", "(", expression-1, ")", deferred-body,
+                    [ "else", deferred-body ] ;
+phase-for-item    = "for1", "(", "let2", ( type-1 | "auto" ),
+                    [ "mod" ], identifier, ":", expression-1, ")",
+                    deferred-body ;
+phase-while-item  = "while1", "(", expression-1, ")", deferred-body ;
+
+phase-expression-item
+                  = "@", unary-expression-1, ";" ;
+
+deferred-body     = "{", ? scanner-delimited opaque source span ?, "}" ;
+
+(* A selected deferred body is reparsed according to the lexical place that
+   contains it. A module or type body may mix residual declarations/members
+   with compiler-only statements. A function or nested-block body uses the
+   ordinary mixed HUC1 block grammar. The phase checker, rather than this
+   context grammar, decides whether an ordinary expression/control statement
+   has only compiler-available operands and therefore executes and erases. *)
+
+selected-module-body
+                  = "{", { module-item-1
+                    | compiler-statement-1 }, "}" ;
+selected-type-body
+                  = "{", { struct-member-1
+                    | compiler-statement-1 }, "}" ;
+selected-function-or-block-body
+                  = block-1 ;
+
+compiler-statement-1
+                  = compiler-block-1
+                  | let2-decl
+                  | phase-control-item
+                  | phase-expression-item
+                  | compiler-if-statement-1
+                  | compiler-while-statement-1
+                  | compiler-for-statement-1
+                  | "break", ";"
+                  | "continue", ";"
+                  | expression-statement-1 ;
+compiler-block-1  = "{", { compiler-statement-1 }, "}" ;
+compiler-if-statement-1
+                  = "if", "(", expression-1, ")",
+                    compiler-statement-1,
+                    [ "else", compiler-statement-1 ] ;
+compiler-while-statement-1
+                  = "while", "(", expression-1, ")",
+                    compiler-statement-1 ;
+compiler-for-statement-1
+                  = "for", "(", [ expression-1 ], ";",
+                    [ expression-1 ], ";", [ expression-1 ], ")",
+                    compiler-statement-1 ;
+
+(* ---------- Types ---------- *)
+
+type-0            = [ "mod" ], type-primary-0, [ "*" | "&" ] ;
+type-primary-0    = builtin-type | symbol-path ;
+
+type-1            = [ "mod" ], type-primary-1, [ "*" | "&" ] ;
+type-primary-1    = builtin-type
+                  | symbol-path, [ phase-argument-list ] ;
+
 builtin-type      = "bool" | "c8"
                   | "i8" | "i16" | "i32" | "i64" | "isize"
                   | "u8" | "u16" | "u32" | "u64" | "usize"
-                  | "f32" | "f64" | "void" | "never"
-                  | "Type" ;
+                  | "f32" | "f64" | "void" | "never" ;
 
-compile-argument-list
-                  = "[", [ expression, { ",", expression }, [ "," ] ], "]" ;
+(* The optional terminal suffix admits exactly T* or T&. Because type-primary
+   never contains a terminal suffix, T**, T*&, T&*, and T&& do not parse.
+   HUC0 nominal types never have phase arguments. *)
 
-block             = "{", { statement }, "}" ;
-statement         = block
-                  | local-decl
-                  | compile-local-decl
-                  | if-stmt
-                  | phase-if-stmt
-                  | while-stmt
-                  | phase-while-stmt
-                  | for-stmt
-                  | phase-for-stmt
-                  | return-stmt
-                  | break-stmt
-                  | continue-stmt
-                  | emit-stmt
-                  | expression-stmt ;
+(* ---------- Parameters and blocks ---------- *)
 
-local-decl        = "let", ( type | "auto" ), [ "mod" ], identifier,
-                     [ "=", expression ], ";" ;
-compile-local-decl
-                  = "let2", ( type | "auto" ), [ "mod" ], identifier,
-                     "=", expression, ";" ;
+parameter-list-0  = "(", [ parameter-0,
+                    { ",", parameter-0 }, [ "," ] ], ")" ;
+parameter-0       = type-0, [ "mod" ], identifier ;
 
-if-stmt           = "if", "(", expression, ")", statement,
-                    [ "else", statement ] ;
-phase-if-stmt     = "if1", "(", expression, ")", statement,
-                    [ "else", statement ] ;
-while-stmt        = "while", "(", expression, ")", statement ;
-phase-while-stmt  = "while1", "(", expression, ")", statement ;
+parameter-list-1  = "(", [ parameter-1,
+                    { ",", parameter-1 }, [ "," ] ], ")" ;
+parameter-1       = type-1, [ "mod" ], identifier ;
 
-for-stmt          = "for", "(", [ expression ], ";", [ expression ], ";",
-                    [ expression ], ")", statement ;
-phase-for-stmt    = "for1", "(", ( type | "auto" ), identifier, ":",
-                    expression, ")", statement ;
+block-0           = "{", { statement-0 }, "}" ;
+statement-0       = block-0
+                  | local-let-decl-0
+                  | if-statement-0
+                  | while-statement-0
+                  | for-statement-0
+                  | return-statement-0
+                  | "break", ";"
+                  | "continue", ";"
+                  | expression-statement-0 ;
 
-return-stmt       = "return", [ expression ], ";" ;
-break-stmt        = "break", ";" ;
-continue-stmt     = "continue", ";" ;
-emit-stmt         = "emit", expression, ";"
-                  | "gen", quote-block
-                  | "gen_global", quote-block ;
-expression-stmt   = expression, ";" ;
+local-let-decl-0  = "let", ( type-0 | "auto" ), [ "mod" ], identifier,
+                    [ "=", expression-0 ], ";" ;
+if-statement-0    = "if", "(", expression-0, ")", statement-0,
+                    [ "else", statement-0 ] ;
+while-statement-0 = "while", "(", expression-0, ")", statement-0 ;
+for-statement-0   = "for", "(", [ expression-0 ], ";",
+                    [ expression-0 ], ";", [ expression-0 ], ")",
+                    statement-0 ;
+return-statement-0
+                  = "return", [ expression-0 ], ";" ;
+expression-statement-0
+                  = expression-0, ";" ;
 
-expression        = assignment-expression ;
-assignment-expression
-                  = conditional-expression,
-                    [ assignment-op, assignment-expression ] ;
-assignment-op     = "=" | "+=" | "-=" | "*=" | "/=" | "%="
-                  | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
+block-1           = "{", { statement-1 }, "}" ;
+statement-1       = block-1
+                  | local-let-decl-1
+                  | let2-decl
+                  | phase1-let-decl
+                  | phase-control-item
+                  | phase-expression-item
+                  | if-statement-1
+                  | while-statement-1
+                  | for-statement-1
+                  | return-statement-1
+                  | "break", ";"
+                  | "continue", ";"
+                  | expression-statement-1 ;
 
-conditional-expression
-                  = logical-or-expression,
-                    [ "?", expression, ":", conditional-expression ] ;
-logical-or-expression
-                  = logical-and-expression, { "||", logical-and-expression } ;
-logical-and-expression
-                  = bitwise-or-expression, { "&&", bitwise-or-expression } ;
-bitwise-or-expression
-                  = bitwise-xor-expression, { "|", bitwise-xor-expression } ;
-bitwise-xor-expression
-                  = bitwise-and-expression, { "^", bitwise-and-expression } ;
-bitwise-and-expression
-                  = equality-expression, { "&", equality-expression } ;
-equality-expression
-                  = relational-expression, { ( "==" | "!=" ),
-                    relational-expression } ;
-relational-expression
-                  = shift-expression, { ( "<" | ">" | "<=" | ">=" ),
-                    shift-expression } ;
-shift-expression  = additive-expression, { ( "<<" | ">>" ),
-                    additive-expression } ;
-additive-expression
-                  = multiplicative-expression, { ( "+" | "-" ),
-                    multiplicative-expression } ;
-multiplicative-expression
-                  = unary-expression, { ( "*" | "/" | "%" ),
-                    unary-expression } ;
+local-let-decl-1  = "let", ( type-1 | "auto" ), [ "mod" ], identifier,
+                    [ "=", expression-1 ], ";" ;
+if-statement-1    = "if", "(", expression-1, ")", statement-1,
+                    [ "else", statement-1 ] ;
+while-statement-1 = "while", "(", expression-1, ")", statement-1 ;
+for-statement-1   = "for", "(", [ expression-1 ], ";",
+                    [ expression-1 ], ";", [ expression-1 ], ")",
+                    statement-1 ;
+return-statement-1
+                  = "return", [ expression-1 ], ";" ;
+expression-statement-1
+                  = expression-1, ";" ;
 
-unary-expression  = postfix-expression
-                  | ( "+" | "-" | "!" | "~" | "*" | "&" | "@" ),
-                    unary-expression
-                  | "copy", unary-expression
-                  | "new", type, argument-list ;
+(* ---------- Expressions ---------- *)
 
-postfix-expression
-                  = primary-expression,
-                    { argument-list
-                    | compile-argument-list
-                    | "[", expression, "]"
+expression-0      = assignment-expression-0 ;
+assignment-expression-0
+                  = conditional-expression-0,
+                    [ assignment-op, assignment-expression-0 ] ;
+conditional-expression-0
+                  = binary-expression-0,
+                    [ "?", expression-0, ":", conditional-expression-0 ] ;
+binary-expression-0
+                  = unary-expression-0,
+                    { binary-op, unary-expression-0 } ;
+unary-expression-0
+                  = postfix-expression-0
+                  | ( "+" | "-" | "!" | "~" | "*" ),
+                    unary-expression-0
+                  | "copy", unary-expression-0
+                  | "new", type-0, argument-list-0 ;
+postfix-expression-0
+                  = primary-expression-0,
+                    { argument-list-0
+                    | "[", expression-0, "]"
                     | ".", identifier
                     | "->", identifier
                     | "++"
                     | "--" } ;
-
-argument-list     = "(", [ expression, { ",", expression }, [ "," ] ], ")" ;
-aggregate-initializer
-                  = "{", [ expression, { ",", expression }, [ "," ] ], "}" ;
-
-primary-expression
+argument-list-0   = "(", [ expression-0,
+                    { ",", expression-0 }, [ "," ] ], ")" ;
+primary-expression-0
                   = symbol-path
+                  | builtin-type
                   | literal
                   | "this"
                   | "null"
-                  | "(", expression, ")"
-                  | quote-expression
-                  | splice-expression ;
+                  | "(", expression-0, ")"
+                  | type-intrinsic-call-0 ;
 
-quote-expression  = "quote", quote-block ;
-quote-block       = "{", { quote-token | splice-expression }, "}" ;
-splice-expression = "$(", expression, ")" ;
+type-intrinsic-call-0
+                  = ( "as" | "ptr_as" | "adopt" ),
+                    "<", type-0, ">", argument-list-0 ;
+
+expression-1      = assignment-expression-1 ;
+assignment-expression-1
+                  = conditional-expression-1,
+                    [ assignment-op, assignment-expression-1 ] ;
+conditional-expression-1
+                  = binary-expression-1,
+                    [ "?", expression-1, ":", conditional-expression-1 ] ;
+binary-expression-1
+                  = unary-expression-1,
+                    { binary-op, unary-expression-1 } ;
+unary-expression-1
+                  = postfix-expression-1
+                  | ( "+" | "-" | "!" | "~" | "*" | "@" ),
+                    unary-expression-1
+                  | "copy", unary-expression-1
+                  | "new", type-1, argument-list-1 ;
+postfix-expression-1
+                  = primary-expression-1,
+                    { argument-list-1
+                    | phase-argument-list
+                    | "[", expression-1, "]"
+                    | "::", identifier
+                    | ".", identifier
+                    | "->", identifier
+                    | "++"
+                    | "--" } ;
+argument-list-1   = "(", [ expression-1,
+                    { ",", expression-1 }, [ "," ] ], ")" ;
+primary-expression-1
+                  = symbol-path
+                  | builtin-type
+                  | literal
+                  | "this"
+                  | "null"
+                  | "(", expression-1, ")"
+                  | type-intrinsic-call-1 ;
+
+type-intrinsic-call-1
+                  = ( "as" | "ptr_as" | "adopt" ),
+                    "<", type-1, ">", argument-list-1 ;
+
+assignment-op     = "=" | "+=" | "-=" | "*=" | "/=" | "%="
+                  | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
+
+binary-op         = "||" | "&&"
+                  | "|" | "^" | "&"
+                  | "==" | "!="
+                  | "<" | ">" | "<=" | ">="
+                  | "<<" | ">>"
+                  | "+" | "-"
+                  | "*" | "/" | "%" ;
+
+(* binary-op is written compactly here. The binding powers and left/right
+   associativity are those specified by the Pratt-parser table in the
+   implementation and language specification. There is no unary "&".
+   addressof(place) is a compiler-known, non-overloadable ordinary call form. *)
 
 literal           = integer-literal
                   | float-literal
-                  | string-literal
+                  | string-sequence
                   | character-literal
                   | "true"
                   | "false" ;
+string-sequence   = string-literal, { string-literal } ;
 
 identifier        = ? ASCII identifier token ? ;
 integer-literal   = ? integer literal token ? ;
 float-literal     = ? floating-point literal token ? ;
 string-literal    = ? UTF-8 string literal token ? ;
 character-literal = ? character or byte literal token ? ;
-quote-token       = ? any balanced HUC token other than a splice ? ;
-
-symbol-path       = identifier, { "::", identifier } ;

@@ -1,3 +1,4 @@
+// Runtime-only HUC0 example.
 module examples.value_semantics;
 
 import std.io as io;
@@ -51,6 +52,20 @@ struct NativeBuffer {
     }
 }
 
+// AddressDependent is Move because its empty drop suppresses implicit Copy.
+// Its self pointer makes inline destructive relocation invalid unless the
+// programmer can prove the pointer will never be used afterward.
+struct AddressDependent {
+    let AddressDependent* mod self;
+
+    fn init() : self(null) {
+        this->self = this;
+    }
+
+    fn drop() mod -> void {
+    }
+}
+
 fn receive(NativeBuffer* observed, NativeBuffer& owned) -> u8 {
     // owned keeps the allocation alive for the duration of this call.
     if (!owned) {
@@ -67,21 +82,24 @@ fn demonstrate_copy_values() -> void {
     io::println(first.x, second.x, third.x);
 }
 
-fn demonstrate_inline_move_values() -> void {
+fn demonstrate_inline_relocation() -> void {
     let NativeBuffer mod original = NativeBuffer(64);
     original.fill(7);
 
-    let NativeBuffer duplicate = copy original; // calls clone
-    let NativeBuffer mod moved = original;       // fixed synthesized move
-    // original is inactive here.
+    let NativeBuffer duplicate = copy original; // invokes the clone protocol
+    // Fixed destructive relocation transfers fields without calling a user
+    // move/relocation constructor. original's lifetime ends; neither its drop
+    // nor its field cleanup runs, and its storage is now inactive.
+    let NativeBuffer mod relocated = original;
 
-    moved = moved;                  // exact self-move is a no-op
+    relocated = relocated;         // exact self-relocation is a no-op
     original = NativeBuffer(32);    // reinitializes inactive storage
 
     let NativeBuffer mod target = NativeBuffer(8);
-    target = copy duplicate;        // clone, drop old target, move replacement
+    // Clone a temporary, drop old target, then relocate the replacement.
+    target = copy duplicate;
 
-    io::println(duplicate.first(), moved.first(), target.first());
+    io::println(duplicate.first(), relocated.first(), target.first());
 }
 
 fn demonstrate_owner_values() -> void {
@@ -92,16 +110,28 @@ fn demonstrate_owner_values() -> void {
     let NativeBuffer& duplicate = copy buffer; // deep owner copy
 
     // Arguments are evaluated left-to-right. The observer is captured first;
-    // ownership is then moved into receive's second parameter.
+    // ownership is then relocated into receive's second parameter.
     let u8 first_byte = receive(buffer, buffer);
     // buffer is null and observer is dangling after receive returns.
 
     io::println(first_byte, duplicate->first());
 }
 
-export fn main() -> i32 {
+fn demonstrate_address_stability() -> void {
+    // Relocating an inline AddressDependent would leave its self pointer aimed
+    // at inactive source storage. HUC neither repairs nor diagnoses that
+    // unchecked contract. Put it behind T& so only the owner address relocates.
+    let AddressDependent& mod first = new AddressDependent();
+    let AddressDependent& second = first;
+    let AddressDependent* observer = second;
+
+    io::println(second->self == observer);
+}
+
+fn main() -> i32 {
     demonstrate_copy_values();
-    demonstrate_inline_move_values();
+    demonstrate_inline_relocation();
     demonstrate_owner_values();
+    demonstrate_address_stability();
     return 0;
 }

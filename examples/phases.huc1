@@ -1,0 +1,163 @@
+// Staged HUC1 example; all numbered constructs disappear in emitted HUC0.
+module examples.phases;
+
+import std.io as io;
+import2 compiler;
+
+// All let2 storage and every numbered construct disappear in generated HUC0.
+let2 bool BuildDiagnostics = true;
+
+// Module-scope phase control inserts a module declaration at this position.
+if1 (BuildDiagnostics) {
+    fn build_mode() -> c8* {
+        return "diagnostic";
+    }
+} else {
+    this skipped body is deliberately not valid HUC !!!
+}
+
+// Type-body phase control selects members before the runtime layout is checked.
+struct Report {
+    if1 (BuildDiagnostics) {
+        let u64 mod messages;
+    } else {
+        let u32 mod messages;
+    }
+}
+
+// A structure family has one primary, a pointer partial specialization, and a
+// bool full specialization. Requests use angle brackets.
+struct1 Cell(auto T) {
+    let T mod value;
+}
+
+struct1 Cell(auto T)<T*>(true) {
+    let T* mod value;
+}
+
+struct1 Cell()<bool> {
+    let bool mod value;
+}
+
+struct1 CountedCell(auto T, usize Count) {
+    let T mod value;
+    let usize count = Count;
+
+    fn capacity() -> usize {
+        return this->count;
+    }
+}
+
+// Function families use the same primary/partial/full pattern syntax.
+fn1 describe(auto T)(T value) -> c8* {
+    return "value";
+}
+
+fn1 describe(auto T)<T*>(true)(T* value) -> c8* {
+    if (value) {
+        return "non-null pointer";
+    }
+    return "null pointer";
+}
+
+fn1 describe()<bool>(bool value) -> c8* {
+    if (value) {
+        return "true";
+    }
+    return "false";
+}
+
+// The first list contains phase binders; the second contains runtime
+// parameters. if1 selects runtime syntax while ordinary if remains runtime.
+fn1 choose(auto T, bool Greater = true)(T mod left, T mod right) -> T {
+    if1 (Greater) {
+        if (left > right) {
+            return left;
+        }
+        return right;
+    } else {
+        if (left < right) {
+            return left;
+        }
+        return right;
+    }
+}
+
+struct2 BuildRecord {
+    let2 usize generated_declarations;
+    let2 bool used_raw_generation;
+}
+
+fn2 add_at_compile_time(i32 left, i32 right) -> i32 {
+    let2 i32 sum = left + right;
+    return sum;
+}
+
+// A compiler helper emits at its inherited call-site cursor, not here beside
+// its definition.
+fn2 declare_local_counter() -> void {
+    compiler::emit_huc("let i32 mod generated_counter = 0;");
+}
+
+// This raw HUC0 declaration is appended to this module's generated buffer.
+@compiler::emit_huc_module(
+    "fn generated_answer() -> i32 { return 42; }"
+);
+
+fn main() -> i32 {
+    let i32 left = 3;
+    let i32 right = 5;
+
+    // Normal fn1 calls produce and call concrete runtime functions.
+    let i32 greater = choose<i32, true>(left, right);
+    io::println(greater);
+    io::println(describe<i32>(greater));
+
+    let Cell<i32> mod integer_cell;
+    integer_cell.value = greater;
+
+    let Cell<i32*> mod pointer_cell;
+    pointer_cell.value = addressof(integer_cell.value);
+    io::println(describe<i32*>(pointer_cell.value));
+
+    let Cell<bool> mod bool_cell;
+    bool_cell.value = true;
+    io::println(describe<bool>(bool_cell.value));
+
+    let CountedCell<i32, 4> mod buffer;
+    buffer.value = left + right;
+    io::println(buffer.capacity());
+
+    // One variable family can residualize different runtime let declarations.
+    let1(auto T) slot {
+        let T slot = T();
+    }
+
+    let1(auto T)<T*>(true) slot {
+        let T* mod slot = null;
+    }
+
+    let1()<bool> slot {
+        let bool mod slot = false;
+    }
+
+    io::println(slot<i32>);
+    slot<i32*> = pointer_cell.value;
+    slot<bool> = true;
+
+    // @ forces complete compiler evaluation and embeds the resulting literals.
+    let i32 folded = @add_at_compile_time(20, 22);
+    let i32 smaller = @choose<i32, false>(3, 5);
+    io::println(folded + smaller);
+
+    // The nested helper call inherits this block cursor. The emitted text is
+    // parsed only by the second-round HUC0 translator.
+    @declare_local_counter();
+    generated_counter += 1;
+
+    if1 (BuildDiagnostics) {
+        io::println(build_mode());
+    }
+
+    return generated_counter + generated_answer();
+}

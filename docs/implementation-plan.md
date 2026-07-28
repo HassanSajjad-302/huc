@@ -4,7 +4,7 @@ Status: controlling implementation plan
 
 Language name: HUC, “Hassan’s Update on C”
 
-Implementation language: C++20
+Implementation language: C17
 
 First backend: C++20
 
@@ -23,11 +23,11 @@ testable translators:
 ```text
 HUC1 source
     |
-    | huc1::expand
+    | huc1_expand
     v
 printable per-module HUC0 source
     |
-    | huc0::transpile
+    | huc0_transpile
     v
 C++20 headers + one root translation unit
 ```
@@ -51,7 +51,7 @@ HUC is not a memory-safe Rust alternative. It deliberately permits:
 - null dereferences;
 - unchecked indexing and pointer arithmetic;
 - invalid adoption of allocations;
-- use of inactive moved-from storage;
+- use of inactive source storage after relocation;
 - data races;
 - signed overflow and other specified undefined behavior.
 
@@ -98,10 +98,12 @@ HUC0 contains:
 
 - modules and runtime imports;
 - runtime functions and structures;
+- type aliases and fixed-signature C declarations;
 - `let` declarations;
 - `mod` permissions;
 - raw pointers `T*`;
 - unique owners `T&`;
+- `addressof` and the core type-operand intrinsics;
 - constructors, methods, `clone`, and `drop`;
 - runtime expressions and control flow;
 - local `let auto` inference.
@@ -114,6 +116,13 @@ HUC0 does not contain:
 - compiler-only values or handles;
 - raw generation operations;
 - unresolved `auto` parameters or inferred function results.
+
+The angle operands in `as<T>`, `ptr_as<T*>`, and `adopt<T>` are
+built-in type operands, not phase-family requests. They are the only angle
+forms accepted by HUC0.
+
+Primitive fixed arrays, `bit_as`, and primitive owner `swap` are deferred from
+0.1. Containers and swapping can initially be supplied by libraries.
 
 ### 4.2 HUC1
 
@@ -143,20 +152,34 @@ let i32 mod counter;       // writable scalar, initialized to zero
 `mod` is layer-sensitive:
 
 ```huc
-let T* observer;           // fixed pointer; immutable T through it
-let mod T* observer;       // fixed pointer; mutable T through it
-let T* mod observer;       // reseatable pointer; immutable T through it
-let mod T* mod observer;   // reseatable pointer; mutable T through it
+let T* observer;           // fixed pointer field; constructor obligation
+let mod T* observer;       // fixed field; mutable T; constructor obligation
+let T* mod observer;       // reseatable pointer field; defaults to null
+let mod T* mod observer;   // reseatable field; mutable T; defaults to null
 
-let T& owner;              // fixed owner; immutable T through it
-let mod T& owner;          // fixed owner; mutable T through it
-let T& mod owner;          // movable/reseatable owner; immutable T
-let mod T& mod owner;      // movable/reseatable owner; mutable T
+let T& owner;              // fixed owner field; constructor obligation
+let mod T& owner;          // fixed field; mutable T; constructor obligation
+let T& mod owner;          // movable/reseatable owner field; defaults to null
+let mod T& mod owner;      // reseatable field; mutable T; defaults to null
 ```
 
-A containing object must itself be writable before a writable field or
-writable-receiver method can be used. A `mod` field does not bypass a fixed
-containing object.
+These uninitialized spellings illustrate structure fields. A fixed local or
+global requires an initializer. In a structure, each fixed field without a
+declaration initializer must be supplied by every constructor; mutable pointer
+and owner fields omitted by a constructor default to null.
+
+Runtime globals in HUC0 are limited to drop-free Copy scalars and raw
+pointers. Fixed globals require constant initializers. Mutable globals may omit
+an initializer and become zero or null. Move globals, owners, structure
+globals, runtime initialization code, and global destruction are deferred.
+
+A fixed containing object prevents assignment to one of its field slots and
+prevents writable access to an inline field subobject. It does not erase
+permission explicitly carried through a pointer or owner field to a separate
+pointee. Thus a read-only structure may follow a `mod T*` or `mod T&` field and
+mutate that `T`, while it still cannot reseat the field or call a writable
+method on an inline field. This is the layer-specific behavior shown above,
+not an interior-mutation escape for inline storage.
 
 ### 5.2 Raw pointers
 
@@ -177,27 +200,43 @@ HUC performs no lifetime tracking between a raw pointer and an owner.
 aliasing-reference types do not exist, and HUC has no `T&&` type. An owner may
 be null even though the same spelling denotes a reference in C++.
 
-Prefix `&expression` remains the raw address-of operation and produces `T*`.
-Its expression position is grammatically distinct from postfix `&` in a type.
+HUC0 has no unary `&` expression. The non-overloadable
+`addressof(inline_place)` intrinsic produces `T*` for a fixed inline `T` place
+and `mod T*` for a writable inline `T` place. It rejects raw-pointer and owner
+slots because their addresses would require a forbidden composed type.
+
+HUC0 has only the raw-pointer constructor `T*` and the unique-owner constructor
+`T&`. Neither constructor composes: `T**`, `T*&`, `T&*`, `T&&`, and equivalent
+alias-hidden forms are diagnostics. Writing an owner expression in a `T*`
+observer context accesses the owned pointee; it does not take the owner slot's
+address. Direct owner-slot reseating therefore uses consume-and-return rather
+than an aliasing owner reference. Binary `&` remains bitwise AND.
 
 The default representation is one address-sized word:
 
 - null owns nothing;
 - non-null owns exactly one dynamically allocated `T`;
 - destruction drops the pointee and deallocates its storage;
-- move copies the address and clears the source;
+- relocation copies the address and clears the source;
 - owner arithmetic is prohibited;
 - observation as a compatible raw pointer is implicit;
 - conversion from raw pointer to owner is explicit.
 
-Moving requires a writable source slot because moving modifies the source.
+Relocating from a named source requires a writable source slot because
+relocation modifies the source.
 
 ```huc
 let Widget& mod source = new Widget(7);
-let Widget& destination = source; // move; source becomes null
+let Widget& destination = source; // relocate; source becomes null
 ```
 
-Attempting to move from a fixed owner is a compile-time diagnostic.
+Attempting to relocate from a fixed owner is a compile-time diagnostic.
+
+Fresh unnamed result places are intrinsically consumable. This includes
+function results, `new` owner results, `copy`/`clone` results, and other
+temporary Move values. They may bind onward without a source-level trailing
+`mod`; only named source storage is checked for that permission. A direct
+`T(arguments)` destination construction has no temporary result place.
 
 ### 5.4 Copy and Move classification
 
@@ -205,22 +244,38 @@ Copy types include:
 
 - scalar arithmetic and boolean types;
 - raw pointers;
-- fixed-size arrays of Copy elements;
 - structures whose fields are all Copy and which declare neither `clone` nor
   `drop`.
 
 Move types include:
 
 - owners;
-- fixed-size arrays of Move elements;
 - structures containing a Move field;
 - structures declaring `clone`;
 - structures declaring `drop`.
 
-Synthesized moves copy Copy fields and move Move fields. A moved-from owner is
-null. Other moved-from Move storage is inactive until explicitly reinitialized.
+`Move` is the source-level transfer category. Its operation is **destructive
+relocation**, not C++ move construction. Relocating a non-owner value continues
+that value in destination storage and ends the active value in the source
+storage. No source `drop` or field cleanup runs.
+
+Structural relocation proceeds in declaration order:
+
+1. Visit each field in declaration order.
+2. Copy a Copy field; recursively relocate a Move field.
+3. After the final field, make the aggregate source place inactive.
+
+Field fixedness constrains ordinary assignment, not compiler relocation of a
+whole value. A writable containing source permits relocation of its fixed
+fields.
+
+The bytes of an inactive source need not be cleared or form a valid `T`.
+Assigning a new value begins a new active lifetime there. A primitive owner is
+the deliberate exception: relocating `T&` transfers its address and leaves the
+source as a usable null owner.
+
 Obvious invalid use should be diagnosed, but HUC does not promise complete
-flow-sensitive use-after-move prevention.
+flow-sensitive use-after-relocation prevention.
 
 `copy expression` explicitly requests logical duplication:
 
@@ -232,11 +287,44 @@ flow-sensitive use-after-move prevention.
 
 Declaring `clone` opts an otherwise fieldwise-Copy structure into Move. This
 prevents an ordinary binding from bypassing custom logical-copy behavior.
+The `clone` contract is deep across the type's logical ownership boundary:
+owned resources are duplicated or given another valid ownership share so the
+two results can be destroyed independently. It is not a graph-wide copy;
+non-owning raw pointers and deliberately shared external state may remain
+shared.
 
-Move behavior cannot be overloaded. The compiler always synthesizes it by
-copying Copy fields, moving Move fields, and deactivating the source. Exact
-self-move assignment is a no-op. A type requiring address stability should be
-placed behind `T&` or use an explicitly named relocation operation.
+Relocation cannot be overloaded. There is no HUC move constructor: one is not
+needed to restore a destructible moved-from state because no non-owner source
+object remains alive. Exact self-relocation assignment is a no-op.
+
+An inline type whose invariant depends on its own address is not structurally
+relocatable. HUC0 does not silently repair self-pointers. Such a value must be
+kept in directly constructed fixed read-only storage, redesigned to compute
+internal addresses, placed in a stable-address library container, or allocated
+behind `T&` so relocation transfers only the owner word. Mutable
+address-dependent objects should normally use `T&`; HUC0 has no first-class
+pinning qualifier. Relocating a value that violates this contract is undefined
+behavior.
+
+The backend may replace structural relocation with a representation transfer
+only when it proves the result equivalent. This is an optimization; it does not
+create a user customization point.
+
+Explicit non-owner relocation is restricted to entire compiler-tracked root
+places: named locals and parameters; fresh temporary/result places; and
+compiler-generated recursive relocation of a whole aggregate. HUC0 rejects
+moving a non-owner Move value out through `*pointer`, `pointer->field`,
+`value.field`, or `array[index]`. Leaving such a subobject inactive while its
+owner or containing object remains active would make later cleanup invalid
+without storing additional liveness state.
+
+Primitive `T&` subobjects are exempt because relocation writes the source
+owner to its active null representation. Copying/cloning an indirectly reached
+value also remains valid. An eligible root source may replace an indirect
+destination; if the two can alias, exact storage identity is checked before
+destination destruction. A future compiler-backed raw-storage intrinsic may
+serve container implementations, but no general indirect relocation operation
+is part of HUC0.
 
 ### 5.5 Construction and initialization
 
@@ -246,6 +334,12 @@ HUC0 uses constructors rather than aggregate brace initialization:
 let Widget value = Widget(7);
 let Widget& mod owner = new Widget(7);
 ```
+
+When `T(arguments)` directly initializes a local, field initializer, by-value
+parameter, or `return` result, it constructs in that destination storage.
+`new T(arguments)` constructs directly in the final allocation. These
+forms have no intermediate `T` and perform no relocation; this is guaranteed
+HUC behavior rather than optional backend copy elision.
 
 A constructor is named `init`:
 
@@ -259,6 +353,10 @@ struct Widget {
     }
 }
 ```
+
+An `init` body has an implicit writable `mod T* this`. All initializer entries
+and defaults complete before the body begins. The body may assign mutable
+fields but cannot assign a fixed field in place of its required initializer.
 
 Rules:
 
@@ -296,6 +394,10 @@ fn drop() mod -> void {
 `drop` cannot be called directly. It executes before fields are destroyed in
 reverse declaration order.
 
+Fixed arrays destroy active elements in decreasing index order. Elementwise
+copy and construction track an initialized prefix; a normal edge that abandons
+that prefix cleans it from its highest active index down to zero.
+
 A Move structure may customize explicit logical copying with exactly one
 read-only method:
 
@@ -308,9 +410,9 @@ fn clone() -> T {
 Only an evaluated `copy` expression selects `clone`; ordinary binding never
 does, and source code cannot call `clone` directly or take its address. Copy
 assignment of a Move type is expressed as `destination = copy source`, which
-clones to a temporary, destroys the old destination, and moves the temporary
-into place. Users cannot customize implicit move construction or move
-assignment.
+clones to a temporary, destroys the old destination, and relocates the
+temporary into place. Users cannot customize relocation initialization or
+relocation assignment.
 
 The complete rules, diagnostics, and side-by-side C++20 examples are in
 [Value Semantics and Special Operations](value-semantics.md).
@@ -336,9 +438,12 @@ for the first parameter occurs before ownership transfer into the second.
 Earlier side effects complete before later operands begin. `&&` and `||`
 short-circuit, and only the selected arm of `?:` executes.
 
-The backend must insert temporaries rather than inherit C++20's unspecified
-choice of argument order. Optimizers may still reorder pure computation when
-the change is not observable.
+The backend must materialize each argument's typed by-value parameter value
+before evaluating the next argument, rather than merely retaining expression
+aliases or inheriting C++20's unspecified choice of argument order. Generated
+typed holders or an explicit call frame may transport those already-bound
+values into the C++ ABI call. Optimizers may still reorder pure computation
+when the change is not observable.
 
 ### 5.8 Runtime overloading
 
@@ -375,7 +480,7 @@ struct1 Stack(auto T) {
     ...
 }
 
-fn1 convert(auto T)(T value) -> T {
+fn1 convert(auto T)(T mod value) -> T {
     ...
 }
 
@@ -393,7 +498,7 @@ struct1 Stack(auto T)<T*>(predicate) { ... }
 fn1 convert(auto T)<T*>(predicate)(T* value) -> T* { ... }
 
 let1(auto T)<T*>(predicate) value {
-    let T* value;
+    let T* mod value = null;
 }
 ```
 
@@ -401,7 +506,7 @@ Full specialization uses an empty binder list:
 
 ```huc
 struct1 Stack()<Widget> { ... }
-fn1 convert()<Widget>(Widget value) -> Widget { ... }
+fn1 convert()<Widget>(Widget mod value) -> Widget { ... }
 let1()<Widget> value { let Widget value = Widget(); }
 ```
 
@@ -440,8 +545,16 @@ Each `struct1` and `let1` name has one primary family per scope. Each `fn1`
 name also has one primary family per scope in 0.1; normal runtime `fn`
 overloading remains available.
 
+`struct1` is module-scope in 0.1. `fn1` is allowed at module or type-member
+scope. `let1` is allowed at module, function, or nested-block scope and never
+as a field. Local `fn1`/`struct1` and nested type families are deferred.
+
 The primary must precede its specializations. Initially, every specialization
 must be declared in the defining module.
+
+Any family may be requested from an importing module. Each generated concrete
+declaration is emitted in its defining HUC0 module, and residual uses stay
+qualified through the preserved import. HUC 0.1 has no module visibility.
 
 Selection:
 
@@ -517,6 +630,12 @@ At module or type-body scope, residual output must be declarations or members
 valid at that insertion point. At function/block scope, residual declarations
 and statements are allowed.
 
+A selected module/type body may also contain ordinary compiler-only
+expressions and control statements, such as updating a `let2` loop index.
+Their operands must be compiler-available and the statements erase. The
+selected-body parser uses the inherited module, type, function, or block
+context; skipped bodies remain opaque.
+
 `for1` requires a finite compiler iterable. `while1` reevaluates a compiler
 boolean and is bounded by interpreter resource limits. A zero-iteration body
 remains opaque.
@@ -548,6 +667,11 @@ The type is `compiler::Function`, not `@Function`.
 
 Within `fn2`, a predicate, phase-control evaluation, or an existing `@`
 island, nested compiler calls execute normally and do not need repeated `@`.
+
+A standalone `@expression;` is an erased phase-expression item. It is legal at
+module, type-body, function, and nested-block scope, must evaluate completely
+at translation time, and must return `void`. Any raw-generation effect uses
+the insertion cursor at that exact call site.
 
 A normal `fn1` call produces or calls a concrete runtime specialization. An
 `@fn1_call(...)` requires complete compile-time evaluation and may embed only a
@@ -585,8 +709,9 @@ Calls begin with `@` when they enter compiler execution:
 ```
 
 `emit_huc` writes at the inherited call-site insertion cursor.
-`emit_huc_module` appends a declaration to the call-site module’s generated
-declaration buffer.
+`emit_huc_module` appends a raw fragment containing module-scope declarations
+to the call-site module’s generated declaration buffer. The HUC0 translator
+enforces declaration boundaries because HUC1 does not parse the fragment.
 
 Nested compiler helper calls inherit the cursor. A helper does not generate
 beside its own definition. There is no arbitrary “one scope above” operation.
@@ -623,14 +748,30 @@ These will be ordinary qualified type names declared as phase-2 types by the
 compiler module. Their names will not contain `2` and will never use `@` as a
 type marker.
 
+The eventual compiler library is exposed through a versioned, inspectable
+generated interface unit that the HUC1 frontend loads before user modules—the
+language-level equivalent of an always-included header. `import2 compiler`
+binds that already loaded interface under the `compiler` name. The bootstrap
+interface declares only the two raw-emission operations; later versions add
+the public handle types above without exposing internal C compiler objects.
+
 The future API should expose immutable semantic snapshots and stable IDs,
-rather than internal C++ AST objects. Structured edits and commits will be
+rather than internal compiler AST objects. Structured edits and commits will be
 explicit. Only concrete phase-0 declarations and materialized family
 specializations are enumerable; an infinite uninstantiated family is not.
 
+Reserve `@this` for a later contextual-reflection proposal. The intended
+direction is the narrowest enclosing handle: `compiler::Function` in a
+function/method/block, a class or type-declaration handle in a type body, and
+`compiler::Module` at module scope. Broader context is reached through that
+handle rather than injected as a universal environment. Bootstrap HUC1 must
+diagnose `@this`; exact APIs and dependency semantics are a separate design.
+
 ## 8. Compiler organization
 
-All compiler code is C++20.
+All compiler and command-line driver code is ISO C17. C++20 is the language of
+the first generated backend, not the implementation language of the compiler.
+The compiler must not require a C++ compiler to build itself.
 
 The repository will contain:
 
@@ -670,58 +811,58 @@ when chaining the translators.
 
 ## 9. Public compiler interfaces
 
-The architecture document will define value-oriented public APIs equivalent to:
+The architecture document will define value-oriented C APIs equivalent to:
 
-```cpp
-namespace huc0 {
+```c
+#include <stdbool.h>
+#include <stddef.h>
 
-struct TranspileRequest {
-    std::filesystem::path root_module;
-    std::vector<std::filesystem::path> import_roots;
-    std::filesystem::path output_directory;
-    TargetConfig target;
-    bool write_source_maps = true;
-};
+typedef struct Huc0TranspileRequest {
+    const char *root_module;
+    const char *const *import_roots;
+    size_t import_root_count;
+    const char *output_directory;
+    HucTargetConfig target;
+    bool write_source_maps;
+} Huc0TranspileRequest;
 
-struct TranspileResult {
-    std::vector<Artifact> artifacts;
-    std::vector<Diagnostic> diagnostics;
-    DependencyGraph dependencies;
+typedef struct Huc0TranspileResult {
+    HucArtifactArray artifacts;
+    HucDiagnosticArray diagnostics;
+    HucDependencyGraph dependencies;
     bool succeeded;
-};
+} Huc0TranspileResult;
 
-TranspileResult transpile(const TranspileRequest&);
-
-} // namespace huc0
+Huc0TranspileResult huc0_transpile(const Huc0TranspileRequest *request);
+void huc0_transpile_result_dispose(Huc0TranspileResult *result);
 ```
 
-```cpp
-namespace huc1 {
+```c
+typedef struct Huc1ExpandRequest {
+    const char *root_module;
+    const char *const *import_roots;
+    size_t import_root_count;
+    const char *output_directory;
+    HucTargetConfig target;
+    HucPhaseLimits limits;
+    bool write_source_maps;
+} Huc1ExpandRequest;
 
-struct ExpandRequest {
-    std::filesystem::path root_module;
-    std::vector<std::filesystem::path> import_roots;
-    std::filesystem::path output_directory;
-    TargetConfig target;
-    PhaseLimits limits;
-    bool write_source_maps = true;
-};
-
-struct ExpandResult {
-    std::vector<Artifact> modules;
-    std::vector<Diagnostic> diagnostics;
-    DependencyGraph dependencies;
+typedef struct Huc1ExpandResult {
+    HucArtifactArray modules;
+    HucDiagnosticArray diagnostics;
+    HucDependencyGraph dependencies;
     bool succeeded;
-};
+} Huc1ExpandResult;
 
-ExpandResult expand(const ExpandRequest&);
-
-} // namespace huc1
+Huc1ExpandResult huc1_expand(const Huc1ExpandRequest *request);
+void huc1_expand_result_dispose(Huc1ExpandResult *result);
 ```
 
-Exact container implementation may change, but ownership, inputs, outputs, and
-the absence of thrown compiler errors are fixed. Fatal internal invariant
-violations may terminate a debug build; user program errors are diagnostics.
+Exact array and allocator APIs may change, but ownership, inputs, outputs, and
+explicit result disposal are fixed. The public C API never uses `longjmp` for
+ordinary errors. Fatal internal invariant violations may terminate a debug
+build; user program errors are diagnostics.
 
 The driver commands are:
 
@@ -762,7 +903,7 @@ the initial backend produces one C++ translation unit.
 
 Implement:
 
-- CMake C++20 targets;
+- CMake C17 targets for the compiler and driver;
 - source buffers and stable source IDs;
 - UTF-8 byte-position tracking with ASCII identifiers initially;
 - line/column lookup;
@@ -785,8 +926,9 @@ Implement a hand-written lexer and recursive-descent/Pratt parser.
 Cover:
 
 - module and import declarations;
-- `export`;
 - `let`;
+- type aliases;
+- fixed-signature `extern "C"` declarations;
 - `struct`;
 - `fn`;
 - `init` and `drop`;
@@ -814,10 +956,14 @@ Implement:
 - module, type, function, field, parameter, and local scopes;
 - collect-before-check for module declarations;
 - declaration-before-use for locals;
-- canonical built-in, structure, raw-pointer, owner, and fixed-array types;
+- canonical built-in, structure, raw-pointer, and owner types;
+- canonical type aliases and alias-cycle diagnostics;
 - local `auto` inference;
 - method receiver permissions;
 - constructor obligation checking;
+- `extern "C"` signatures limited to built-in scalars, `void` returns, and
+  one-level raw pointers to built-in types, with no owner, structure, array,
+  phase type, or variadic boundary;
 - overload resolution using only specified built-in conversions;
 - no user-defined implicit conversions;
 - prohibition of ownership-only overload sets.
@@ -827,8 +973,10 @@ Acceptance:
 - type and name errors point to both use and candidate declaration;
 - `mod` cannot be gained implicitly;
 - fixed storage cannot be assigned;
-- fixed owners cannot be moved;
+- fixed owners cannot be relocated;
+- non-owner Move subobjects cannot be explicit relocation sources;
 - all constructor field obligations are checked.
+- every accepted C-linkage signature has a documented target ABI mapping.
 
 ### 10.5 Increment D: typed HIR and sequenced MIR
 
@@ -836,7 +984,8 @@ HIR records:
 
 - canonical type;
 - resolved symbol;
-- value use: read, observe, copy, move, or place;
+- value use: read, observe, copy, relocate, or place;
+- explicit `addressof` of an eligible inline place;
 - source origin;
 - explicit conversion selected by HUC.
 
@@ -848,13 +997,13 @@ MIR records:
 - active/inactive Move state;
 - cleanup edges;
 - conditional drop flags only where control flow requires them;
-- owner nulling after moves.
+- owner nulling after relocations.
 
 No semantic decision is deferred to C++ overload resolution.
 
 Acceptance:
 
-- HIR/MIR dumps expose every move and observation;
+- HIR/MIR dumps expose every relocation and observation;
 - argument and operand sequencing is explicit;
 - cleanup is exactly once on every normal control-flow exit.
 
@@ -866,7 +1015,10 @@ Emit:
 - module namespaces;
 - guarded headers;
 - the root source file;
+- a global C++ `int main()` adapter for the configured root module's sole HUC
+  `fn main() -> i32`;
 - scalar and raw-pointer declarations;
+- fixed-signature C-linkage declarations;
 - structures, functions, constructors, methods, and runtime control flow;
 - explicit temporaries preserving left-to-right evaluation;
 - `#line` or sidecar source-map information where practical.
@@ -885,7 +1037,7 @@ Provide a private one-word owner helper. Its C++ type:
 
 - contains only a pointer;
 - has deleted copying;
-- can release, reset, observe, and move;
+- can release, reset, observe, and relocate;
 - invokes generated HUC drop logic before deallocation;
 - has size/alignment assertions.
 
@@ -897,24 +1049,28 @@ Implement:
 
 - `new T(args)`;
 - owner observation;
-- owner move initialization and assignment;
+- owner relocation initialization and assignment;
 - structural Copy/Move classification, including `clone` opting into Move;
-- self-move as a no-op;
+- exact self-relocation as a no-op;
 - `copy`;
 - `clone`;
 - clone-then-replace assignment;
-- fixed fieldwise movement with no user move hook;
+- fixed structural relocation with no user relocation hook;
 - user `drop`;
 - reverse field cleanup;
-- `adopt`, `release`, `reset`, and `swap` only if retained by the reconciled
-  0.1 specification.
+- `adopt`, `release`, and `reset`.
+
+`adopt<T>(raw)` has an unchecked compatible-allocation and exclusivity
+precondition. `release(owner)` and `reset(owner)` require a named owner slot
+with trailing `mod`.
 
 Acceptance:
 
 - `sizeof(owner<T>) == sizeof(void*)`;
-- straight-line owner moves require no hidden state;
-- conditional aggregate moves use flags only when necessary;
-- raw-handle `drop` types move without duplicate cleanup;
+- straight-line owner relocations require no hidden state;
+- conditional aggregate relocations use flags only when necessary;
+- raw-handle `drop` types relocate without duplicate cleanup;
+- indirect non-owner move-out is rejected without adding owner liveness state;
 - ordinary binding never invokes `clone`;
 - sanitizers find no backend double destruction;
 - optimized operation counts match equivalent simple C++ owner code.
@@ -1023,7 +1179,13 @@ Implement:
 - structural partial ordering;
 - ambiguity diagnostics;
 - recursion state: absent, in-progress, complete, failed;
-- deterministic generated names and defining-module placement.
+- deterministic generated names and defining-module placement;
+- cross-module qualification for requested concrete specializations;
+- a deterministic whole-graph request worklist that reaches a fixpoint.
+
+A cross-module request in 0.1 may use only types already nameable through the
+defining module's import closure. Requester-side specialization placement is
+deferred.
 
 Acceptance:
 
@@ -1033,23 +1195,35 @@ Acceptance:
 - infinitely recursive type layout fails;
 - `let1` enforces exactly one correctly named residual `let`;
 - function-local `let1` declarations materialize at the family site;
-- generated HUC0 contains no unresolved family request.
+- generated HUC0 contains no unresolved family request;
+- each module output depends on the sorted closure of specialization keys
+  assigned to that defining module.
 
 ### 11.6 Increment E: `@` and raw generation
 
 Implement:
 
 - compile-time evaluation islands;
+- erased module/type/function/block phase-expression items;
 - forced `fn1` evaluation;
 - result materialization rules;
 - the compiler-supplied `import2 compiler` module;
 - `compiler::emit_huc`;
 - `compiler::emit_huc_module`;
 - inherited call-site insertion cursors;
-- deterministic module-generation buffers.
+- deterministic module-generation buffers;
+- pure/effectful phase-call classification.
 
 The HUC1 translator writes raw generated text without parsing it. Chained
 compilation invokes the public HUC0 translator on the written artifact.
+A normal family specialization is constructed once per specialization key;
+its cache entry retains the residual declaration and ordered raw fragments.
+Local/type fragments enter the declaration, while module fragments enter the
+defining module buffer once. Repeated normal requests only reference it.
+Actual phase-execution occurrences—`fn2` calls, forced `@fn1` calls, and
+standalone phase-expression items—whose transitive body reaches raw emission
+execute at every occurrence with that occurrence's inherited cursor and are
+not served from a bare result cache.
 
 Acceptance:
 
@@ -1126,17 +1300,21 @@ Include:
 - malformed selected code;
 - malformed but skipped code;
 - phase leaks;
-- move from fixed storage;
+- relocation from fixed storage;
+- non-owner relocation from a pointee, field, or array element;
+- `addressof` applied to a pointer or owner slot;
 - mutation without `mod`;
 - copying a Move type without `clone`;
 - malformed or duplicate `clone` and `drop` methods;
-- attempted custom move hooks;
+- attempted custom move or relocation hooks;
 - constructor obligation failures;
 - ambiguous partial specialization;
 - false predicates leaving no candidate;
 - multiple residual declarations from `let1`;
 - resource-limit exhaustion;
 - numbered syntax emitted into HUC0.
+- invalid C-linkage owners, structures, arrays, phase types, pointer chains,
+  opaque handles, or variadics.
 
 ### 13.4 Execute tests
 
@@ -1146,10 +1324,10 @@ Compile generated C++20 and test:
 - argument side-effect ordering;
 - constructors and field initialization order;
 - owner observation and consumption;
-- conditional moves;
+- conditional relocations;
 - Copy-value binding and assignment;
 - explicit copy/clone and clone-then-replace assignment;
-- synthesized fieldwise move, source deactivation, and self-move;
+- structural relocation, source deactivation, and self-relocation;
 - user `drop` and reverse field cleanup;
 - module imports;
 - full HUC1-to-program examples.
@@ -1192,7 +1370,7 @@ never allowed to decide HUC semantics accidentally.
 
 ## 15. Commit strategy
 
-The initial Git commit records:
+The design commits record:
 
 - the current design drafts;
 - this controlling plan;
@@ -1202,7 +1380,7 @@ The initial Git commit records:
 
 Implementation commits should be small and milestone-oriented:
 
-1. common C++20 project skeleton;
+1. common C17 project skeleton;
 2. HUC0 lexer/parser;
 3. HUC0 semantic core;
 4. HIR/MIR and scalar C++ output;

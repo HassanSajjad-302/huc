@@ -1,3 +1,4 @@
+// Runtime-only HUC0 example.
 module examples.ownership;
 
 import std.io as io;
@@ -35,17 +36,19 @@ fn consume(Widget& widget) -> void {
     inspect(widget);
 } // widget owns its argument and calls Widget.drop here
 
-export fn main() -> i32 {
+fn main() -> i32 {
     let Widget& mod first = new Widget(42);
 
     inspect(first);
     inspect(first);
 
     let Widget* observer = first;
-    let Widget& mod second = first; // synthesized move; first becomes null
+    // Primitive owner relocation transfers one address. Unlike an inline Move
+    // source, first remains an active, usable owner in its null state.
+    let Widget& mod second = first;
 
     // first is now null. observer still points at the Widget owned by second.
-    let Widget& independent = copy second; // allocates and calls Widget.clone
+    let Widget& independent = copy second; // allocates via Widget's clone protocol
 
     consume(second);
     // second is null. Its former Widget was dropped, so observer is dangling.
