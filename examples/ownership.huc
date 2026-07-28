@@ -1,0 +1,38 @@
+module examples.ownership;
+
+import std.io as io;
+
+struct Widget {
+    i32 value;
+
+    fn clone() const -> Widget {
+        return Widget{this->value};
+    }
+}
+
+fn inspect(const Widget* widget) -> void {
+    io::println(widget->value);
+}
+
+fn consume(Widget*& widget) -> void {
+    inspect(widget);
+} // widget owns its argument and destroys it here
+
+export fn main() -> i32 {
+    Widget*& first = new Widget{42};
+
+    inspect(first);
+    inspect(first);
+
+    Widget* observer = first;
+    Widget*& second = first;
+
+    // first is now null. observer still points at the Widget owned by second.
+    Widget*& independent = copy second;
+
+    consume(second);
+    // observer is now dangling; dereferencing it would be undefined behavior.
+
+    inspect(independent);
+    return 0;
+} // independent destroys its separate Widget

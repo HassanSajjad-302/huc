@@ -1,0 +1,193 @@
+(* HUC 0.1 bootstrap grammar.
+   Semantic restrictions, phase checking, and precedence details are in the
+   language specification. This grammar intentionally omits error productions. *)
+
+compilation-unit  = module-decl, { import-decl }, { declaration } ;
+
+module-decl       = "module", qualified-name, ";" ;
+import-decl       = "import", qualified-name, [ "as", identifier ], ";" ;
+qualified-name    = identifier, { ".", identifier } ;
+
+declaration       = [ "export" ],
+                    ( function-decl
+                    | struct-decl
+                    | type-alias
+                    | extern-decl
+                    | phase-if-decl ) ;
+
+function-decl     = function-head, ( block | ";" ) ;
+function-head     = function-keyword, identifier,
+                    [ compile-parameter-list ],
+                    parameter-list,
+                    [ "const" ],
+                    "->", type,
+                    [ where-clause ] ;
+function-keyword  = "fn" | "fn1" | "fn2" ;
+
+compile-parameter-list
+                  = "(", compile-parameter,
+                    { ",", compile-parameter }, [ "," ], ")" ;
+compile-parameter = type, identifier, [ "=", expression ] ;
+
+parameter-list    = "(", [ parameter, { ",", parameter }, [ "," ] ], ")" ;
+parameter         = ( type | "auto" ), [ "..." ], identifier ;
+where-clause      = "where1", "(", expression, ")" ;
+
+struct-decl       = [ "copy" ], struct-keyword, identifier,
+                    [ compile-parameter-list ], struct-body, [ ";" ] ;
+struct-keyword    = "struct" | "struct1" | "struct2" ;
+struct-body       = "{", { member-decl }, "}" ;
+member-decl       = field-decl
+                  | function-decl
+                  | visibility-label
+                  | phase-if-decl ;
+field-decl        = type, identifier, [ "=", expression ], ";" ;
+visibility-label  = ( "public" | "private" ), ":" ;
+
+type-alias        = "type", identifier, "=", type, ";" ;
+extern-decl       = "extern", string-literal, function-decl ;
+
+phase-if-decl     = "if1", "(", expression, ")", declaration-block,
+                    [ "else", declaration-block ] ;
+declaration-block = "{", { declaration | member-decl }, "}" ;
+
+type              = type-primary, { type-suffix } ;
+type-primary      = builtin-type
+                  | symbol-path, [ compile-argument-list ]
+                  | "const", type-primary
+                  | "[", expression, "]", type ;
+type-suffix       = "*" | "*&" ;
+builtin-type      = "bool" | "c8"
+                  | "i8" | "i16" | "i32" | "i64" | "isize"
+                  | "u8" | "u16" | "u32" | "u64" | "usize"
+                  | "f32" | "f64" | "void" | "never"
+                  | "Type" ;
+
+compile-argument-list
+                  = "[", [ expression, { ",", expression }, [ "," ] ], "]" ;
+
+block             = "{", { statement }, "}" ;
+statement         = block
+                  | local-decl
+                  | compile-local-decl
+                  | if-stmt
+                  | phase-if-stmt
+                  | while-stmt
+                  | phase-while-stmt
+                  | for-stmt
+                  | phase-for-stmt
+                  | return-stmt
+                  | break-stmt
+                  | continue-stmt
+                  | emit-stmt
+                  | expression-stmt ;
+
+local-decl        = [ "const" ], ( type | "auto" ), identifier,
+                    [ "=", expression ], ";" ;
+compile-local-decl
+                  = ( "let1" | "var1" ), ( type | "auto" ), identifier,
+                    "=", expression, ";" ;
+
+if-stmt           = "if", "(", expression, ")", statement,
+                    [ "else", statement ] ;
+phase-if-stmt     = "if1", "(", expression, ")", statement,
+                    [ "else", statement ] ;
+while-stmt        = "while", "(", expression, ")", statement ;
+phase-while-stmt  = "while1", "(", expression, ")", statement ;
+
+for-stmt          = "for", "(", [ expression ], ";", [ expression ], ";",
+                    [ expression ], ")", statement ;
+phase-for-stmt    = "for1", "(", ( type | "auto" ), identifier, ":",
+                    expression, ")", statement ;
+
+return-stmt       = "return", [ expression ], ";" ;
+break-stmt        = "break", ";" ;
+continue-stmt     = "continue", ";" ;
+emit-stmt         = "emit", expression, ";"
+                  | "gen", quote-block
+                  | "gen_global", quote-block ;
+expression-stmt   = expression, ";" ;
+
+expression        = assignment-expression ;
+assignment-expression
+                  = conditional-expression,
+                    [ assignment-op, assignment-expression ] ;
+assignment-op     = "=" | "+=" | "-=" | "*=" | "/=" | "%="
+                  | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
+
+conditional-expression
+                  = logical-or-expression,
+                    [ "?", expression, ":", conditional-expression ] ;
+logical-or-expression
+                  = logical-and-expression, { "||", logical-and-expression } ;
+logical-and-expression
+                  = bitwise-or-expression, { "&&", bitwise-or-expression } ;
+bitwise-or-expression
+                  = bitwise-xor-expression, { "|", bitwise-xor-expression } ;
+bitwise-xor-expression
+                  = bitwise-and-expression, { "^", bitwise-and-expression } ;
+bitwise-and-expression
+                  = equality-expression, { "&", equality-expression } ;
+equality-expression
+                  = relational-expression, { ( "==" | "!=" ),
+                    relational-expression } ;
+relational-expression
+                  = shift-expression, { ( "<" | ">" | "<=" | ">=" ),
+                    shift-expression } ;
+shift-expression  = additive-expression, { ( "<<" | ">>" ),
+                    additive-expression } ;
+additive-expression
+                  = multiplicative-expression, { ( "+" | "-" ),
+                    multiplicative-expression } ;
+multiplicative-expression
+                  = unary-expression, { ( "*" | "/" | "%" ),
+                    unary-expression } ;
+
+unary-expression  = postfix-expression
+                  | ( "+" | "-" | "!" | "~" | "*" | "&" | "@" ),
+                    unary-expression
+                  | "copy", unary-expression
+                  | "new", type, aggregate-initializer ;
+
+postfix-expression
+                  = primary-expression,
+                    { argument-list
+                    | compile-argument-list
+                    | "[", expression, "]"
+                    | ".", identifier
+                    | "->", identifier
+                    | "++"
+                    | "--" } ;
+
+argument-list     = "(", [ expression, { ",", expression }, [ "," ] ], ")" ;
+aggregate-initializer
+                  = "{", [ expression, { ",", expression }, [ "," ] ], "}" ;
+
+primary-expression
+                  = symbol-path
+                  | literal
+                  | "this"
+                  | "null"
+                  | "(", expression, ")"
+                  | quote-expression
+                  | splice-expression ;
+
+quote-expression  = "quote", quote-block ;
+quote-block       = "{", { quote-token | splice-expression }, "}" ;
+splice-expression = "$(", expression, ")" ;
+
+literal           = integer-literal
+                  | float-literal
+                  | string-literal
+                  | character-literal
+                  | "true"
+                  | "false" ;
+
+identifier        = ? ASCII identifier token ? ;
+integer-literal   = ? integer literal token ? ;
+float-literal     = ? floating-point literal token ? ;
+string-literal    = ? UTF-8 string literal token ? ;
+character-literal = ? character or byte literal token ? ;
+quote-token       = ? any balanced HUC token other than a splice ? ;
+
+symbol-path       = identifier, { "::", identifier } ;
