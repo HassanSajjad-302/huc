@@ -9,7 +9,7 @@ disagreement remains, the plan controls.
 ## 1. Recommendation
 
 The first two HUC translators and their command-line driver are implemented in
-portable ISO C17:
+portable ISO C++20:
 
 ```text
 HUC1 source
@@ -30,8 +30,8 @@ A user may always write, inspect, and compile HUC0 without using HUC1.
 
 This is a bootstrap choice, not a semantic dependency. HUC has its own parser,
 type checker, staging evaluator, specialization engine, ownership lowering,
-and intermediate representation, all implemented in C17. C++ is used only as
-the first emitted language and portable machine-code backend.
+and intermediate representation, all implemented in C++20. The generated
+C++20 is a separate artifact and is never treated as HUC's semantic authority.
 
 The decisive reason is deterministic cleanup. A C++ output backend can map HUC
 `T&` to a one-word move-only RAII wrapper and can use generated C++ scopes to
@@ -46,7 +46,7 @@ output backend or LLVM backend straightforward.
 
 ## 2. C versus C++ as the first emitted backend
 
-| Concern | C17 backend | C++20 backend |
+| Concern | Future C backend | C++20 backend |
 |---|---|---|
 | `T&` cleanup | Compiler emits all cleanup paths | One-word generated RAII wrapper |
 | Methods and namespaces | Lower immediately | Direct mapping |
@@ -62,10 +62,8 @@ The C++ emitter must not translate HUC source by token substitution. In
 particular, HUC `T&` must never be emitted as C++ `T&`; it is emitted as
 `::huc_rt::owner<T>`.
 
-The table compares output languages, not implementation languages. The
-transpiler executable, frontend, staging interpreter, middle end, emitters, and
-driver are C17 programs. Invoking a C++20 compiler on generated files does not
-make C++ part of the transpiler implementation.
+The table compares output languages. The transpiler executable, frontend,
+staging interpreter, middle end, emitters, and driver are C++20 programs.
 
 ## 3. Compiler overview
 
@@ -76,7 +74,7 @@ make C++ part of the transpiler implementation.
 HUC1 source manager + delimiter scanner + staged index
     |
     v
-selected-body parser + phase checker + C17 interpreter
+selected-body parser + phase checker + C++20 interpreter
     |
     v
 family specialization + residualizer + raw-text insertion
@@ -136,11 +134,10 @@ tests/
   execute/
 ```
 
-The implementation language is C17. Compiler-owned arenas, ID-indexed tables,
-and small explicit dynamic-array helpers replace C++ containers and object
-ownership. This keeps the bootstrap dependency small and makes allocation and
-lifetime behavior visible. A future LLVM integration can live behind a narrow
-C-facing adapter; it is not a reason to implement the first compiler in C++.
+The implementation language is C++20. Standard containers, RAII, value types,
+and explicit ownership are preferred. Arenas and stable ID-indexed tables
+remain useful where they simplify AST/IR lifetime and deterministic output. A
+future LLVM integration stays behind a narrow backend interface.
 
 The logical libraries are:
 
@@ -150,98 +147,88 @@ The logical libraries are:
   lowering, and C++20 emitter;
 - `huc1`: staged indexing, deferred-body handling, the phase interpreter,
   specialization, and printable HUC0 residualization;
-- `huc`: a thin C17 command-line driver.
+- `huc`: a thin C++20 command-line driver.
 
 The generated `huc_runtime.hpp` belongs to the C++20 output, not to either
-translator executable. No compiler `.c` file includes it.
+translator executable. Compiler sources do not include it.
 
-### 4.1 C17 implementation conventions
+### 4.1 C++20 implementation conventions
 
-Compiler modules expose opaque context objects and ordinary C functions:
+Compiler modules expose typed C++ interfaces:
 
-```c
-#include <stdint.h>
+```cpp
+using FileId = StrongId<struct FileTag>;
+using ModuleId = StrongId<struct ModuleTag>;
 
-typedef struct HucCompiler HucCompiler;
-typedef uint32_t HucFileId;
-typedef uint32_t HucModuleId;
+struct ParseResult {
+    std::optional<ModuleId> module;
+    std::vector<Diagnostic> diagnostics;
+};
 
-typedef enum HucStatus {
-    HUC_STATUS_OK,
-    HUC_STATUS_REPORTED_ERROR,
-    HUC_STATUS_OUT_OF_MEMORY,
-} HucStatus;
-
-HucStatus huc_parse_module(
-    HucCompiler *compiler,
-    HucFileId file,
-    HucModuleId *out_module
-);
+class Compiler {
+public:
+    [[nodiscard]] ParseResult parse_module(FileId file);
+};
 ```
 
-Pass state belongs to `HucCompiler` or a short-lived pass context rather than
-process-global variables. Arenas own AST and IR nodes; resizable tables use
-explicit pointer/count/capacity triples; heterogeneous nodes use tagged unions;
-and public pass boundaries exchange stable IDs. Allocation failure propagates
-as `HUC_STATUS_OUT_OF_MEMORY`, while source errors are recorded in the
-diagnostic engine and return `HUC_STATUS_REPORTED_ERROR`. This is conventional
-C17, not C++ written with C-like syntax.
+Pass state belongs to `Compiler` or a short-lived pass object rather than
+process-global variables. RAII owns resources, `std::variant` represents
+heterogeneous nodes where appropriate, and pass boundaries exchange stable
+IDs rather than pointers into movable storage. User source errors are recorded
+as diagnostics.
 
 ### 4.2 Public translator interfaces
 
-The two libraries expose value-oriented C APIs with explicit result disposal.
-The exact array and allocator helpers may evolve, but the direction and
-artifact boundary do not:
+The two libraries expose value-oriented C++20 APIs with RAII-managed results.
+Exact container choices may evolve, but the direction and artifact boundary do
+not:
 
-```c
-#include <stdbool.h>
-#include <stddef.h>
+```cpp
+namespace huc {
 
-typedef struct Huc0TranspileRequest {
-    const char *root_module;
-    const char *const *import_roots;
-    size_t import_root_count;
-    const char *output_directory;
-    HucTargetConfig target;
-    bool write_source_maps;
-} Huc0TranspileRequest;
+struct Huc0TranspileRequest {
+    std::string root_module;
+    std::vector<std::filesystem::path> import_roots;
+    std::filesystem::path output_directory;
+    TargetConfig target;
+    bool write_source_maps = true;
+};
 
-typedef struct Huc0TranspileResult {
-    HucArtifactArray artifacts;
-    HucDiagnosticArray diagnostics;
-    HucDependencyGraph dependencies;
-    bool succeeded;
-} Huc0TranspileResult;
+struct Huc0TranspileResult {
+    std::vector<Artifact> artifacts;
+    std::vector<Diagnostic> diagnostics;
+    DependencyGraph dependencies;
+    bool succeeded = false;
+};
 
-Huc0TranspileResult huc0_transpile(const Huc0TranspileRequest *request);
-void huc0_transpile_result_dispose(Huc0TranspileResult *result);
+[[nodiscard]] Huc0TranspileResult
+huc0_transpile(const Huc0TranspileRequest& request);
+
+struct Huc1ExpandRequest {
+    std::string root_module;
+    std::vector<std::filesystem::path> import_roots;
+    std::filesystem::path output_directory;
+    TargetConfig target;
+    PhaseLimits limits;
+    bool write_source_maps = true;
+};
+
+struct Huc1ExpandResult {
+    std::vector<Artifact> modules;
+    std::vector<Diagnostic> diagnostics;
+    DependencyGraph dependencies;
+    bool succeeded = false;
+};
+
+[[nodiscard]] Huc1ExpandResult
+huc1_expand(const Huc1ExpandRequest& request);
+
+} // namespace huc
 ```
 
-```c
-typedef struct Huc1ExpandRequest {
-    const char *root_module;
-    const char *const *import_roots;
-    size_t import_root_count;
-    const char *output_directory;
-    HucTargetConfig target;
-    HucPhaseLimits limits;
-    bool write_source_maps;
-} Huc1ExpandRequest;
-
-typedef struct Huc1ExpandResult {
-    HucArtifactArray modules;
-    HucDiagnosticArray diagnostics;
-    HucDependencyGraph dependencies;
-    bool succeeded;
-} Huc1ExpandResult;
-
-Huc1ExpandResult huc1_expand(const Huc1ExpandRequest *request);
-void huc1_expand_result_dispose(Huc1ExpandResult *result);
-```
-
-Ordinary source errors are returned as diagnostics; neither API uses
-`longjmp`. A chained build passes the paths from `Huc1ExpandResult.modules`
-back through a normal `Huc0TranspileRequest`.
+Ordinary source errors are returned as diagnostics rather than thrown. A
+chained build passes the paths from `Huc1ExpandResult::modules` back through a
+normal `Huc0TranspileRequest`.
 
 ## 5. Frontend
 
@@ -250,7 +237,7 @@ back through a normal `Huc0TranspileRequest`.
 `SourceManager` owns immutable source buffers and assigns each one a `FileId`.
 Every token and syntax node carries a compact half-open `SourceSpan`:
 
-```c
+```cpp
 typedef struct HucSourceSpan {
     HucFileId file;
     uint32_t begin;
@@ -284,7 +271,7 @@ The lexer should:
 
 Representative token kinds:
 
-```c
+```cpp
 typedef enum HucTokenKind {
     HUC_TOKEN_IDENTIFIER,
     HUC_TOKEN_INTEGER_LITERAL,
@@ -359,7 +346,7 @@ not delegated to C++ parsing.
 
 The syntax AST retains user spelling:
 
-```c
+```cpp
 typedef uint32_t HucDeclId;
 typedef uint32_t HucParamDeclId;
 typedef uint32_t HucTypeSyntaxId;
@@ -468,7 +455,7 @@ scanner-opaque.
 
 Every symbol records:
 
-```c
+```cpp
 typedef struct HucSymbol {
     HucSymbolId id;
     HucInternedString name;
@@ -487,7 +474,7 @@ the HUC0 translator.
 
 Types are interned:
 
-```c
+```cpp
 typedef enum HucTypeKind {
     HUC_TYPE_ERROR,
     HUC_TYPE_VOID,
@@ -535,7 +522,7 @@ Each concrete type records:
 
 Every expression receives:
 
-```c
+```cpp
 typedef enum HucAvailability {
     HUC_AVAILABILITY_RUNTIME_VALUE,
     HUC_AVAILABILITY_COMPILE_TIME_VALUE,
@@ -597,7 +584,7 @@ HUC0 HIR is expression-oriented, typed, structured, and fully concrete.
 
 `ValueUse` distinguishes:
 
-```c
+```cpp
 typedef enum HucValueUse {
     HUC_VALUE_USE_READ,
     HUC_VALUE_USE_OBSERVE,
@@ -609,7 +596,7 @@ typedef enum HucValueUse {
 
 Every expression includes:
 
-```c
+```cpp
 typedef struct HucHirExprHeader {
     HucHirExprId id;
     HucTypeId type;
@@ -689,7 +676,7 @@ be improved later with bytecode.
 
 ### 8.2 Values
 
-```c
+```cpp
 typedef enum HucCtValueKind {
     HUC_CT_BOOL,
     HUC_CT_INTEGER,
@@ -843,7 +830,7 @@ runtime flag.
 
 ### 9.1 Keys
 
-```c
+```cpp
 typedef struct HucSpecializationKey {
     HucDeclFingerprint declaration;
     HucSerializedCtValue *compile_time_arguments;
@@ -967,7 +954,7 @@ function parameters or results do not.
 
 The concrete HIR is lowered to a control-flow MIR:
 
-```c
+```cpp
 typedef struct HucBasicBlock {
     HucMirStatement *statements;
     size_t statement_count;
@@ -1391,7 +1378,7 @@ These rules stop C++ from silently becoming the specification.
 
 ## 14. C output backend later
 
-A later C17 output emitter, still implemented as part of the C17 compiler,
+A later C output emitter, still implemented as part of the C++20 compiler,
 consumes the same MIR:
 
 - structures become C structs;
@@ -1586,7 +1573,7 @@ for undefined HUC behavior.
 
 Implement in this order:
 
-1. common C17 project/source infrastructure, diagnostics, target data, and
+1. common C++20 project/source infrastructure, diagnostics, target data, and
    acyclic module discovery;
 2. the standalone HUC0 lexer and recursive-descent/Pratt parser;
 3. names, concrete types, permissions, constructors, overloads, Copy/Move
@@ -1620,7 +1607,7 @@ The HUC1 frontend loads a versioned, inspectable generated interface for the
 compiler module before indexing user modules. This is the implementation
 equivalent of an always-included header; `import2 compiler` explicitly binds
 it. The bootstrap interface contains only the raw-emission functions and never
-exposes pointers to internal C compiler state.
+exposes pointers to internal compiler objects.
 
 Milestone 2 is complete only when every numbered/compiler-only construct is
 removed, output modules are deterministic and readable, and the public

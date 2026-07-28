@@ -1645,7 +1645,7 @@ an interface to the supported scalar and one-level-pointer boundary.
 
 The bootstrap compiler's generated C++20 backend output is an implementation
 technique, not a promise that arbitrary C++ headers or ABIs are directly
-consumable. The bootstrap compiler itself will be implemented in C17.
+consumable. The bootstrap compiler itself will also be implemented in C++20.
 
 ## 14. Undefined behavior summary
 
@@ -1737,7 +1737,7 @@ The language specification, not emitted C++ behavior, is authoritative. If the
 backend language has a different evaluation order, destruction rule, or name
 lookup rule, the transpiler must generate code that preserves HUC semantics.
 The planned bootstrap transpilers and command-line driver will be implemented
-in C17; the first HUC0 backend emits C++20 source.
+in C++20; the first HUC0 backend also emits C++20 source.
 
 ## Appendix A: Consolidated example
 

@@ -109,9 +109,8 @@ The implementation order is:
 1. HUC0 to C++20.
 2. HUC1 to HUC0.
 
-Both transpilers and the command-line driver will be written in C17. C++20 is
-the first generated backend language, not the compiler's implementation
-language.
+Both transpilers and the command-line driver will be written in C++20. C++20
+is also the first generated backend language.
 
 ## Short positioning statement
 

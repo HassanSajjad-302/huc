@@ -4,7 +4,7 @@ Status: controlling implementation plan
 
 Language name: HUC, “Hassan’s Update on C”
 
-Implementation language: C17
+Implementation language: C++20
 
 First backend: C++20
 
@@ -769,9 +769,8 @@ diagnose `@this`; exact APIs and dependency semantics are a separate design.
 
 ## 8. Compiler organization
 
-All compiler and command-line driver code is ISO C17. C++20 is the language of
-the first generated backend, not the implementation language of the compiler.
-The compiler must not require a C++ compiler to build itself.
+All compiler and command-line driver code is ISO C++20. C++20 is also the
+language of the first generated backend.
 
 The repository will contain:
 
@@ -811,58 +810,54 @@ when chaining the translators.
 
 ## 9. Public compiler interfaces
 
-The architecture document will define value-oriented C APIs equivalent to:
+The architecture document will define value-oriented C++20 APIs equivalent to:
 
-```c
-#include <stdbool.h>
-#include <stddef.h>
+```cpp
+namespace huc {
 
-typedef struct Huc0TranspileRequest {
-    const char *root_module;
-    const char *const *import_roots;
-    size_t import_root_count;
-    const char *output_directory;
-    HucTargetConfig target;
-    bool write_source_maps;
-} Huc0TranspileRequest;
+struct Huc0TranspileRequest {
+    std::string root_module;
+    std::vector<std::filesystem::path> import_roots;
+    std::filesystem::path output_directory;
+    TargetConfig target;
+    bool write_source_maps = true;
+};
 
-typedef struct Huc0TranspileResult {
-    HucArtifactArray artifacts;
-    HucDiagnosticArray diagnostics;
-    HucDependencyGraph dependencies;
-    bool succeeded;
-} Huc0TranspileResult;
+struct Huc0TranspileResult {
+    std::vector<Artifact> artifacts;
+    std::vector<Diagnostic> diagnostics;
+    DependencyGraph dependencies;
+    bool succeeded = false;
+};
 
-Huc0TranspileResult huc0_transpile(const Huc0TranspileRequest *request);
-void huc0_transpile_result_dispose(Huc0TranspileResult *result);
+[[nodiscard]] Huc0TranspileResult
+huc0_transpile(const Huc0TranspileRequest& request);
+
+struct Huc1ExpandRequest {
+    std::string root_module;
+    std::vector<std::filesystem::path> import_roots;
+    std::filesystem::path output_directory;
+    TargetConfig target;
+    PhaseLimits limits;
+    bool write_source_maps = true;
+};
+
+struct Huc1ExpandResult {
+    std::vector<Artifact> modules;
+    std::vector<Diagnostic> diagnostics;
+    DependencyGraph dependencies;
+    bool succeeded = false;
+};
+
+[[nodiscard]] Huc1ExpandResult
+huc1_expand(const Huc1ExpandRequest& request);
+
+} // namespace huc
 ```
 
-```c
-typedef struct Huc1ExpandRequest {
-    const char *root_module;
-    const char *const *import_roots;
-    size_t import_root_count;
-    const char *output_directory;
-    HucTargetConfig target;
-    HucPhaseLimits limits;
-    bool write_source_maps;
-} Huc1ExpandRequest;
-
-typedef struct Huc1ExpandResult {
-    HucArtifactArray modules;
-    HucDiagnosticArray diagnostics;
-    HucDependencyGraph dependencies;
-    bool succeeded;
-} Huc1ExpandResult;
-
-Huc1ExpandResult huc1_expand(const Huc1ExpandRequest *request);
-void huc1_expand_result_dispose(Huc1ExpandResult *result);
-```
-
-Exact array and allocator APIs may change, but ownership, inputs, outputs, and
-explicit result disposal are fixed. The public C API never uses `longjmp` for
-ordinary errors. Fatal internal invariant violations may terminate a debug
-build; user program errors are diagnostics.
+Exact container choices may change, but ownership, inputs, outputs, and
+RAII-managed results are fixed. Ordinary user-program errors are returned as
+diagnostics rather than thrown as exceptions.
 
 The driver commands are:
 
@@ -903,7 +898,7 @@ the initial backend produces one C++ translation unit.
 
 Implement:
 
-- CMake C17 targets for the compiler and driver;
+- CMake C++20 targets for the compiler and driver;
 - source buffers and stable source IDs;
 - UTF-8 byte-position tracking with ASCII identifiers initially;
 - line/column lookup;
@@ -1380,7 +1375,7 @@ The design commits record:
 
 Implementation commits should be small and milestone-oriented:
 
-1. common C17 project skeleton;
+1. common C++20 project skeleton;
 2. HUC0 lexer/parser;
 3. HUC0 semantic core;
 4. HIR/MIR and scalar C++ output;
