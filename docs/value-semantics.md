@@ -736,11 +736,9 @@ This restriction does not affect:
 
 Exact self-assignment remains a no-op. When an eligible root source and an
 indirect destination can alias, the backend compares their storage addresses
-before destroying the destination. Container and manual-storage
-implementations that need to relocate non-owner elements through addresses
-will require an explicit compiler-backed storage intrinsic; that low-level API
-is a separate standard-library design, not an implicit user relocation hook in
-HUC0.
+before destroying the destination. Container and manual-storage implementations
+manage backing storage and initialized element ranges explicitly; this does
+not extend ordinary relocation-source eligibility.
 
 ### 7.4 Native handle example
 
@@ -1131,11 +1129,12 @@ A reallocation of `Vector<T>`:
 - drops every element that remains active exactly once;
 - may invalidate raw pointers into its storage without a diagnostic.
 
-Because ordinary HUC0 code cannot relocate a non-owner Move value out through
-a raw element pointer, the eventual `Vector` implementation needs a narrowly
-scoped compiler-backed raw-storage relocation intrinsic. That library
-intrinsic applies the same fixed semantics and is not available as a general
-user move hook. Its API belongs to the separate standard-library design.
+The container is responsible for its backing storage and initialized element
+range, including ensuring that retired source slots receive no element
+cleanup. The only additional raw-storage lifetime intrinsics planned are
+`std::construct_at` and `std::destruct_at`; their interfaces and detailed
+semantics will be designed later. Ordinary relocation-source restrictions and
+the absence of user-defined relocation hooks remain unchanged.
 
 If `Vector<T>` itself supports logical copying, its library implementation can
 declare `clone` and explicitly copy each element. Copying a vector of Move

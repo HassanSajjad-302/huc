@@ -709,9 +709,11 @@ A future standard library may also provide a stable-address node container,
 but HUC0 does not need a special pin type for the initial milestone.
 
 Relocating non-owner Move elements through raw storage is not an ordinary HUC0
-source operation. Contiguous containers that need it use a narrow
-compiler-backed storage intrinsic with the same fixed relocation semantics;
-that future library API is not a user-defined move constructor.
+source operation. Contiguous containers manage backing storage and initialized
+element ranges explicitly, including preventing cleanup of retired source
+slots. The only additional raw-storage lifetime intrinsics planned are
+`std::construct_at` and `std::destruct_at`, whose interfaces and detailed
+semantics will be designed later.
 
 A fixed inline slot can be used only when the value is constructed directly in
 its final storage and no later path relocates, reorders, returns, or captures it

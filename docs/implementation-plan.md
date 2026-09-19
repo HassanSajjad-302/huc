@@ -322,9 +322,14 @@ Primitive `T&` subobjects are exempt because relocation writes the source
 owner to its active null representation. Copying/cloning an indirectly reached
 value also remains valid. An eligible root source may replace an indirect
 destination; if the two can alias, exact storage identity is checked before
-destination destruction. A future compiler-backed raw-storage intrinsic may
-serve container implementations, but no general indirect relocation operation
-is part of HUC0.
+destination destruction. No general indirect relocation operation is part of
+HUC0.
+
+Container implementations are responsible for backing storage and initialized
+element ranges. The only additional raw-storage lifetime intrinsics planned
+are `std::construct_at` and `std::destruct_at`; their interfaces and detailed
+semantics are deferred to later standard-library design. This does not change
+ordinary relocation-source eligibility.
 
 ### 5.5 Construction and initialization
 

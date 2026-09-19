@@ -655,9 +655,10 @@ Primitive `T&` is the exception because relocation writes its active-null state
 in-band. An owner may relocate from any writable direct or indirect owner
 place. Indirect destinations may also be replaced when their validity and
 activity preconditions hold; the restriction above concerns non-owner
-sources. A future low-level take-owner or relocate-at facility for containers
-and manually managed storage requires a separate intrinsic design, not a
-user-overloadable relocation hook.
+sources. Containers manage their backing storage and initialized element
+ranges explicitly. The only additional raw-storage lifetime intrinsics planned
+are `std::construct_at` and `std::destruct_at`; their interfaces and lowering
+will be designed later, without adding user-overloadable relocation hooks.
 
 ## 8. Compile-time evaluator
 

@@ -628,9 +628,11 @@ A primitive `T&` field or element is exempt because relocation stores null in
 the source owner, which remains active. `copy *owner` is also valid because it
 leaves the pointee active, as is relocating the whole owner. An eligible root
 source may replace a valid indirect destination; if it may alias that
-destination, exact storage identity is checked before destruction. Low-level
-container relocation through raw storage requires a future compiler-backed
-intrinsic rather than an implicit HUC0 operation.
+destination, exact storage identity is checked before destruction. Containers
+manage backing storage and initialized element ranges explicitly. The deferred
+raw-storage lifetime intrinsics are limited to `std::construct_at` and
+`std::destruct_at`, with interfaces and detailed semantics to be designed
+later; they do not broaden ordinary relocation-source eligibility.
 
 Inline values whose correctness depends on a stable address are an unchecked
 boundary of this model. For example, destructive relocation does not repair a
