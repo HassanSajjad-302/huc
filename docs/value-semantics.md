@@ -39,8 +39,30 @@ The pointer-like forms do not compose:
 `addressof` accepts only an inline non-pointer place: it returns `T*` for a
 fixed place and `mod T*` for a writable place. Applying it to a raw-pointer or
 owner slot is a diagnostic. Using `owner` in a `T*` context observes the
-pointee; it does not alias the owner word. Direct owner-slot reseating uses
-consume-and-return. Binary `&` remains bitwise AND.
+pointee; it does not alias the owner word. Ordinary typed owner-slot reseating
+uses consume-and-return. Binary `&` remains bitwise AND.
+
+The separate non-overloadable intrinsic `std::slot_of(place) -> usize` exposes
+the address of an addressable storage slot, including a raw-pointer or owner
+slot. For an owner, this is the address of the owner word, not its pointee.
+`usize` is target-pointer-sized. The operation evaluates the place once without
+loading or transferring its value. It does not clone, destroy, allocate,
+extend a lifetime, or change cleanup state.
+
+An ordinary function may receive this integer and reconstruct a raw pointer
+with `ptr_as<T*>(address)`. This is untyped representation access, not a new
+typed owner reference: `T&*` and the other composed forms remain forbidden.
+Byte access through `u8*` or `c8*` can inspect or manipulate representation;
+it does not itself perform HUC ownership or lifetime operations. In particular,
+duplicating an owner word does not create a second valid owner.
+
+Taking a fixed slot's address is allowed. The compiler does not track mutation
+permissions through these integers and casts or insert permission checks.
+The programmer must preserve actual storage permissions, valid representation,
+lifetime, alignment, unique ownership, and cleanup obligations. Writing an
+actually fixed slot remains undefined behavior; ordinary typed `mod` rules
+are unchanged. See the language specification's pointer-layering and cast
+sections for the complete contract.
 
 Mutability is independent at each layer:
 
@@ -1376,6 +1398,7 @@ The compiler must reject:
 - ordinary use of inactive storage when detected;
 - any chained pointer/owner form, including one hidden by an alias;
 - `addressof` applied to a pointer or owner slot;
+- `std::slot_of` applied to a non-place, such as a literal or function symbol;
 - attempts to bind `T&` as though it were a C++ reference alias.
 
 Useful warnings include:

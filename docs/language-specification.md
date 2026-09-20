@@ -312,6 +312,35 @@ composed type. Writing an owner expression where `T*` is expected instead
 performs pointee observation; it never produces an address to the owner word.
 Binary `&` remains bitwise AND.
 
+The separate compiler-known, non-overloadable intrinsic
+`std::slot_of(place) -> usize` returns the untyped address of the storage slot
+designated by `place`. It accepts addressable locals, parameters, fields,
+elements, and dereferenced data storage, including raw-pointer and owner slots.
+An owner operand designates its owner word, not its pointee: a null owner value
+still has an addressable slot. Forming a place through an invalid pointer does
+not become valid merely because the intrinsic returns an integer.
+
+The operand's place computation is evaluated exactly once. The intrinsic does
+not load, copy, relocate, or destroy the stored value, allocate or materialize a
+temporary, extend storage lifetime, or change activation or cleanup state.
+Literals, non-place results, types, and function symbols are not valid operands.
+The returned integer may be passed to an ordinary function and converted to a
+one-level raw pointer using `ptr_as` (section 5.5). `usize` is target-pointer-sized;
+the value is a data-storage address, not a portable serialized address.
+
+Both fixed and writable slots may have their addresses taken this way. The
+compiler does not track mutation permissions through the integer and cast or
+insert permission checks. Correct alignment, storage lifetime, access type,
+valid representation, unique ownership, and cleanup remain the programmer's
+responsibility. Writing an actually fixed slot is undefined behavior, even if
+the reconstructed pointer has leading `mod`. Raw representation access does
+not automatically destroy a replaced owner, null another owner, or update
+compiler-maintained cleanup state. It does not make inactive storage readable
+or permit two owners of one allocation.
+
+`std::slot_of` is an untyped escape hatch, not a typed owner-slot alias. It does
+not add composed pointer types or change ordinary typed `mod` checks.
+
 `mod` permissions remain layer-specific through containment. A fixed
 structure prevents assignment to its field slots and writable access to an
 inline field subobject. It does not remove a leading `mod` carried through a
@@ -487,12 +516,25 @@ or owning pointer. A method call is not an ownership-binding context.
 HUC 0.1 provides explicit casts:
 
 ```huc
-as<T>(value)           // checked by static conversion rules
-ptr_as<T*>(pointer)    // raw pointer reinterpretation
+as<T>(value)                    // checked by static conversion rules
+ptr_as<T*>(pointer_or_address)  // raw pointer or usize address reinterpretation
 ```
 
-`ptr_as` is unchecked. Numeric narrowing is explicit. Representation
-reinterpretation (`bit_as`) is deferred from 0.1.
+`ptr_as` accepts a raw pointer or a `usize` data address and produces the
+specified one-level raw pointer type, including a leading `mod` where spelled.
+It does not produce an owner or a composed pointer type. A `usize` obtained
+from `std::slot_of(place)` can be converted back to a pointer addressing that
+same storage while the storage remains valid. Targets must support this
+data-address round trip. Arbitrary integer values do not establish valid
+storage or access rights.
+
+`ptr_as` is unchecked: the cast does not validate alignment, lifetime,
+representation, mutation permissions, or access-type compatibility. For
+example, casting an owner slot's address to `Widget*` does not make that slot a
+`Widget`; its bytes are the owner representation, not the owned object. Byte
+views through `u8*` or `c8*` follow section 5.3. No function-address conversion
+is provided by this rule. Numeric narrowing is explicit. Representation
+reinterpretation of values (`bit_as`) is deferred from 0.1.
 
 ## 6. Value transfer, copying, and destruction
 
@@ -1662,6 +1704,8 @@ The following list is representative rather than exhaustive:
 - signed overflow, invalid shifts, and integer division by zero;
 - data races;
 - accessing a value through an incompatible pointer type;
+- writing actually fixed storage through an untyped slot address;
+- raw slot manipulation that violates ownership or cleanup obligations;
 - reading uninitialized storage;
 - returning or storing an observer and later using it after its pointee dies.
 
@@ -1703,6 +1747,7 @@ The closest C++ equivalents are:
 | `T*` | `T*` |
 | `T&` | `std::unique_ptr<T>` |
 | `addressof(value)` | `std::addressof(value)` or `&value` |
+| `std::slot_of(place)` | a data-slot address converted to `std::uintptr_t` |
 | owner relocation, `let T& b = a` | `auto b = std::move(a)` |
 | `inspect(a)` where parameter is `T*` | `inspect(a.get())` |
 | `consume(a)` where parameter is `T&` | `consume(std::move(a))` |

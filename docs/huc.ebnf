@@ -428,7 +428,9 @@ binary-op         = "||" | "&&"
 (* binary-op is written compactly here. The binding powers and left/right
    associativity are those specified by the Pratt-parser table in the
    implementation and language specification. There is no unary "&".
-   addressof(place) is a compiler-known, non-overloadable ordinary call form. *)
+   addressof(place) and std::slot_of(place) are compiler-known,
+   non-overloadable ordinary call forms. Their operand eligibility and the
+   raw-pointer-or-usize source rule for ptr_as are semantic constraints. *)
 
 literal           = integer-literal
                   | float-literal

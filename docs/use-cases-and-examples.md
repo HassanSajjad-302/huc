@@ -24,6 +24,7 @@ Core syntax and semantics in these examples are intended to be normative:
 - `mod`;
 - `T*` and `T&`;
 - `addressof` for inline-place observation;
+- `std::slot_of` for unchecked, untyped slot addresses;
 - `fn`, `fn1`, and `fn2`;
 - `struct`, `struct1`, and `struct2`;
 - `if1`, `for1`, and `while1`;
@@ -235,6 +236,25 @@ fn inline_address_example() -> i32 {
 `addressof` rejects pointer and owner slots because their addresses would
 require one of the forbidden composed pointer types. Unary `&` is not HUC
 syntax.
+
+Untyped slot addresses are a separate, unchecked facility:
+
+```huc
+fn owner_slot_address_example() -> void {
+    let Counter& mod owner = new Counter();
+    let usize address = std::slot_of(owner);
+    let mod u8* bytes = ptr_as<mod u8*>(address);
+    // bytes addresses the owner word's representation, not the Counter.
+    // Taking these addresses does not transfer ownership.
+}
+```
+
+An ordinary function can receive `address`, but it receives no typed owner-slot
+reference or automatic lifecycle handling. Taking a fixed slot's address is
+also permitted; writing actually fixed storage remains undefined behavior,
+without compiler permission tracking through the integer and cast. The caller
+is responsible for storage lifetime, alignment, representation, and ownership
+invariants. This does not make `Counter&*` a valid type.
 
 ### 3.3 Observation and consumption
 

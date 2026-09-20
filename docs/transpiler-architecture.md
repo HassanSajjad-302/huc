@@ -504,6 +504,17 @@ calculation with no call. When an owner expression is required as `T*`, the
 resolved operation is observation of the owned `T`, not taking the storage
 address of the owner word.
 
+`std::slot_of` accepts any addressable data place, including a raw-pointer or
+owner slot, and lowers to that slot's address converted to `usize`. It does
+not load the value or invoke relocation, observation, or cleanup. Reject
+non-place operands rather than materializing temporaries. An explicit `ptr_as`
+from `usize` reconstructs a one-level raw pointer; it never synthesizes a
+composed pointer type. No permission metadata is carried through the integer
+or checked at runtime. Actual mutation permissions and lifetime/ownership
+preconditions remain caller obligations, not additional compiler liveness
+tracking. Address exposure must participate in escape/alias analysis; an
+exposed owner slot is not exclusively accessible through its original name.
+
 Permission checking remains layer-specific after member access. A fixed
 containing object prevents reseating a pointer/owner field and writable access
 to an inline field, but it does not erase leading `mod` permission carried by
@@ -620,6 +631,8 @@ Representative HIR operations:
 LoadCopy(place)
 LoadRelocate(place)
 AddressOf(place)
+SlotAddress(place)
+PointerFromAddress(address, raw_pointer_type)
 OwnerObserve(place)
 OwnerRelocate(place)
 Clone(value)
@@ -974,6 +987,8 @@ Clone destination, source
 Relocate destination, source
 OwnerRelocate destination, source
 AddressOf destination_raw, source_inline
+SlotAddress destination_usize, source_place
+PointerFromAddress destination_raw, source_usize
 OwnerObserve destination_raw, source_owner
 ConstructInPlace destination, constructor, parameter_places
 Drop place
@@ -1210,6 +1225,8 @@ carefully. The wrapper remains one pointer.
 | `T&` | `huc_rt::owner<T>` |
 | owner observation | `.get()` |
 | `addressof(value)` | `std::addressof(value)` or an equivalent raw address |
+| `std::slot_of(place)` | the slot's data-storage address converted to target `usize` |
+| `ptr_as<T*>(address)` for `usize` | target-supported integer-to-data-pointer reconstruction |
 | owner destructive relocation | `std::move(owner)` or `.release()` into a wrapper |
 | `T(values)` initializing a final place | direct initialization or placement construction in that place |
 | `new T(values)` | nonthrowing allocation, terminate-on-null check, then direct construction in that allocation |
@@ -1217,6 +1234,15 @@ carefully. The wrapper remains one pointer.
 | `adopt<T>(raw)` | explicit owner construction |
 | `release(owner)` | `.release()` |
 | `reset(owner)` | `.reset()` |
+
+The backend must preserve the specified data-address round trip, using
+`std::uintptr_t` or an equivalent target-supported unsigned representation.
+This requires no allocation or helper call. Taking an owner slot's address
+addresses its stored owner representation, never `.get()`. Representation
+access must respect HUC's byte-aliasing rules, not depend on an incompatible
+C++ typed dereference. Raw writes do not automatically update HUC drop flags
+or perform lifecycle operations; ordinary owner cleanup must observe any valid
+changes to its stored representation.
 
 Generated C++ may use `std::move`; HUC source never does. In generated code,
 that spelling only selects compiler-generated transport machinery. It does not
@@ -1503,7 +1529,9 @@ symbol hashes must be identical across processes for identical inputs.
 
 - tokenization, including `&`, `<`, `>`, `@`, and numbered keywords;
 - Pratt precedence, ambiguous angle postfixes, and recovery;
-- non-composable pointer-suffix and forbidden owner-address diagnostics;
+- non-composable pointer-suffix and forbidden typed owner-address diagnostics;
+- slot addresses of fixed, inline, raw-pointer, and owner slots;
+- invalid non-place slot operands and integer-to-pointer type checking;
 - canonical type interning;
 - overload ranking;
 - C-linkage signature acceptance and rejection;

@@ -18,7 +18,8 @@ HUC `T&` is an owning handle, not a C++ reference. HUC has no general reference
 type and no `T&&`. `T*` and `T&` are the only pointer-like forms and never
 compose, so `T**`, `T*&`, and `T&*` are invalid. HUC also has no unary `&`;
 the non-overloadable `addressof(value)` intrinsic obtains a raw observer to an
-inline value.
+inline value. The unchecked `std::slot_of(place)` intrinsic instead returns
+an untyped slot address as `usize`, including for raw-pointer and owner slots.
 
 A type whose ordinary binding transfers rather than copies is classified
 **Move**, but that transfer operation is destructive relocation rather than

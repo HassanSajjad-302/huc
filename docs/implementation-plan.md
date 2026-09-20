@@ -103,7 +103,7 @@ HUC0 contains:
 - `mod` permissions;
 - raw pointers `T*`;
 - unique owners `T&`;
-- `addressof` and the core type-operand intrinsics;
+- `addressof`, `std::slot_of`, and the core type-operand intrinsics;
 - constructors, methods, `clone`, and `drop`;
 - runtime expressions and control flow;
 - local `let auto` inference.
@@ -209,8 +209,26 @@ HUC0 has only the raw-pointer constructor `T*` and the unique-owner constructor
 `T&`. Neither constructor composes: `T**`, `T*&`, `T&*`, `T&&`, and equivalent
 alias-hidden forms are diagnostics. Writing an owner expression in a `T*`
 observer context accesses the owned pointee; it does not take the owner slot's
-address. Direct owner-slot reseating therefore uses consume-and-return rather
-than an aliasing owner reference. Binary `&` remains bitwise AND.
+address. Ordinary typed owner-slot reseating therefore uses consume-and-return
+rather than an aliasing owner reference. Binary `&` remains bitwise AND.
+
+The non-overloadable `std::slot_of(place) -> usize` intrinsic separately exposes
+the untyped address of any addressable data slot, including raw-pointer and
+owner slots. It evaluates the place once without loading its value, performs
+no ownership operation, and does not extend storage lifetime or update cleanup
+state. It accepts fixed slots as well as writable ones, but does not
+materialize storage for rvalues or accept function symbols. `usize` is the
+target-pointer-width integer; `ptr_as<T*>(address)` accepts a `usize` slot
+address to reconstruct a one-level raw pointer. Byte views use `u8*` or `c8*`;
+the integer does not make an incompatible typed access valid.
+
+This path is deliberately unchecked and introduces no typed owner-slot alias.
+Mutation permissions are not tracked through the integer and cast, and no
+permission checks are inserted. The programmer must preserve storage lifetime,
+alignment, actual mutation permissions, valid representation, unique ownership,
+and cleanup obligations. Writing an actually fixed slot remains undefined
+behavior. Ordinary typed `mod` checks and the ban on composed pointer types
+remain unchanged.
 
 The default representation is one address-sized word:
 
@@ -972,7 +990,7 @@ Acceptance:
 
 - type and name errors point to both use and candidate declaration;
 - `mod` cannot be gained implicitly;
-- fixed storage cannot be assigned;
+- fixed storage cannot be assigned through ordinary typed operations;
 - fixed owners cannot be relocated;
 - non-owner Move subobjects cannot be explicit relocation sources;
 - all constructor field obligations are checked.
@@ -986,6 +1004,7 @@ HIR records:
 - resolved symbol;
 - value use: read, observe, copy, relocate, or place;
 - explicit `addressof` of an eligible inline place;
+- untyped `std::slot_of` and explicit `usize`-to-raw-pointer reconstruction;
 - source origin;
 - explicit conversion selected by HUC.
 
@@ -1303,6 +1322,8 @@ Include:
 - relocation from fixed storage;
 - non-owner relocation from a pointee, field, or array element;
 - `addressof` applied to a pointer or owner slot;
+- `std::slot_of` applied to a literal, temporary value, or function symbol;
+- `ptr_as` with an invalid source type or a composed pointer target;
 - mutation without `mod`;
 - copying a Move type without `clone`;
 - malformed or duplicate `clone` and `drop` methods;
@@ -1324,6 +1345,8 @@ Compile generated C++20 and test:
 - argument side-effect ordering;
 - constructors and field initialization order;
 - owner observation and consumption;
+- slot addresses for inline, pointer, owner, and fixed storage;
+- slot-address round trips and byte access without extra ownership operations;
 - conditional relocations;
 - Copy-value binding and assignment;
 - explicit copy/clone and clone-then-replace assignment;
