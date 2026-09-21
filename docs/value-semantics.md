@@ -689,6 +689,9 @@ For example, `let T a = b;` for an inline Advanced `T` may keep the value in
 the same registers and need no machine instruction for the transfer. `b`
 still becomes inactive; physical reuse does not make it usable afterward.
 
+HUC permits transfers to be optimized away; it does not guarantee that every
+transfer uses the same physical storage.
+
 ### 7.1 Why relocation is not customizable in HUC0
 
 There is no recognized declaration such as:
