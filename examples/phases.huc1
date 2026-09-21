@@ -16,7 +16,7 @@ if1 (BuildDiagnostics) {
     this skipped body is deliberately not valid HUC !!!
 }
 
-// Type-body phase control selects members before the runtime layout is checked.
+// Phase control inside a type selects fields before its runtime layout is checked.
 struct Report {
     if1 (BuildDiagnostics) {
         let u64 mod messages;
@@ -93,8 +93,8 @@ fn2 add_at_compile_time(i32 left, i32 right) -> i32 {
     return sum;
 }
 
-// A compiler helper emits at its inherited call-site cursor, not here beside
-// its definition.
+// This compiler helper writes code where it is called, not here beside its
+// definition.
 fn2 declare_local_counter() -> void {
     compiler::emit_huc("let i32 mod generated_counter = 0;");
 }
@@ -128,7 +128,7 @@ fn main() -> i32 {
     buffer.value = left + right;
     io::println(buffer.capacity());
 
-    // One variable family can residualize different runtime let declarations.
+    // One variable family can produce different runtime let declarations.
     let1(auto T) slot {
         let T slot = T();
     }
@@ -145,13 +145,13 @@ fn main() -> i32 {
     slot<i32*> = pointer_cell.value;
     slot<bool> = true;
 
-    // @ forces complete compiler evaluation and embeds the resulting literals.
+    // @ runs the whole call at compile time and inserts the result as a literal.
     let i32 folded = @add_at_compile_time(20, 22);
     let i32 smaller = @choose<i32, false>(3, 5);
     io::println(folded + smaller);
 
-    // The nested helper call inherits this block cursor. The emitted text is
-    // parsed only by the second-round HUC0 translator.
+    // The helper writes its output here in this block. Only the second-round
+    // HUC0 translator parses that text.
     @declare_local_counter();
     generated_counter += 1;
 

@@ -2,9 +2,24 @@
 
 Status: implementation design for HUC 0.1
 
-This document specializes the controlling
-[HUC Implementation Plan](implementation-plan.md). If an unresolved
-disagreement remains, the plan controls.
+This document gives implementation details for the
+[HUC Implementation Plan](implementation-plan.md). If the two documents
+disagree, follow the plan.
+
+Key terms:
+
+- **AST**: abstract syntax tree, which records parsed source syntax.
+- **HIR**: high-level intermediate representation, with resolved names,
+  types, and value operations.
+- **MIR**: mid-level intermediate representation, with explicit execution
+  order, control flow, transfers, and cleanup.
+- **Lowering**: translating an operation into a simpler representation.
+- **Residualization**: producing the runtime code left after compile-time work.
+- **Materialization**: writing a compiler-known value as valid HUC0 runtime
+  syntax.
+- **Place**: a storage location. **Liveness** here means whether that place
+  contains an active HUC value that may need cleanup.
+- **Insertion cursor**: the position where generated HUC0 text will be added.
 
 ## 1. Recommendation
 
@@ -25,25 +40,26 @@ C17 headers + one root translation unit
 
 The translators are independently usable. Milestone 1 implements
 HUC0-to-C17 first. Milestone 2 then implements HUC1-to-HUC0 and invokes the
-already public HUC0 translator only through the written textual module tree.
+already public HUC0 translator only through the generated HUC0 module files.
 A user may always write, inspect, and compile HUC0 without using HUC1.
 
-This is a bootstrap choice, not a semantic dependency. HUC has its own parser,
-type checker, staging evaluator, specialization engine, ownership lowering,
+This choice is for the first implementation; it does not make HUC's rules
+depend on C or C++. HUC has its own parser, type checker, staging evaluator,
+specialization engine, ownership lowering,
 and intermediate representation, all implemented in C++20. Generated C17 is a
-separate artifact and is never treated as HUC's semantic authority.
+separate output artifact and never defines HUC's behavior.
 
-The reason for choosing C is explicit semantic lowering. HUC already needs
-to resolve construction, destructive relocation, active/inactive state,
+The reason for choosing C is that HUC already needs to make its operations
+explicit: construction, destructive relocation, active/inactive state,
 destruction, and evaluation order. C structures, pointers, and generated free
 functions express those operations without adding implicit constructor,
 assignment, or destructor behavior.
 
 The first compiler must emit cleanup for every normal scope exit, early
 return, loop exit, replacement, and abandoned initialized prefix, with flags
-where conditional liveness requires them. This is part of MIR elaboration,
-not an optional later feature. The same explicit MIR can support future C++
-or native-code output without redoing HUC semantic analysis.
+where a value is active on some paths but not others. Building this cleanup
+into MIR is required from the start. The same explicit MIR can support future
+C++ or native-code output without redoing HUC semantic analysis.
 
 ## 2. C versus C++ as the first emitted backend
 
@@ -60,9 +76,9 @@ or native-code output without redoing HUC semantic analysis.
 The C emitter must not translate HUC source by token substitution. HUC owners
 and observers may share a C pointer representation while retaining different
 HUC operations. Copying such a C pointer does not by itself implement an owner
-transfer or discharge any cleanup obligation. The compiler also implements
-final-destination construction and HUC fixedness rather than inheriting them
-from C declarations.
+transfer or satisfy HUC's cleanup requirements. The compiler also implements
+construction in final storage and HUC's fixed-by-default permissions; C
+declarations do not supply those rules.
 
 Use ISO C17 as the initial output baseline. Compiler-specific extensions,
 direct C++ interoperability, and additional backends are not bootstrap
@@ -242,7 +258,8 @@ normal `Huc0TranspileRequest`.
 ### 5.1 Source manager
 
 `SourceManager` owns immutable source buffers and assigns each one a `FileId`.
-Every token and syntax node carries a compact half-open `SourceSpan`:
+Every token and syntax node carries a compact `SourceSpan`. Its range includes
+the start position but excludes the end position (a half-open range):
 
 ```cpp
 typedef struct HucSourceSpan {
@@ -414,11 +431,10 @@ characters, line comments, and block comments. It does not produce HUC tokens
 for the body.
 
 Only a selected `if1` branch, a reached phase-loop body, or a chosen family
-body is subsequently lexed and parsed. An unselected or zero-iteration body
-may therefore contain text that is not valid HUC; only an unmatched outer
-delimiter is reportable. Ordinary phase-free HUC0 regions selected for output
-are preserved for the per-module residualizer and validated anew after the
-textual boundary.
+body is then lexed and parsed. A skipped body may contain invalid HUC; the
+scanner may report only that it cannot find the outer closing delimiter.
+Ordinary HUC0 code selected for output is kept by the per-module residualizer.
+The HUC0 translator checks it again after it has been written to a file.
 
 `struct1`, `fn1`, and `let1` use distinct indexed declaration nodes even
 though they share binder, pattern, predicate, and deferred-body components.
@@ -440,7 +456,7 @@ The HUC0 translator owns runtime semantic analysis:
 3. resolve concrete types and layouts;
 4. enforce permissions, constructors, and special-operation rules;
 5. build concrete typed HIR;
-6. elaborate sequencing, relocation, and cleanup into MIR.
+6. make execution order, relocation, and cleanup explicit in MIR.
 
 The module checker admits runtime globals only for drop-free Basic scalars and
 raw pointers. It requires constant initializers for fixed globals, supplies
@@ -452,11 +468,11 @@ analysis before printing HUC0. The HUC0 translator then reparses and checks
 that text exactly as it checks user-written HUC0. No generic HIR or
 specialization cache crosses the translator boundary.
 
-A selected deferred body is reparsed with its inherited module, type,
-function, or block context. Module/type bodies may mix residual
-declarations/members with compiler-only statements whose operands are
-compiler-available; those statements execute and erase. Skipped bodies remain
-scanner-opaque.
+A selected deferred body is parsed according to its enclosing module, type,
+function, or block. Module/type bodies may mix generated runtime declarations
+or members with compiler-only statements. Those statements must use values
+available at compile time; they execute during expansion and disappear from
+the output. Skipped bodies are only delimiter-scanned, not parsed.
 
 ### 6.1 Symbol table
 
@@ -479,7 +495,7 @@ the HUC0 translator.
 
 ### 6.2 Canonical types
 
-Types are interned:
+Types are interned: equivalent types share one canonical compiler record.
 
 ```cpp
 typedef enum HucTypeKind {
@@ -518,14 +534,15 @@ non-place operands rather than materializing temporaries. An explicit `ptr_as`
 from `usize` reconstructs a one-level raw pointer; it never synthesizes a
 composed pointer type. No permission metadata is carried through the integer
 or checked at runtime. Actual mutation permissions and lifetime/ownership
-preconditions remain caller obligations, not additional compiler liveness
-tracking. Address exposure must participate in escape/alias analysis; an
-exposed owner slot is not exclusively accessible through its original name.
+preconditions remain the caller's responsibility; the compiler does not add
+liveness tracking for them. Escape and alias analysis must account for the
+exposed address: code can now access the owner slot through more than its
+original name.
 
-Permission checking remains layer-specific after member access. A fixed
-containing object prevents reseating a pointer/owner field and writable access
-to an inline field, but it does not erase leading `mod` permission carried by
-that field to a separately allocated pointee.
+Member access preserves each layer's permissions. A fixed object prevents
+replacement of a pointer/owner field and mutation of an inline field. It does
+not remove a field's leading `mod` permission to mutate the separate object
+that the field points to.
 
 Each concrete type records:
 
@@ -656,25 +673,24 @@ final `this` address for constructors and avoids inventing an observable
 relocation. A call that returns a structure uses an explicit result place so
 the callee can construct directly there.
 
-HIR place metadata distinguishes named storage from a fresh unnamed
-Advanced-producing result. Relocation from a named place requires the source slot
-permission expressed by trailing `mod`. A fresh function result, `new T`
-owner result, explicit `copy`/clone result, or unavoidable constructor
-temporary is intrinsically consumable exactly once and needs no writable
-source spelling. Direct destination construction remains preferred and creates
-no such temporary.
+HIR records whether a place is named storage or a fresh unnamed Advanced
+result. Transferring from named storage requires trailing `mod`. A fresh
+function result, `new T` owner result, explicit `copy`/clone result, or
+unavoidable constructor temporary can be transferred once without a source
+declaration marked `mod`. Direct construction in the destination remains
+preferred and creates no such temporary.
 
 The metadata also distinguishes compiler-trackable root places from
 subobjects and indirect places. An explicit source-level relocation of a
 non-owner Advanced value is accepted only from a whole tracked local, parameter,
 temporary, or result. It is rejected from `value.field`, `array[i]`,
 `*pointer`, and `pointer->field`: the enclosing cleanup would otherwise need
-hidden liveness inside nominal object storage. A whole-root representation
-transfer includes all subobjects without separate field-relocation operations.
+hidden state inside the object to track which parts remain active. Transferring
+a whole root value includes all subobjects without separate field transfers.
 
-Primitive `T&` is the exception because relocation writes its active-null state
-in-band. An owner may relocate from any writable direct or indirect owner
-place. Indirect destinations may also be replaced when their validity and
+Primitive `T&` is the exception because relocation leaves its source as a
+usable null owner. An owner may relocate from any writable direct or indirect
+owner place. Indirect destinations may also be replaced when their validity and
 activity preconditions hold; the restriction above concerns non-owner
 sources. Containers manage their backing storage and initialized element
 ranges explicitly. The only additional raw-storage lifetime intrinsics planned
@@ -692,9 +708,9 @@ Interpret typed HUC1 phase AST in-process. Do not:
 - represent metadata as source strings;
 - use host addresses as stable identities.
 
-An interpreter is slower than native execution but is dramatically simpler to
-make deterministic, inspectable, cacheable, and source-mapped. Performance can
-be improved later with bytecode.
+An interpreter is slower than native execution, but makes it much easier to
+provide repeatable results, inspect execution, cache results, and report errors
+at source locations. Bytecode can improve performance later.
 
 ### 8.2 Values
 
@@ -758,7 +774,8 @@ mode is a diagnostic.
 
 A normal `fn1` call requests or calls a concrete runtime specialization.
 Prefixing that call with `@` instead requires complete compile-time evaluation,
-and only a result materializable in HUC0 may cross back out of the island.
+and only a result that can be written as a HUC0 value may leave the island
+for runtime code.
 
 ### 8.5 Resource control
 
@@ -906,13 +923,16 @@ importable in 0.1. Every requested type must already be nameable through the
 defining module's import closure; a requester-local type that would create a
 reverse dependency is rejected in 0.1.
 
-Expansion uses a deterministic whole-graph worklist. Initial requests are
-sorted by stable source identity; expanding one specialization may enqueue
-more requests, and processing continues to a fixpoint. A defining module's
-HUC0 output/cache dependency includes the sorted transitive closure of concrete
-specialization keys assigned to that module. A newly requested specialization
-in an importer therefore invalidates or extends the defining module output
-rather than reusing an incomplete cached module.
+Expansion uses a deterministic worklist across the whole module graph.
+Initial requests are sorted by stable source identity. Expanding one
+specialization may add more requests; processing continues until no new
+requests remain (a fixpoint).
+
+A defining module's output and cache dependency include the sorted keys of
+all specializations assigned to it, including those found through other
+requests. A new request in an importing module therefore invalidates or
+extends the defining module's output. The compiler must not reuse a cached
+module that lacks the newly requested specialization.
 
 ## 10. Bootstrap raw generation
 
@@ -1024,7 +1044,7 @@ necessary to preserve HUC's left-to-right order.
 `Relocate` is the complete destructive-relocation operation, not one half of
 an operation that requires a later `Deactivate`. It transfers the whole
 non-owner value's representation and makes the source and all its subobjects
-inactive as an intrinsic postcondition. It never calls source `drop`, performs
+inactive as part of that operation. It never calls source `drop`, performs
 source component cleanup, or requires embedded-owner nulling. In particular,
 it does not expand owner fields into `OwnerRelocate` operations.
 
@@ -1033,8 +1053,8 @@ the pointer and leaves the source active and usable as a null owner. This
 includes moving an owner field individually, but not transferring that word
 inside a whole aggregate relocation. Null owner words are valid in both cases.
 
-The two-place MIR operations have a distinct-storage precondition. Relocation
-assignment emits a static no-op or a runtime address-equality branch before
+The two-place MIR operations require different source and destination storage.
+Relocation assignment emits a static no-op or a runtime address-equality branch before
 reaching `Relocate`/`OwnerRelocate` when source and destination might alias.
 
 `ConstructInPlace` makes an inactive final destination active only after its
@@ -1057,11 +1077,11 @@ Active
 MaybeActive
 ```
 
-This analysis exists to generate exactly-once destruction, not to claim memory
-safety. A definitely `Inactive` use in compiler-tracked control flow is a
-required diagnostic. A `MaybeActive` use remains permitted in unchecked mode
-and is undefined behavior if the executed path is inactive; the compiler may
-warn or a strict lint mode may reject it.
+This analysis ensures exactly-once destruction; it does not make HUC
+memory-safe. The compiler must reject a use it knows is `Inactive`. A
+`MaybeActive` use remains allowed in unchecked mode, but executing it on a
+path where the value is inactive is undefined behavior. The compiler may
+warn, or a strict lint mode may reject it.
 
 ### 12.2 Drop flags
 
@@ -1072,9 +1092,9 @@ warn or a strict lint mode may reject it.
   active-null source.
 - successful construction or reinitialization marks the destination active.
 
-A conditional flag belongs to one MIR storage place. It is emitted as a
-sidecar local or guard state and never becomes a field of the nominal HUC type.
-Consequently it does not change `sizeof(T)`, field offsets, FFI layout, or the
+A conditional flag belongs to one MIR storage place. It is stored separately,
+as a local or guard state, never as a field of the HUC type. It therefore does
+not change `sizeof(T)`, field offsets, foreign-interface layout, or the
 one-word representation of `T&`.
 
 ### 12.3 Cleanup edges
@@ -1123,7 +1143,7 @@ Elaboration handles the operations as follows:
   without requiring source-field clearing;
 - `T&` binding becomes `OwnerRelocate`; it transfers the pointer and stores
   null in the still-active source owner;
-- a fresh unnamed Advanced-producing result place is intrinsically consumable;
+- a fresh unnamed Advanced result can be transferred directly;
   relocation from named storage requires trailing `mod`;
 - relocation assignment first proves distinctness or compares source and
   destination storage addresses at runtime when aliasing is possible; exact
@@ -1286,13 +1306,12 @@ evaluate_and_bind_parameter_1_in_place(&huc_frame.parameter_1);
 call_impl(&huc_frame.parameter_0, &huc_frame.parameter_1);
 ```
 
-Internal generated function implementations may accept pointers to these
-already initialized parameter places instead of C by-value parameters. That
-makes final ABI transport semantically inert: it cannot invoke a clone,
-relocation, constructor, or user hook in an order chosen by C. The callee
-still sees ordinary HUC by-value parameter storage, and MIR controls its
-cleanup. Generated wrapper thunks may recover a conventional ABI where needed
-after all observable HUC parameter binding has completed.
+Generated functions may accept pointers to these already-initialized
+parameter slots instead of C by-value parameters. Passing those pointers
+must not call a clone, relocation, constructor, or user hook in an order
+chosen by C. The called function still sees ordinary HUC by-value parameters,
+and MIR controls their cleanup. Generated wrappers may provide a conventional
+ABI where needed, after all HUC parameter initialization has completed.
 
 The holder's concrete type and initialization operation come from typed HIR:
 Basic parameters use `Copy`, Advanced parameters use `Relocate`, observing
@@ -1329,8 +1348,9 @@ handle may retain its old bits, but the source never receives a HUC drop call.
 No automatic C cleanup must be neutralized. A standalone relocated-from `T&`
 is different: the transfer writes null, leaving an active usable empty owner.
 
-Conditional liveness uses a sidecar boolean where static analysis cannot
-select cleanup directly. It is never a member of the nominal C value type.
+When static analysis cannot decide whether cleanup is needed, a separate
+boolean tracks whether the value is active. It is never a field of the C
+value type.
 HUC temporaries follow the same MIR rules. Cleanup calls or shared cleanup
 labels cover every normal exit and active destination replacement.
 
@@ -1505,13 +1525,14 @@ fragments. Local/type fragments enter the declaration; module fragments enter
 the defining module buffer once. Repeated normal requests only reference that
 one result.
 
-An actual phase-execution occurrence—a `fn2` call, forced `@fn1` call, or
-standalone phase-expression item—whose call graph reaches `emit_huc` or
-`emit_huc_module` executes at every occurrence with the current inherited
-cursor and is never served by a bare result cache. Selected-body parsing and
-pure subcomputations may still be cached. A future occurrence-level
-effect-transcript cache would have to replay ordered output rebased to the
-current cursor and is not part of the bootstrap.
+An actual `fn2` call, forced `@fn1` call, or standalone phase expression that
+reaches `emit_huc` or `emit_huc_module`, directly or through helpers, runs each
+time it is evaluated. It uses the current inherited insertion cursor; a
+cached return value alone cannot replace that execution. The compiler may
+still cache selected-body parsing and pure computations within the call.
+
+A future cache for these calls would need to record their output and replay
+it in order at the current cursor. That feature is outside the bootstrap.
 
 ### 16.2 Interface files
 
@@ -1521,10 +1542,10 @@ A future HUC0 interface format may contain:
 - type layouts where ABI-visible;
 - definition and dependency fingerprints.
 
-HUC1 family caches and future compiler-reflection metadata are separate
-formats and must not be smuggled into HUC0 semantic analysis. Until interface
-serialization is stable, whole-program HUC0 lowering is safer than pretending
-to offer a stable generated ABI.
+HUC1 family caches and future compiler-reflection metadata have separate
+formats and must not be passed to HUC0 semantic analysis. Until interface
+serialization is stable, lower whole HUC0 programs without promising a stable
+generated ABI.
 
 ### 16.3 Reproducibility
 

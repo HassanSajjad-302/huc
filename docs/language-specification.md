@@ -6,8 +6,8 @@ Revision: 0.1
 
 Target audience: compiler implementers, library authors, and language reviewers
 
-> **Reconciliation notice:** this document predates several accepted syntax
-> decisions and is being rewritten incrementally. The
+> **Design update:** this document predates several accepted syntax decisions
+> and is being updated in stages. The
 > [controlling implementation plan](implementation-plan.md) and
 > [value-semantics specification](value-semantics.md) take precedence. In
 > particular, current HUC uses `let`, fixed-by-default storage, layer-specific
@@ -37,12 +37,28 @@ It intentionally postpones inheritance, exceptions, coroutines, a stable native
 ABI, arbitrary user-defined implicit conversions, and general operator
 overloading.
 
-### 1.1 Normative terminology
+### 1.1 How to read the rules
 
 The words **must**, **must not**, **shall**, **shall not**, and **undefined
-behavior** are normative. “May” grants an implementation choice. “Diagnostic”
-means the implementation must reject the program and report the relevant source
-location.
+behavior** state language requirements. “May” gives the implementation a
+choice. “Diagnostic” means the implementation must reject the program and
+report the relevant source location.
+
+Other recurring terms:
+
+- A **place** or **slot** is a storage location, such as a local or field.
+- An **inline** value is a `T` stored directly, rather than a `T*` or `T&`
+  holding its address.
+- A **pointee** is the object a pointer or owner points to.
+- **Reseating** a pointer or owner means replacing the address stored in its slot.
+- A **binding** gives a value to a destination, such as a local or parameter.
+- An **active** slot holds a live value. An **inactive** slot must be
+  reinitialized before it can be used as a value again and receives no cleanup.
+- **Residual** code is the runtime code left after compile-time work.
+  **Residualization** produces that code; **materialization** writes a
+  compiler-known value as valid HUC0 runtime syntax.
+- A **predicate** is a compile-time boolean condition used to filter
+  specialization candidates.
 
 ### 1.2 Design promises
 
@@ -195,7 +211,9 @@ concatenation and performs no runtime allocation.
 
 ## 4. Type system
 
-HUC is statically and nominally typed. The core types are:
+HUC checks types at compile time. Structure types are nominal: two separate
+structure declarations define different types even if their fields match.
+The core types are:
 
 ```text
 bool
@@ -301,7 +319,7 @@ conversion is never implicit.
 
 ### 4.4 Pointer layering
 
-Postfix `&` in a type is parsed as an owner constructor. Examples:
+A trailing `&` in a type forms an owner type. Examples:
 
 ```text
 T*      RawPtr<T>
@@ -309,8 +327,8 @@ T&      Owner<T>
 ```
 
 HUC0 accepts at most one pointer-like suffix on a non-pointer base type.
-`T**`, `T*&`, `T&*`, `T&&`, equivalent constructions hidden through aliases,
-are diagnostics. HUC has no unary `&` expression.
+`T**`, `T*&`, `T&*`, and `T&&` are rejected, including equivalent types hidden
+by aliases. HUC has no unary `&` expression.
 
 The non-overloadable `addressof(inline_place)` intrinsic returns `T*` for a
 fixed inline `T` place and `mod T*` for a writable inline `T` place. It rejects
@@ -327,8 +345,8 @@ An owner operand designates its owner word, not its pointee: a null owner value
 still has an addressable slot. Forming a place through an invalid pointer does
 not become valid merely because the intrinsic returns an integer.
 
-The operand's place computation is evaluated exactly once. The intrinsic does
-not load, copy, relocate, or destroy the stored value, allocate or materialize a
+The expression identifying the slot is evaluated exactly once. The intrinsic
+does not load, copy, relocate, or destroy the stored value, allocate or create a
 temporary, extend storage lifetime, or change activation or cleanup state.
 Literals, non-place results, types, and function symbols are not valid operands.
 The returned integer may be passed to an ordinary function and converted to a
@@ -348,11 +366,11 @@ or permit two owners of one allocation.
 `std::slot_of` is an untyped escape hatch, not a typed owner-slot alias. It does
 not add composed pointer types or change ordinary typed `mod` checks.
 
-`mod` permissions remain layer-specific through containment. A fixed
-structure prevents assignment to its field slots and writable access to an
-inline field subobject. It does not remove a leading `mod` carried through a
-`mod T*` or `mod T&` field to a separately stored pointee. A read-only method
-may therefore mutate that pointee but may not reseat the field.
+Each `mod` keeps its own meaning inside a structure. A fixed structure
+prevents assignment to its fields and mutation of values stored inline in
+them. A `mod T*` or `mod T&` field still allows mutation of the separate
+object it points to. A read-only method may therefore mutate that pointee but
+may not replace the address stored in the field.
 
 ### 4.5 Nullability
 
@@ -403,7 +421,7 @@ in the body.
 
 An omitted mutable scalar initializes to zero, a mutable raw pointer or owner
 to null, and a mutable structure through its zero-argument constructor. Fixed
-fields without declaration initializers remain constructor obligations.
+fields without declaration initializers must be initialized by each constructor.
 
 Methods receive an implicit non-owning `this`:
 
@@ -440,7 +458,7 @@ Declaring `drop` makes the structure Advanced.
 Raw-pointer indexing is unchecked. Arrays, slices, and inline fixed-capacity
 storage are library types rather than additional primitive owner syntax in
 0.1. A probable HUC1 standard library can provide `Array<T>`, `Slice<T>`, and
-`InlineArray<T, N>` families that residualize to concrete nominal HUC0 types.
+`InlineArray<T, N>` families that generate concrete HUC0 structure types.
 
 Primitive `[N]T` fixed arrays are deferred. This also avoids an ambiguous
 `new[]`/`delete[]` distinction for `T&`: a `T&` always owns exactly one `T`.
@@ -451,7 +469,7 @@ Primitive `[N]T` fixed arrays are deferred. This also avoids an ambiguous
 type Size = usize;
 ```
 
-Aliases do not create nominally distinct types.
+An alias is another name for the same type, not a new type.
 
 ## 5. Expressions and execution order
 
@@ -575,12 +593,12 @@ consume(next);                   // relocate if parameter is Widget&
 
 Whenever relocation from a named place is otherwise permitted, its source
 storage must be writable, expressed by trailing `mod`. Section 6.4 further
-restricts non-owner subobject sources; primitive owner fields and elements are
-the in-band-null exception. A fresh unnamed result place is intrinsically
-consumable: function results, `new` owner results, evaluated `copy` results, and
-other temporary Advanced values may bind onward without an unspellable source
-`mod`. Direct `T(arguments)` destination construction has no temporary source
-place.
+restricts non-owner subobject sources. Primitive owner fields and elements are
+an exception because transferring them leaves a usable null owner. Fresh
+unnamed results can be transferred directly: function results, `new` owner
+results, evaluated `copy` results, and other temporary Advanced values need no
+trailing `mod`. There is no source declaration on which to write it. Direct
+`T(arguments)` destination construction has no temporary source place.
 
 ### 6.2 Owner destructive-relocation initialization
 
@@ -645,7 +663,7 @@ compiler from relocating that field as part of a writable containing source.
 Ending the source lifetime does not invoke its `drop` method and does not
 destroy or otherwise clean up its source fields. Cleanup belongs to the
 destination, which is now the one active value. The inactive bytes need not be
-cleared or placed into any valid sentinel representation. Initializing or
+cleared or replaced with a valid “empty” value. Initializing or
 assigning a new value into the source storage starts a new lifetime there.
 
 For relocation assignment, the compiler first checks for exact
@@ -653,12 +671,13 @@ self-relocation. If source and destination are the same storage, the operation
 is a no-op. Otherwise it destroys the old active destination and then performs
 the representation transfer above.
 
-This algorithm is not overloadable. HUC 0.1 has no move constructor,
+This algorithm cannot be overloaded. HUC 0.1 has no move constructor,
 relocation constructor, relocation method, or move-assignment hook. Bitwise
-relocation is a semantic guarantee, not a requirement to emit a literal
-memory-copy instruction or to give padding bytes semantic significance.
-Equivalent bulk copies, loads/stores, register transfers, and elision are
-permitted when they preserve observable behavior, inactivity, and cleanup.
+relocation defines the behavior, not the machine instructions. It does not
+require a memory-copy instruction or give padding bytes a defined meaning.
+The backend may use bulk copies, loads and stores, or registers, or remove the
+transfer entirely, as long as behavior, source inactivity, and cleanup stay
+the same.
 
 Using inactive storage before reactivation is undefined behavior. A compiler
 should diagnose an obvious straight-line use, but HUC does not promise
@@ -672,13 +691,14 @@ lifetime checking. Straight-line relocations require no flag.
 `T&` uses its null representation instead of an additional drop flag whenever
 possible.
 
-An explicit non-owner Advanced source must be an entire compiler-tracked root
-place: a named local or parameter, or a fresh temporary/result place.
+An explicit non-owner Advanced source must be a whole value whose active state
+the compiler tracks directly: a named local or parameter, or a fresh temporary
+or result. These are called root places.
 Whole-value relocation includes subobjects in the same transfer. HUC0
 rejects moving a non-owner value out through a pointer, owner dereference,
 field selection, or array indexing. Otherwise the containing object or owner
 could remain active and later try to clean an inactive subobject without
-having liveness state in its representation.
+storing extra state to track which parts are still active.
 
 A primitive `T&` field or element moved individually is exempt because direct
 owner relocation stores null in that source slot, which remains active. This
@@ -768,15 +788,17 @@ non-overloadable, and non-failing. Full assignment, exact self-relocation, and
 backend rules are specified in
 [Value Semantics and Special Operations](value-semantics.md).
 
-A valid `clone` returns an independent logical duplicate: resources owned by
-the source must be duplicated or otherwise made independently destructible.
-This is deep cloning across the type's ownership boundary, not recursive
-duplication of every reachable object. Raw `T*` fields are non-owning and
-normally copy only their addresses; deliberately shared or interned state may
-remain shared. `clone` must not modify the source object's inline storage or
-invalidate its invariants, but it may allocate and update external bookkeeping
-such as a reference-count control block through an explicitly writable
-observer. The compiler does not prove this semantic contract.
+A valid `clone` returns an independent logical duplicate: the original and
+its copy must each be destructible without invalidating the other. Owned
+resources must be duplicated or given another valid ownership share. This is
+HUC's meaning of deep cloning; it need not copy every reachable object.
+Raw `T*` fields are non-owning and normally copy only their addresses.
+Deliberately shared or interned state may remain shared.
+
+`clone` must not modify the source object's inline storage or leave it invalid.
+It may allocate and update external bookkeeping, such as a reference count,
+through an explicitly writable observer. The compiler does not prove that
+custom code follows these rules.
 
 ### 6.7 Allocation
 
@@ -911,8 +933,8 @@ Section 6.11's ownership-only restriction applies before ranking.
 
 ## 8. Lifetime and safety model
 
-This section is normative because rejecting an accidental safety claim is part
-of HUC's contract.
+These rules define HUC's safety limits; they are language requirements, not
+just advice.
 
 ### 8.1 Raw observers are unchecked
 
@@ -996,11 +1018,11 @@ two translators.
 | Phase 1 | `fn1`, `struct1`, `let1`, `if1` | A family or structural expansion operation that produces HUC0 |
 | Phase 2 | `fn2`, `struct2`, `let2`, `import2` | Compiler-only declarations, values, and imports that never survive in HUC0 |
 
-Phase 1 is a production boundary, not a third runtime storage universe. A
-normal request for a phase-1 family produces a concrete runtime declaration. A
-forced call to a phase-1 function may instead execute completely during
-expansion. Phase-2 declarations exist only in the expansion environment and
-can never become runtime symbols.
+Phase 1 produces runtime code; it does not add a third kind of runtime
+storage. A normal request for a phase-1 family produces a concrete runtime
+declaration. A forced call to a phase-1 function may instead run completely
+during expansion. Phase-2 declarations exist only during expansion and can
+never become runtime symbols.
 
 Every successfully expanded module must be independently readable HUC0. It
 contains no numbered declaration or control-flow keyword, `import2`, `@`,
@@ -1361,9 +1383,9 @@ into runtime code.
 
 ### 9.9 The `@` evaluation-island operator
 
-`@` has exactly one grammatical role: it prefixes an expression and opens a
-compile-time evaluation island. It does not annotate a declaration and never
-forms part of a type.
+`@` goes before an expression and makes it run at compile time. This is called
+an evaluation island because the surrounding code may still be runtime code.
+It does not mark a declaration and never forms part of a type.
 
 The following illustrates the spelling when a compiler query API is available;
 the query itself belongs to the future reflection library:
@@ -1661,11 +1683,11 @@ chained diagnostic should show:
 2. the raw emission call site;
 3. the compiler call stack that produced the fragment.
 
-Raw text is not hygienic. Identifiers in it participate in ordinary HUC0 name
-lookup and may collide or capture by textual spelling. Generator authors are
-responsible for escaping literals and constructing valid identifiers. These
-costs are accepted for the small bootstrap surface; the future structured API
-in section 10 is intended to address them.
+Raw text has no automatic name isolation (hygiene). Its identifiers use
+ordinary HUC0 name lookup, so a generated name may clash with an existing name
+or refer to the wrong declaration. Generator authors must escape literals and
+create valid identifiers themselves. The first implementation accepts these
+limits; the future structured API in section 10 is intended to address them.
 
 ### 11.4 Facilities not in bootstrap HUC
 

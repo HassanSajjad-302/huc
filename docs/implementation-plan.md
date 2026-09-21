@@ -10,10 +10,22 @@ First output language: C17
 
 License: MIT
 
-This document records the decisions that must guide the specification rewrite
-and the first two compiler milestones. Where the older language specification,
-grammar, examples, or transpiler architecture disagree with this plan, this
-plan takes precedence until those documents are reconciled.
+This document records the decisions for updating the specification and building
+the first two compiler milestones. If the older specification, grammar,
+examples, or architecture disagree with this plan, follow this plan until
+those documents are updated.
+
+Some terms used below:
+
+- **Bootstrap**: the first implementation, with a deliberately limited scope.
+- **Concrete type or function**: a type or function whose generic arguments
+  have all been resolved.
+- **Residual code**: runtime code left after compile-time work. Producing it
+  is called **residualization**.
+- **Lowering**: turning a language operation into simpler compiler operations.
+- **AST**, **HIR**, and **MIR**: the syntax tree, high-level intermediate
+  representation, and mid-level intermediate representation. Each records
+  more of the decisions needed to generate code.
 
 ## 1. Outcome
 
@@ -38,19 +50,19 @@ The implementation order is:
 2. **Milestone 2: HUC1 to HUC0.**
 
 This order is intentional. HUC0 gives HUC1 a concrete, executable target and
-prevents the staging implementation from hiding unresolved runtime semantics.
+requires the runtime rules to be settled before staging is added.
 
-C17 is the first output language because HUC already needs explicit lifetime
-and evaluation-order lowering. Plain C structures, pointers, and generated
-functions carry those resolved operations without implicit special members.
+C17 is the first output language because HUC already needs to lower lifetime
+operations and evaluation order explicitly. Plain C structures, pointers, and
+generated functions express those decisions without implicit special members.
 The compiler itself remains C++20. C++ interoperability and other output
 backends are later work, not requirements of the first emitter. The initial
 output uses ISO C17 rather than requiring compiler-specific extensions.
 
 ## 2. Product position
 
-HUC is an unchecked, ahead-of-time systems language intended to offer simpler
-C++-like value, object, and generic-programming semantics.
+HUC is an unchecked systems language compiled ahead of time. It aims to offer
+C++-like values, objects, and generic programming with simpler rules.
 
 HUC is not a memory-safe Rust alternative. It deliberately permits:
 
@@ -93,7 +105,7 @@ names, searchability, and trademark concerns must be reviewed before a public
 - staged source extension: `.huc1`;
 - runtime source extension: `.huc0`.
 
-## 4. Normative language split
+## 4. The HUC0 and HUC1 language split
 
 ### 4.1 HUC0
 
@@ -133,13 +145,13 @@ Primitive fixed arrays, `bit_as`, and primitive owner `swap` are deferred from
 
 ### 4.2 HUC1
 
-HUC1 is a strict staged extension of HUC0. A `.huc1` module may contain
+HUC1 extends HUC0 with staging. A `.huc1` module may contain
 unnumbered runtime code plus phase-1 and phase-2 constructs. HUC1 expansion
 must produce printable `.huc0` modules.
 
 The name HUC1 describes the staged source level. It does not mean suffix-2
-constructs are excluded; phase-2 declarations are compiler-program facilities
-consumed by the HUC1 translator.
+constructs are excluded. Phase-2 declarations run in the compiler and are
+handled by the HUC1 translator.
 
 ## 5. HUC0 runtime semantics
 
@@ -156,7 +168,7 @@ let i32 answer = 42;       // fixed scalar
 let i32 mod counter;       // writable scalar, initialized to zero
 ```
 
-`mod` is layer-sensitive:
+Each `mod` controls the layer where it appears:
 
 ```huc
 let T* observer;           // fixed pointer field; constructor obligation
@@ -180,13 +192,12 @@ pointers. Fixed globals require constant initializers. Mutable globals may omit
 an initializer and become zero or null. Advanced globals, owners, structure
 globals, runtime initialization code, and global destruction are deferred.
 
-A fixed containing object prevents assignment to one of its field slots and
-prevents writable access to an inline field subobject. It does not erase
-permission explicitly carried through a pointer or owner field to a separate
-pointee. Thus a read-only structure may follow a `mod T*` or `mod T&` field and
-mutate that `T`, while it still cannot reseat the field or call a writable
-method on an inline field. This is the layer-specific behavior shown above,
-not an interior-mutation escape for inline storage.
+A fixed object prevents assignment to its fields and mutation of values
+stored inline in those fields. A `mod T*` or `mod T&` field still allows
+mutation of the separate object it points to (the pointee). The field itself
+cannot be replaced, and an inline field cannot be used to call a writable
+method. This keeps each layer's permissions separate; it does not allow
+mutation of fixed inline storage.
 
 ### 5.2 Raw pointers
 
@@ -257,11 +268,11 @@ let Widget& destination = source; // relocate; source becomes null
 
 Attempting to relocate from a fixed owner is a compile-time diagnostic.
 
-Fresh unnamed result places are intrinsically consumable. This includes
+Fresh unnamed results can be transferred directly. This includes
 function results, `new` owner results, `copy`/`clone` results, and other
-temporary Advanced values. They may bind onward without a source-level trailing
-`mod`; only named source storage is checked for that permission. A direct
-`T(arguments)` destination construction has no temporary result place.
+temporary Advanced values. They need no trailing `mod`; only named source
+storage is checked for that permission. Direct `T(arguments)` construction
+in the destination has no temporary result place.
 
 ### 5.4 Basic and Advanced classification
 
@@ -292,22 +303,21 @@ relocation**, not C++ move construction. Relocating a non-owner value continues
 that value in destination storage and ends the active value in the source
 storage. No source `drop` or field cleanup runs.
 
-Non-owner relocation has fixed bitwise representation-transfer semantics:
+Non-owner relocation transfers the stored representation using these fixed rules:
 
 1. Transfer the whole value's representation to the destination without
    invoking `clone`, `drop`, or any user transfer hook.
 2. Make the entire source, including all its field subobjects, inactive.
-3. Transfer the cleanup obligation to the destination without source cleanup.
+3. Make the destination responsible for cleanup; do not clean up the source.
 
 Embedded owner words transfer unchanged; no recursive owner relocation or
-source-field nulling is required. The old field bits do not denote separately
-active owners. This rule applies whether classification as Advanced follows
-from `clone`, `drop`, or an Advanced field. Ordinary Basic binding duplicates
+source-field nulling is required. The old field bits are not separate live
+owners. This rule applies whether the type is Advanced because of `clone`,
+`drop`, or an Advanced field. Ordinary Basic binding duplicates
 the value and leaves its source active.
 
-Field fixedness constrains ordinary assignment, not compiler relocation of a
-whole value. A writable containing source permits relocation of its fixed
-fields.
+A fixed field cannot be assigned to directly, but it can be transferred as
+part of a whole writable source value.
 
 The bytes of an inactive source need not be cleared or form a valid `T`.
 Assigning a new value begins a new active lifetime there. Direct relocation of
@@ -335,18 +345,17 @@ valid, and null-owner relocation and destruction are unchanged.
 
 Declaring `clone` opts an otherwise Basic structure into Advanced. This
 prevents an ordinary binding from bypassing custom logical-copy behavior.
-The `clone` contract is deep across the type's logical ownership boundary:
-owned resources are duplicated or given another valid ownership share so the
-two results can be destroyed independently. It is not a graph-wide copy;
-non-owning raw pointers and deliberately shared external state may remain
-shared.
+`clone` must duplicate owned resources or create another valid ownership
+share, so the original and its copy can be destroyed independently. It need
+not copy every reachable object: non-owning raw pointers and deliberately
+shared external state may remain shared.
 
 Relocation cannot be overloaded. There is no HUC move constructor: one is not
 needed to restore a destructible moved-from state because no non-owner source
 object remains alive. Exact self-relocation assignment is a no-op.
 
-An inline type whose invariant depends on its own address is not bitwise
-relocatable. HUC0 does not silently repair self-pointers. Such a value must be
+An inline value that needs its address to stay unchanged cannot be safely
+relocated bitwise. HUC0 does not repair self-pointers. Such a value must be
 kept in directly constructed fixed read-only storage, redesigned to compute
 internal addresses, placed in a stable-address library container, or allocated
 behind `T&` so relocation transfers only the owner word. Mutable
@@ -354,20 +363,20 @@ address-dependent objects should normally use `T&`; HUC0 has no first-class
 pinning qualifier. Relocating a value that violates this contract is undefined
 behavior.
 
-Bitwise relocation is the language contract, not an optional optimization of
-recursive field operations. It does not mandate a literal memory-copy
-instruction or give padding bytes semantic significance. The backend may use
-bulk copies, loads/stores, registers, or elision when observably equivalent;
-source inactivity and exactly-once cleanup must still be preserved.
+Bitwise relocation is the language rule, not an optimization of separate
+field transfers. It does not require a memory-copy instruction or give padding
+bytes a defined meaning. The backend may copy memory, use loads and stores or
+registers, or remove the transfer when the program still behaves the same.
+The source must become inactive, and cleanup must still happen exactly once.
 
-Explicit non-owner relocation is restricted to entire compiler-tracked root
-places: named locals and parameters, and fresh temporary/result places. Moving
-a whole aggregate includes its subobjects in the same operation; it does not
+Explicit non-owner relocation is restricted to whole values tracked directly
+by the compiler: named locals and parameters, and fresh temporaries or results.
+Moving a whole aggregate includes its subobjects in the same operation; it does not
 move them individually out of an otherwise active object. HUC0 rejects
 moving a non-owner Advanced value out through `*pointer`, `pointer->field`,
 `value.field`, or `array[index]`. Leaving such a subobject inactive while its
 owner or containing object remains active would make later cleanup invalid
-without storing additional liveness state.
+without extra state to track which parts are still active.
 
 Primitive `T&` subobjects are exempt because relocation writes the source
 owner to its active null representation. Copying/cloning an indirectly reached
@@ -422,13 +431,14 @@ Rules:
 - omitted mutable scalar storage initializes to zero;
 - omitted mutable pointers and owners initialize to null;
 - omitted mutable structures invoke zero-argument construction;
-- zero-argument `init` is synthesized only when all fixed fields are already
-  satisfiable and all mutable fields can default-initialize;
+- the compiler generates a zero-argument `init` only when all fixed fields have
+  initializers and all mutable fields can default-initialize;
 - fixed locals and globals require an initializer;
-- a fixed field without a declaration initializer becomes an obligation of
-  every constructor;
-- constructors are infallible in 0.1; fallible creation uses named factory
-  functions and library result types later.
+- every constructor must initialize any fixed field that has no declaration
+  initializer;
+- constructors cannot return recoverable errors in 0.1; creation that can
+  report an error will use named factory functions and library result types
+  later.
 
 ### 5.6 Methods and destruction
 
@@ -494,12 +504,12 @@ for the first parameter occurs before ownership transfer into the second.
 Earlier side effects complete before later operands begin. `&&` and `||`
 short-circuit, and only the selected arm of `?:` executes.
 
-The backend must materialize each argument's typed by-value parameter value
-before evaluating the next argument, rather than merely retaining expression
-aliases or inheriting C's unspecified choice of argument order. Generated
-typed holders or an explicit call frame may transport those already-bound
-values into the C ABI call. Optimizers may still reorder pure computation
-when the change is not observable.
+The backend must initialize each typed by-value parameter before evaluating
+the next argument. Keeping only a pointer to the source expression is not
+enough, and C's unspecified argument order cannot decide the order for HUC.
+Generated typed storage or a call frame may pass these already-initialized
+values to the C call. Optimizers may still reorder pure computation when the
+program behaves the same.
 
 ### 5.8 Runtime overloading
 
@@ -525,7 +535,8 @@ The suffix is part of the keyword:
   produces HUC0;
 - suffix `2`: compiler-only storage, function, or type.
 
-These are availability classes, not requests for repeated arbitrary passes.
+These numbers say where code and values are available; they do not ask the
+compiler to run an arbitrary number of passes.
 
 ### 6.2 Phase-1 families
 
@@ -574,9 +585,9 @@ let i32 result = convert<i32>(input);
 use(value<i32>);
 ```
 
-Angle tokens are lexed separately. Parsing preserves an ambiguous angle
-postfix where necessary, and semantic name resolution decides whether it is a
-family request or comparison expression.
+`<` and `>` are separate tokens. When the parser cannot tell whether they
+form a family request or a comparison, it keeps both possibilities until name
+resolution can decide.
 
 ### 6.3 Binders and deduction
 
@@ -643,8 +654,8 @@ recognizing:
 - line comments;
 - block comments.
 
-No HUC token, name, or type diagnostic may originate inside an opaque skipped
-body. The only possible failure is inability to locate its outer delimiter.
+The compiler must not report token, name, or type errors inside a skipped
+body. It may report only that it cannot find the body's closing delimiter.
 If a body is selected, it is then lexed and parsed normally.
 
 ### 6.6 `let1`
@@ -657,7 +668,7 @@ A `let1` header has no result type. Every selected path must leave:
 
 Compiler-only setup and `if1`/`for1`/`while1` are permitted. Raw emission is
 not permitted inside a `let1` selection body because it would obscure the
-single-variable invariant.
+rule that exactly one variable must remain.
 
 Different specializations may choose different:
 
@@ -709,8 +720,9 @@ function and omit `let2`.
 
 ### 6.9 The `@` operator
 
-`@` has one grammatical and semantic role: it opens a compile-time evaluation
-island.
+`@` starts compile-time evaluation of an expression. This is called an
+evaluation island: the marked expression runs in the compiler even when the
+surrounding code is runtime code.
 
 It is never attached to a type:
 
@@ -731,7 +743,7 @@ the insertion cursor at that exact call site.
 
 A normal `fn1` call produces or calls a concrete runtime specialization. An
 `@fn1_call(...)` requires complete compile-time evaluation and may embed only a
-materializable result.
+result that can be written as a HUC0 value (a materializable result).
 
 ### 6.10 Imports
 
@@ -811,10 +823,11 @@ binds that already loaded interface under the `compiler` name. The bootstrap
 interface declares only the two raw-emission operations; later versions add
 the public handle types above without exposing internal C compiler objects.
 
-The future API should expose immutable semantic snapshots and stable IDs,
-rather than internal compiler AST objects. Structured edits and commits will be
-explicit. Only concrete phase-0 declarations and materialized family
-specializations are enumerable; an infinite uninstantiated family is not.
+The future API should provide read-only snapshots of checked code and stable
+IDs, not direct access to the compiler's internal AST objects. Structured edits
+and commits will be explicit. Queries can list concrete runtime declarations
+and family specializations already produced, not all the possible members of
+an infinite family.
 
 Reserve `@this` for a later contextual-reflection proposal. The intended
 direction is the narrowest enclosing handle: `compiler::Function` in a
@@ -1249,9 +1262,9 @@ Implement:
 - cross-module qualification for requested concrete specializations;
 - a deterministic whole-graph request worklist that reaches a fixpoint.
 
-A cross-module request in 0.1 may use only types already nameable through the
-defining module's import closure. Requester-side specialization placement is
-deferred.
+A cross-module request in 0.1 may use only types the defining module can
+already name through its direct or indirect imports. Placing specializations
+in the requesting module is deferred.
 
 Acceptance:
 
@@ -1283,13 +1296,14 @@ Implement:
 The HUC1 translator writes raw generated text without parsing it. Chained
 compilation invokes the public HUC0 translator on the written artifact.
 A normal family specialization is constructed once per specialization key;
-its cache entry retains the residual declaration and ordered raw fragments.
+its cache entry keeps the generated runtime declaration and ordered raw
+fragments.
 Local/type fragments enter the declaration, while module fragments enter the
 defining module buffer once. Repeated normal requests only reference it.
-Actual phase-execution occurrences—`fn2` calls, forced `@fn1` calls, and
-standalone phase-expression items—whose transitive body reaches raw emission
-execute at every occurrence with that occurrence's inherited cursor and are
-not served from a bare result cache.
+An actual `fn2` call, forced `@fn1` call, or standalone phase expression that
+reaches raw emission, directly or through helpers, runs each time it is
+evaluated. It uses that call's inherited insertion cursor. Reusing only a
+cached return value would lose the generated output and is not allowed.
 
 Acceptance:
 
@@ -1355,8 +1369,8 @@ Check exact:
 - diagnostic text and source spans;
 - stable generated names.
 
-Golden tests must normalize platform-specific paths without normalizing away
-semantic ordering.
+Golden tests must normalize platform-specific paths without hiding differences
+in ordering that affect program behavior.
 
 ### 13.3 Negative tests
 
@@ -1438,9 +1452,9 @@ Before a compiler feature is considered complete:
   supported;
 - keep every example paired with its expected result or expansion.
 
-Documentation and implementation disagreements are compiler bugs or
-specification issues that must be resolved explicitly; the backend language is
-never allowed to decide HUC semantics accidentally.
+Disagreements between documentation and implementation must be resolved as
+compiler bugs or specification issues. The backend language must never decide
+HUC behavior by accident.
 
 ## 15. Commit strategy
 

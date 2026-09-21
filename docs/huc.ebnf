@@ -4,14 +4,14 @@
    "-0" are accepted by the standalone HUC0 parser. Productions whose names
    end in "-1" are accepted only by the HUC1 staging parser.
 
-   A deferred-body is not tokenized during indexing. A delimiter scanner finds
-   its matching outer brace while accounting for nested braces, literals, and
-   comments. If selected, its contents are parsed later using the grammar
-   required by its inherited module, type, function, or block context.
+   During indexing, a deferred-body is scanned only to find its matching outer
+   brace. The scanner accounts for nested braces, literals, and comments; it
+   does not turn the body into tokens. If selected, the body is parsed later
+   using the grammar for its enclosing module, type, function, or block.
 
    Semantic restrictions such as phase availability, fixed-global
-   initialization, family partial ordering, and addressof permissions remain
-   normative in the language specification. *)
+   initialization, family partial ordering, and addressof permissions are
+   defined by the language specification, not by this grammar alone. *)
 
 huc0-compilation-unit
                   = module-decl, { runtime-import }, { module-item-0 } ;
@@ -212,12 +212,13 @@ phase-expression-item
 
 deferred-body     = "{", ? scanner-delimited opaque source span ?, "}" ;
 
-(* A selected deferred body is reparsed according to the lexical place that
-   contains it. A module or type body may mix residual declarations/members
-   with compiler-only statements. A function or nested-block body uses the
-   ordinary mixed HUC1 block grammar. The phase checker, rather than this
-   context grammar, decides whether an ordinary expression/control statement
-   has only compiler-available operands and therefore executes and erases. *)
+(* A selected deferred body is parsed according to where it appears in the
+   source. A module or type body may mix runtime declarations or members with
+   compiler-only statements. A function or nested block uses the ordinary
+   mixed HUC1 block grammar. The phase checker, not this grammar, checks
+   whether an ordinary expression or control statement uses only values
+   available at compile time. Such a statement runs during expansion and
+   disappears from the output. *)
 
 selected-module-body
                   = "{", { module-item-1
@@ -266,9 +267,9 @@ builtin-type      = "bool" | "c8"
                   | "u8" | "u16" | "u32" | "u64" | "usize"
                   | "f32" | "f64" | "void" | "never" ;
 
-(* The optional terminal suffix admits exactly T* or T&. Because type-primary
-   never contains a terminal suffix, T**, T*&, T&*, and T&& do not parse.
-   HUC0 nominal types never have phase arguments. *)
+(* A type may end in one optional suffix: * or &. The type-primary rules do
+   not include a suffix, so T**, T*&, T&*, and T&& cannot be parsed.
+   Named HUC0 types never have phase arguments. *)
 
 (* ---------- Parameters and blocks ---------- *)
 
@@ -429,8 +430,9 @@ binary-op         = "||" | "&&"
    associativity are those specified by the Pratt-parser table in the
    implementation and language specification. There is no unary "&".
    addressof(place) and std::slot_of(place) are compiler-known,
-   non-overloadable ordinary call forms. Their operand eligibility and the
-   raw-pointer-or-usize source rule for ptr_as are semantic constraints. *)
+   non-overloadable ordinary call forms. Semantic analysis checks which
+   operands they accept and requires ptr_as sources to be raw pointers or
+   usize values. *)
 
 literal           = integer-literal
                   | float-literal

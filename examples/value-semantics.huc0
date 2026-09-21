@@ -36,14 +36,14 @@ struct NativeBuffer {
         memory::fill_bytes(this->data, value, this->size);
     }
 
-    // Only an explicit copy expression selects this method.
+    // Only an explicit copy expression calls this method.
     fn clone() -> NativeBuffer {
         let NativeBuffer mod result = NativeBuffer(this->size);
         memory::copy_bytes(result.data, this->data, this->size);
         return result;
     }
 
-    // The compiler invokes this before reverse field cleanup.
+    // The compiler calls this, then cleans up fields in reverse order.
     fn drop() mod -> void {
         if (this->data) {
             memory::free_raw_bytes(this->data, this->size);
@@ -63,8 +63,8 @@ struct Packet {
     }
 }
 
-// AddressDependent is Advanced because its empty drop suppresses implicit copying.
-// Its self pointer makes inline destructive relocation invalid unless the
+// The empty drop makes AddressDependent Advanced and prevents implicit copying.
+// Transferring it inline leaves a stale self pointer. This is invalid unless the
 // programmer can prove the pointer will never be used afterward.
 struct AddressDependent {
     let AddressDependent* mod self;
@@ -97,10 +97,10 @@ fn demonstrate_inline_relocation() -> void {
     let NativeBuffer mod original = NativeBuffer(64);
     original.fill(7);
 
-    let NativeBuffer duplicate = copy original; // invokes the clone protocol
-    // Fixed bitwise relocation transfers the representation without a user
-    // move/relocation constructor. original's lifetime ends; neither its drop
-    // nor its field cleanup runs, and its storage is now inactive.
+    let NativeBuffer duplicate = copy original; // calls clone
+    // Bitwise relocation transfers the stored value without calling user code.
+    // original becomes inactive: its lifetime ends, and neither its drop nor
+    // its field cleanup runs.
     let NativeBuffer mod relocated = original;
 
     relocated = relocated;         // exact self-relocation is a no-op
@@ -131,8 +131,8 @@ fn demonstrate_owner_values() -> void {
 fn demonstrate_embedded_owners() -> void {
     let Packet mod source = Packet(1, new NativeBuffer(16));
     let Packet mod destination = source;
-    // source and source.payload are inactive. No payload null store or source
-    // cleanup is required. Only destination owns the transferred buffer.
+    // source and source.payload are inactive. No source cleanup runs, and the
+    // payload need not be set to null. Only destination owns the buffer.
     io::println(destination.tag, destination.payload->first());
 
     // Moving a field individually is different: destination stays active,
@@ -148,8 +148,8 @@ fn demonstrate_embedded_owners() -> void {
 
 fn demonstrate_address_stability() -> void {
     // Relocating an inline AddressDependent would leave its self pointer aimed
-    // at inactive source storage. HUC neither repairs nor diagnoses that
-    // unchecked contract. Put it behind T& so only the owner address relocates.
+    // at inactive source storage. HUC does not repair it or diagnose the problem.
+    // Store it behind T& so only the owner address is transferred.
     let AddressDependent& mod first = new AddressDependent();
     let AddressDependent& second = first;
     let AddressDependent* observer = second;

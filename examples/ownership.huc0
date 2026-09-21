@@ -43,12 +43,12 @@ fn main() -> i32 {
     inspect(first);
 
     let Widget* observer = first;
-    // Primitive owner relocation transfers one address. Unlike an inline Advanced
-    // source, first remains an active, usable owner in its null state.
+    // Transferring an owner copies one address and sets the source to null.
+    // Unlike an inline Advanced source, first stays active and usable as null.
     let Widget& mod second = first;
 
     // first is now null. observer still points at the Widget owned by second.
-    let Widget& independent = copy second; // allocates via Widget's clone protocol
+    let Widget& independent = copy second; // allocates a Widget and uses clone
 
     consume(second);
     // second is null. Its former Widget was dropped, so observer is dangling.

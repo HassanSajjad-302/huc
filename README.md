@@ -7,19 +7,20 @@ smaller alternative to C++, not a memory-safe alternative to Rust.
 
 Its two central ideas are:
 
-- A numbered phase vocabulary for runtime code, specialization, compile-time
+- A set of numbered keywords for runtime code, specialization, compile-time
   execution, generics, reflection, and code generation: `fn`, `fn1`, `fn2`,
   `if1`, `for1`, `struct1`, and `struct2`.
 - A small ownership model in which `T*` is an unchecked non-owning pointer and
   `T&` is a pointer-sized unique owner whose ownership transfers automatically
-  and whose pointee is destroyed automatically.
+  and whose owned object is destroyed automatically.
 
 HUC `T&` is an owning handle, not a C++ reference. HUC has no general reference
-type and no `T&&`. `T*` and `T&` are the only pointer-like forms and never
-compose, so `T**`, `T*&`, and `T&*` are invalid. HUC also has no unary `&`;
-the non-overloadable `addressof(value)` intrinsic obtains a raw observer to an
-inline value. The unchecked `std::slot_of(place)` intrinsic instead returns
-an untyped slot address as `usize`, including for raw-pointer and owner slots.
+type and no `T&&`. `T*` and `T&` are the only pointer-like forms and cannot be
+combined, so `T**`, `T*&`, and `T&*` are invalid. HUC also has no unary `&`.
+Use the built-in `addressof(value)` operation to get a non-owning pointer to
+an inline value. It cannot be overloaded. The unchecked `std::slot_of(place)`
+intrinsic instead returns the address of the storage slot as a `usize` integer.
+It also accepts raw-pointer and owner slots.
 
 **Basic values are copied; Advanced values are transferred.** Numbers, raw
 pointers, and structures containing only Basic fields with neither `clone()`
@@ -28,9 +29,10 @@ nor `drop()` are Basic. Owners and structures with an Advanced field,
 Advanced structures support this by defining `clone()`.
 
 An inline Advanced transfer is bitwise relocation, not C++ move construction.
-It makes the entire source inactive without running its `drop`, cleaning its
-fields, or requiring embedded-owner nulling. A directly transferred `T&`
-source instead remains usable as a null owner.
+It makes the entire source inactive: the source can no longer be used as a
+value until reinitialized. The transfer does not run the source's `drop`,
+clean up its fields, or require its owner fields to be set to null. A directly
+transferred `T&` source instead remains usable as a null owner.
 
 ```huc
 module readme.example;
@@ -74,22 +76,21 @@ low runtime cost, not static memory safety.
 
 HUC is for programmers who want the C/C++ cost model but do not want several
 overlapping languages hiding inside one compiler. Runtime code, specialization,
-and compiler execution use one visible numbered vocabulary. Ownership has two
-spellings. Mutation is explicit. Transferring an Advanced value means one thing:
+and compile-time execution use one set of numbered keywords. `T*` observes;
+`T&` owns. Mutation is explicit. Transferring an Advanced value means one thing:
 destructive relocation. Expensive duplication happens only when the source
 says `copy`.
 
-The staging pipeline also leaves a receipt. HUC1 does not disappear directly
-into backend machinery; it produces readable HUC0 that can be inspected,
+The staging pipeline produces readable HUC0 that can be inspected,
 tested, cached, and passed through the same public runtime translator as
 handwritten code. The goal is metaprogramming power without making generated
 runtime code a private compiler secret.
 
-The longer-term reflection direction is contextual rather than omniscient.
+The planned reflection API starts with the code's immediate context.
 Reserved future syntax such as `@this` may expose the narrowest enclosing
 compiler object—a function inside a function, a class inside a class body, or
-a module at module scope—with broader context reached deliberately through
-that API. That reflection model is not part of the bootstrap milestones.
+a module at module scope. The API would let code ask for broader context when
+needed. This reflection model is not part of the first two compiler milestones.
 
 ## Documents
 
@@ -117,8 +118,9 @@ The implementation order is:
 
 Both transpilers and the command-line driver will be written in C++20. The
 first output language is C17. Generated C uses plain storage representations
-and explicit construction, relocation, and cleanup from HUC's lowered IR;
-the output language does not supply HUC's ownership semantics.
+and explicit construction, relocation, and cleanup from HUC's intermediate
+representation (IR). The HUC compiler implements ownership; it does not rely on
+the output language to provide it.
 
 ## Short positioning statement
 

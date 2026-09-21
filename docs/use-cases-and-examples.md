@@ -7,18 +7,19 @@ Applies to: planned HUC 0.1 semantics
 Related: [Implementation plan](implementation-plan.md)
 
 This guide explains what HUC is useful for and how its runtime and staging
-features work together. It intentionally contains both small semantic examples
-and large application-style examples.
+features work together. It includes small examples of individual rules and
+larger examples that resemble real applications.
 
-The compiler does not exist yet. These examples are design fixtures: as
-features are implemented, each example must become either an executable test or
-a golden HUC1-to-HUC0 expansion.
+The compiler does not exist yet. These examples describe the intended design.
+As features are implemented, each example must become either an executable
+test or an expansion test that compares generated HUC0 with expected output
+(a golden test).
 
 ## 1. Reading the examples
 
 ### 1.1 Core versus probable library APIs
 
-Core syntax and semantics in these examples are intended to be normative:
+The following syntax and behavior describe language rules, not library proposals:
 
 - `let`, `let1`, and `let2`;
 - `mod`;
@@ -48,15 +49,26 @@ std::process
 std::target
 ```
 
-They illustrate a plausible library experience but do not freeze exact names,
-error types, allocator APIs, or signatures.
+They show how libraries could work. Their exact names, error types, allocator
+APIs, and signatures are not yet settled.
+
+Some terms used in the explanations:
+
+- A **slot** or **place** is a storage location, such as a variable or field.
+- A **pointee** is the object a pointer or owner points to.
+- **Relocation** transfers an Advanced value. An inline source becomes
+  inactive; a directly transferred owner instead becomes a usable null owner.
+- A **family** describes a set of declarations selected by compile-time
+  arguments. A **specialization** is one selected version.
+- **Residual code** is the runtime code left after compile-time work.
+  **Residualization** produces that code. **Materialization** writes a
+  compiler-known value as valid HUC0 runtime syntax.
 
 ### 1.2 What “not achievable elsewhere” means
 
-Almost any language feature can be simulated in a sufficiently powerful
-language using preprocessors, macros, compiler plugins, external generators, or
-build scripts. This guide therefore does not make the false claim that other
-languages are computationally incapable of producing the same machine code.
+Other languages can often produce the same machine code using preprocessors,
+macros, compiler plugins, external generators, or build scripts. This guide
+does not claim that these results are possible only in HUC.
 
 The useful distinction is:
 
@@ -65,8 +77,8 @@ The useful distinction is:
 - **Simulation elsewhere:** comparable behavior normally needs a different
   mechanism, such as a macro language, build script, template trick, plugin, or
   convention.
-- **HUC-specific contract:** the exact combination and observable rules are
-  what HUC promises, even when individual pieces exist elsewhere.
+- **HUC-specific rules:** HUC promises a particular combination of features
+  and behavior, even when individual pieces exist elsewhere.
 
 Notable HUC-specific combinations are:
 
@@ -77,8 +89,8 @@ Notable HUC-specific combinations are:
    are never parsed.
 4. Compiler helper functions that emit raw HUC0 at their expansion call site,
    followed by a separately inspectable and independently parsed HUC0 round.
-5. A normal `fn1` call that residualizes a runtime specialization and the same
-   call prefixed by `@` that must execute completely during translation.
+5. A normal `fn1` call that generates and calls a runtime specialization, while
+   the same call prefixed by `@` must run completely at compile time.
 6. Fixed/read-only-by-default declarations, layer-specific `mod`, and a
    one-word unique owner expressed directly as `T&`.
 
@@ -139,7 +151,7 @@ The examples below cover these use cases:
 These examples describe HUC0 runtime behavior. A snippet with no numbered
 syntax or angle-family request is directly valid HUC0. Snippets using probable
 generic library spellings such as `Vector<T>` or `Result<T, E>` are HUC1
-source: staging replaces each request with a concrete nominal name before the
+source: staging replaces each request with the name of a concrete type before the
 same runtime semantics are checked by HUC0.
 
 ### 3.1 Fixed-by-default values
@@ -159,12 +171,11 @@ fn calculate() -> i32 {
 }
 ```
 
-`let` means “the next declaration introduces storage.” It does not imply
-mutability. `mod` is the only mutability marker.
+`let` declares storage. It does not mean the value can be changed. Use `mod`
+to allow changes.
 
 The expected result is `42`. A backend may map `base` to a C `const` local,
-but HUC’s rule is authoritative even if a backend chooses another
-representation.
+but the HUC rule still applies if a backend uses another representation.
 
 ### 3.2 Pointer and owner permission layers
 
@@ -254,7 +265,7 @@ reference or automatic lifecycle handling. Taking a fixed slot's address is
 also permitted; writing actually fixed storage remains undefined behavior,
 without compiler permission tracking through the integer and cast. The caller
 is responsible for storage lifetime, alignment, representation, and ownership
-invariants. This does not make `Counter&*` a valid type.
+rules. This does not make `Counter&*` a valid type.
 
 ### 3.3 Observation and consumption
 
@@ -401,12 +412,12 @@ field in `result` retains its default null value.
 
 Ordinary binding of `Node` destructively relocates it. Only `copy` asks for a
 logical duplicate. This keeps potentially expensive allocation visible at the
-call site. “Deep” follows logical ownership: `left` and `right` are owners, so
-the clone duplicates their pointees recursively. The raw `source` parameter is
-only an observer, and a raw-pointer field would normally retain the same
-observed address rather than cloning whatever it reaches.
+call site. “Deep” follows what the value owns: `left` and `right` are owners,
+so the clone duplicates their objects and children recursively. The raw
+`source` parameter is only an observer. A raw-pointer field would normally
+keep the same address, not clone the object it points to.
 
-### 3.6 Constructor obligations and defaults
+### 3.6 Required field initialization and defaults
 
 ```huc
 module examples.configuration;
@@ -430,12 +441,12 @@ fn create() -> Configuration {
 }
 ```
 
-Removing either `port(port)` or `secure(secure)` is a diagnostic because the
-fields are fixed and lack declaration initializers. Mutable omitted fields have
-deterministic defaults.
+Removing either `port(port)` or `secure(secure)` is a compile-time error:
+these fields are fixed and have no declaration initializers. Omitted mutable
+fields receive the defaults specified by the language.
 
-Initializer entries must appear in declaration order. HUC does not silently
-display one order and execute another.
+Initializer entries must appear in field declaration order and execute in
+that same order.
 
 ### 3.7 User cleanup plus field cleanup
 
@@ -489,7 +500,7 @@ When `Texture` is destroyed:
 
 ### 3.8 Custom copy, fixed relocation, and custom destruction
 
-HUC has three user-visible lifecycle declarations:
+HUC lets a type define three lifecycle methods:
 
 | Declaration | What it customizes |
 |---|---|
@@ -567,7 +578,7 @@ fn lifecycle() -> void {
 Declaring either `clone` or `drop` puts `NativeLease` in the Advanced category. The
 logical copy duplicates the operating-system resource. Ordinary binding never
 calls `clone`, and destructive relocation never calls user code. In particular,
-the relocation does not write `-1` into `original.handle`: the complete source
+the relocation does not write `-1` into `original.handle`: the whole source
 object is inactive, so its cleanup is skipped.
 
 A conventional C++20 counterpart exposes the same resource behavior through
@@ -630,7 +641,7 @@ deep copying, and deterministic cleanup, but the lifetime models differ.
 A C++ move constructor constructs a destination while leaving a live source
 whose destructor will run later; the example must therefore exchange the
 source handle with `-1`. HUC destructive relocation ends the source lifetime
-and suppresses source cleanup. Using the inactive HUC source is undefined
+and skips source cleanup. Using the inactive HUC source is undefined
 behavior, apart from the specified null-source behavior of a directly
 relocated `T&`.
 
@@ -688,8 +699,8 @@ fn unsafe_inline_relocation() -> u64 {
 Bitwise relocation preserves the raw pointer field; it cannot know
 that this particular pointer was meant to equal the object's current address.
 The compiler need not reject the example. HUC is an unchecked systems
-language, so preserving an address-dependent invariant remains the
-programmer's responsibility.
+language, so the programmer must ensure that any stored addresses remain
+correct.
 
 The normal solution is to allocate the object once and relocate only its
 owner:
@@ -710,8 +721,8 @@ address where `init` stored `this`. The pointee is destroyed exactly once when
 
 Container choice follows the same rule. A contiguous
 `Vector<SelfIndexed>` may destructively relocate inline elements when it grows,
-erases, compacts, or sorts. That is an unchecked design error for
-`SelfIndexed`, even though the operation is mechanically well-formed. Store
+erases, compacts, or sorts. That breaks `SelfIndexed`'s self-pointer, even
+though the compiler may accept the operation. Store
 owners instead:
 
 ```huc
@@ -730,8 +741,9 @@ fn make_stable_index()
 ```
 
 The vector may relocate its `T&` elements, but each relocation transfers only
-an owned address and leaves every pointee fixed. `Vector<SelfIndexed*>` is not
-an ownership-equivalent substitute: `T*` does not keep its pointee alive.
+an owned address and leaves each pointee at the same location.
+`Vector<SelfIndexed*>` does not provide the same ownership: `T*` does not keep
+its pointee alive.
 A future standard library may also provide a stable-address node container,
 but HUC0 does not need a special pin type for the initial milestone.
 
@@ -853,9 +865,9 @@ fn run(bool transfer) -> i32 {
 }
 ```
 
-HUC does not require a borrow checker to reject the final access. The owner is
-either non-null or null. Dereferencing it without the explicit condition would
-be unchecked and potentially undefined.
+HUC needs no borrow-checker rejection here. The owner is either non-null or
+null, and the condition checks that state. Without the condition,
+dereferencing it could be undefined behavior.
 
 ### 3.13 Probable file-processing application
 
@@ -951,7 +963,7 @@ fn run(text::Text source, text::Text destination) -> i32 {
 }
 ```
 
-The standard-library API is provisional, but the ownership intent is clear:
+The standard-library API is not settled, but its ownership behavior is clear:
 
 - `open_reader` returns an owner.
 - `take_value` destructively relocates that owner and leaves its source null.
@@ -1086,9 +1098,9 @@ if1 (building_linux) {
 ```
 
 The HUC parser never sees the `else` contents. A delimiter scanner only finds
-the matching brace. This is stronger skipping than `if constexpr`-style
-semantic discarding, although traditional textual preprocessors can provide a
-similar raw-token escape.
+the matching brace. Unlike `if constexpr`-style discarding, this skips parsing
+the body itself. Traditional textual preprocessors can also skip text that is
+not valid language syntax.
 
 If `building_linux` becomes false, the selected body is parsed and compilation
 fails until it is replaced with valid HUC.
@@ -1129,14 +1141,14 @@ fn generated_probe_one() -> i32 {
 }
 ```
 
-The loop exists only during translation. Its body may execute compiler
-statements such as `index += 1` while residualizing module declarations.
+The loop runs only at compile time. Its body may execute compiler statements
+such as `index += 1` while producing runtime module declarations.
 
 ### 4.5 Future: `for1` over a compile-time pack
 
-Open-ended phase packs are not in HUC 0.1. This fixture records a possible
-later spelling and expected residual shape; it is not accepted by the initial
-HUC1 grammar.
+Open-ended phase packs are not in HUC 0.1. This example shows possible future
+syntax and its expected runtime output. The initial HUC1 grammar does not
+accept it.
 
 ```huc
 module examples.sum_constants;
@@ -1254,9 +1266,9 @@ struct1 Buffer(auto T, usize N)<T*, N>(N <= 16) {
 }
 ```
 
-The partial specialization is viable only for pointer elements and small
-capacities. The predicate filters; it does not make the pattern rank above a
-different structurally more-specific pattern.
+This partial specialization can be selected only for pointer elements and
+small capacities. Its predicate filters candidates; it does not make this
+pattern outrank another pattern that is structurally more specific.
 
 ### 5.3 Function partial specialization
 
@@ -1334,7 +1346,7 @@ let Widget* second = __huc_slot_Widget_ptr;
 let i32 third = __huc_slot_Widget->id;
 ```
 
-The same family source name denotes:
+The same family name can produce:
 
 - an inline `i32`;
 - a raw `Widget*`;
@@ -1366,7 +1378,7 @@ fn configure(bool writable) -> void {
 }
 ```
 
-The family decides whether the residual variable slot itself is writable.
+The family decides whether the generated variable itself is writable.
 Because `writable` must be a compile-time value for `if1`, a runtime boolean is
 not accepted here; the example’s parameter would need to be a family binder or
 phase-2 input in the finalized grammar.
@@ -1430,8 +1442,9 @@ fn compile_case() -> i32 {
 }
 ```
 
-The normal call specializes a runtime function. `@` requires complete
-translation-time execution and embeds its materializable result.
+The normal call produces a specialized runtime function and calls it at
+runtime. `@` runs the call completely at compile time and writes its result
+as a HUC0 value.
 
 ### 6.2 Phase-2 helper and evaluation island
 
@@ -1498,8 +1511,8 @@ fn run() -> i32 {
 }
 ```
 
-The helper is defined at module scope, but its inherited insertion cursor is
-inside `run`.
+The helper is defined at module scope, but it writes code at its call site
+inside `run`. That output position is its inherited insertion cursor.
 
 ### 7.2 Module generation from a helper
 
@@ -1537,8 +1550,8 @@ into an already checked foreign module.
 ```
 
 The HUC1 translator writes the string without parsing it. The HUC0 translator
-then rejects `if1`. This strict boundary keeps raw generation simple and makes
-the intermediate artifact honest.
+then rejects `if1`. Raw generation does not run staging a second time: its
+output must already be valid HUC0.
 
 ## 8. Large case study: target-specialized small vector
 
@@ -1685,7 +1698,7 @@ fn run() -> i32 {
 }
 ```
 
-This is illustrative rather than a finalized safe container:
+This illustrates the design; it is not a finished, safety-checked container:
 
 - The pointer specialization is chosen structurally.
 - The predicate limits the compact form to capacities up to four.
@@ -1892,9 +1905,10 @@ ownership is independent of the compile-time layout mechanism.
 
 ## 11. Large case study: generated command registry
 
-This case demonstrates module-scope generation and direct runtime dispatch. Raw
-generation is intentionally verbose; the future structured compiler API would
-make it hygienic.
+This case demonstrates module-scope generation and direct runtime dispatch.
+Raw generation requires detailed text construction. The future structured
+compiler API is intended to add name hygiene: generated names would not
+accidentally clash with or refer to existing names.
 
 ```huc
 module case_studies.commands;
@@ -2013,8 +2027,8 @@ struct World {
 }
 ```
 
-This exact predicate depends on the future reflection API and is therefore
-non-bootstrap. It demonstrates why HUC reserves stable type metadata:
+This exact predicate needs the future reflection API, so it is outside the
+first implementation. It shows why HUC plans to provide stable type metadata:
 
 - Basic components can be stored inline.
 - Advanced components can be stored through unique owners.
@@ -2024,8 +2038,8 @@ non-bootstrap. It demonstrates why HUC reserves stable type metadata:
 
 ## 13. Future compiler/reflection use cases
 
-The APIs in this section are deliberately non-normative. They document the
-capabilities the future `import2 compiler` design must support.
+The APIs in this section are proposals, not current language rules. They
+describe the capabilities required from the future `import2 compiler` design.
 
 ### 13.1 Environment inspection
 
@@ -2134,8 +2148,8 @@ The compiler library should allow phase code to ask questions such as:
 - Which concrete specializations exist?
 - Which modules depend on a selected declaration?
 
-Answers are semantic objects or immutable query results, not raw access to
-compiler implementation containers.
+Answers are objects describing checked code or read-only query results, not
+direct access to the compiler's internal containers.
 
 Possible tools include:
 
@@ -2164,9 +2178,9 @@ Possible tools include:
 | Printable HUC0 boundary | internal compiler IR or generated source | Second public translator parses the exact intermediate source |
 | Future semantic reflection | procedural macros, plugins, build generators | Stable compiler-only semantic snapshots plus explicit emission |
 
-HUC’s goal is not to win a feature-count comparison. It aims to make these
-mechanisms compose without C++ template substitution, value-category rules,
-preprocessor macros, and separate ownership idioms all overlapping.
+HUC's goal is not to have the most features. It aims to make these mechanisms
+work together without the overlap between C++ template substitution,
+value-category rules, preprocessor macros, and separate ownership patterns.
 
 ## 15. Example acceptance policy
 

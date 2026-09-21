@@ -2,13 +2,22 @@
 
 Status: current design decision for HUC0
 
-This document defines HUC's construction, copying, destructive relocation,
-assignment, and destruction model. It also compares those operations with
-their C++20 counterparts.
+This document explains how HUC creates, copies, transfers, replaces, and
+destroys values. It gives the exact rules and compares them with C++20.
 
-The comparison is about observable value and resource behavior. HUC is not
-source-compatible with C++, and it deliberately exposes fewer customization
-points.
+The comparison concerns how values and resources behave, not source
+compatibility. HUC deliberately lets users customize fewer operations.
+
+A few terms used throughout:
+
+- **Source** and **destination**: where a value comes from and where it goes.
+- **Slot** or **place**: a storage location, such as a variable or field.
+- **Inline value**: a `T` stored directly, rather than a `T*` or `T&` holding
+  its address.
+- **Pointee**: the object a pointer or owner points to.
+- **Binding**: giving a value to a destination, such as a new local or parameter.
+- **Active**: the slot contains a live value. An **inactive** slot must be
+  reinitialized before it can be used as a value again; it receives no cleanup.
 
 ## 1. The three basic storage relationships
 
@@ -20,11 +29,12 @@ HUC uses three related type forms:
 | `T*` | A nullable, unchecked, non-owning pointer | Copies one address |
 | `T&` | A nullable, unique owner of one allocated `T` | Relocates by default; `copy` duplicates the pointee |
 
-`T&` is not a C++ reference. HUC has no general aliasing-reference type and no
-`T&&` type. A non-null `T&` owns an allocation, automatically destroys its
-pointee, and then deallocates that storage. Directly relocating an owner slot
-clears that source slot to null. Relocating an enclosing inline aggregate
-instead makes the entire source inactive without requiring owner-field nulling.
+`T&` is not a C++ reference. HUC has no general reference type that aliases
+another variable, and no `T&&` type. A non-null `T&` owns an allocation,
+automatically destroys its pointee, and then deallocates that storage.
+Directly relocating an owner slot clears that source slot to null. Relocating
+an enclosing inline aggregate instead makes the entire source inactive without
+requiring owner-field nulling.
 
 HUC has no unary `&` expression. Address-taking uses the core,
 non-overloadable `addressof` intrinsic:
@@ -35,13 +45,14 @@ let Widget* observer = addressof(value);
 let Widget& owner = new Widget(9);
 ```
 
-The pointer-like forms do not compose:
+The pointer-like forms cannot be combined:
 `T**`, `T*&`, `T&*`, and `T&&` are not HUC0 types, including through aliases.
 `addressof` accepts only an inline non-pointer place: it returns `T*` for a
 fixed place and `mod T*` for a writable place. Applying it to a raw-pointer or
-owner slot is a diagnostic. Using `owner` in a `T*` context observes the
-pointee; it does not alias the owner word. Ordinary typed owner-slot reseating
-uses consume-and-return. Binary `&` remains bitwise AND.
+owner slot is a compile-time error. Using `owner` where `T*` is expected gives
+access to the pointee, not to the owner slot itself. To replace a caller's
+owner through an ordinary typed function, pass ownership in and return the
+replacement (consume-and-return). Binary `&` remains bitwise AND.
 
 The separate non-overloadable intrinsic `std::slot_of(place) -> usize` exposes
 the address of an addressable storage slot, including a raw-pointer or owner
@@ -51,19 +62,20 @@ loading or transferring its value. It does not clone, destroy, allocate,
 extend a lifetime, or change cleanup state.
 
 An ordinary function may receive this integer and reconstruct a raw pointer
-with `ptr_as<T*>(address)`. This is untyped representation access, not a new
-typed owner reference: `T&*` and the other composed forms remain forbidden.
+with `ptr_as<T*>(address)`. This gives low-level access to the stored bytes,
+not a new typed owner reference: `T&*` and the other combined forms remain
+forbidden.
 Byte access through `u8*` or `c8*` can inspect or manipulate representation;
 it does not itself perform HUC ownership or lifetime operations. In particular,
 duplicating an owner word does not create a second valid owner.
 
 Taking a fixed slot's address is allowed. The compiler does not track mutation
 permissions through these integers and casts or insert permission checks.
-The programmer must preserve actual storage permissions, valid representation,
-lifetime, alignment, unique ownership, and cleanup obligations. Writing an
-actually fixed slot remains undefined behavior; ordinary typed `mod` rules
-are unchanged. See the language specification's pointer-layering and cast
-sections for the complete contract.
+The programmer must ensure that access respects the storage's permissions,
+lifetime, and alignment, and leaves valid values with unique ownership and
+correct cleanup. Writing a fixed slot remains undefined behavior; ordinary
+typed `mod` rules are unchanged. See the language specification's
+pointer-layering and cast sections for the full rules.
 
 Mutability is independent at each layer:
 
@@ -85,21 +97,22 @@ declaration initializer; mutable pointer and owner fields omitted by a
 constructor default to null. HUC0 globals are separately restricted to
 drop-free Basic scalars and raw pointers, so owners are never global in 0.1.
 
-A fixed containing structure prevents assignment to its field slots and
-writable access to inline field subobjects. It does not remove an explicit
-leading `mod` carried through a pointer or owner field to a separate pointee.
+A fixed structure prevents assignment to its fields and mutation of values
+stored inline in those fields. A pointer or owner field with leading `mod`
+still allows mutation of the separate object it points to.
 For example, a read-only method may mutate the pointee of a `mod T*` field but
-may not reseat that field. This preserves the layer distinctions above.
+may not replace the pointer stored in that field. Each layer keeps its own
+permissions.
 
 A trailing `mod` is required when source code will relocate from, reset,
 release, or reseat a **named** pointer, owner, or other Advanced slot.
 Compiler-inserted destruction at the end of the slot's lifetime does not
 require source-level `mod`.
 
-A fresh unnamed result place is intrinsically consumable. Function results,
-`new T(...)` owner results, evaluated `copy` results, and other temporary Advanced
-values may relocate directly into their next binding without a source-level
-`mod` that could not be written:
+A fresh unnamed result can be transferred directly. Function results,
+`new T(...)` owner results, evaluated `copy` results, and other temporary
+Advanced values need no trailing `mod`: there is no source declaration on
+which to write it.
 
 ```huc
 let File file = open_file("input.dat");
@@ -112,7 +125,7 @@ source place at all.
 
 ## 2. Basic and Advanced types
 
-Every complete runtime type is classified as either **Basic** or **Advanced**.
+Every complete runtime type is either **Basic** or **Advanced**.
 
 The short rule is: **Basic values are copied; Advanced values are transferred.**
 Ordinary binding leaves a Basic source usable. Transferring an inline Advanced
@@ -161,10 +174,10 @@ let Ticket copied = copy moved;    // calls Ticket.clone
 ```
 
 Basic and Advanced are category names, not keywords or declaration modifiers.
-Classification follows the structural rules above.
+The compiler determines the category from the rules above.
 
-An intentionally non-copyable scalar-only token may use an empty `drop` to opt
-into Advanced semantics in HUC0:
+A token containing only scalars can use an empty `drop` to become Advanced
+when its author wants to prevent copying:
 
 ```huc
 struct UniqueTicket {
@@ -180,12 +193,12 @@ struct UniqueTicket {
 ```
 
 With no `clone`, `UniqueTicket` can be relocated but cannot be copied. A future
-explicit non-copyable marker may replace this idiom, but the first compiler
+explicit non-copyable marker may replace this pattern, but the first compiler
 does not need another type-category keyword.
 
-## 3. The special-operation surface
+## 3. Special operations
 
-HUC exposes only three lifecycle declarations:
+HUC lets a type define three lifecycle methods:
 
 ```huc
 fn init(...) : field(initializer), ... {
@@ -237,8 +250,9 @@ let Point origin = Point(0, 0);
 let Point& heap_point = new Point(10, 20);
 ```
 
-These are direct-construction contexts. `Point(0, 0)` constructs `origin` in
-its own storage, and `new Point(10, 20)` constructs in the final allocation.
+These expressions construct values directly. `Point(0, 0)` constructs
+`origin` in its own storage, and `new Point(10, 20)` constructs in the final
+allocation.
 No temporary `Point` is created and no relocation occurs. The same guarantee
 applies when a constructor expression directly initializes:
 
@@ -246,11 +260,10 @@ applies when a constructor expression directly initializes:
 - a by-value function parameter;
 - a function result in `return T(arguments)`.
 
-This is a semantic guarantee, not optional backend copy elision. It lets `init`
-observe the final `this` address and lets a fixed Advanced value be constructed
-without first requiring a writable source temporary. More complex expressions
-that produce an existing Advanced value still follow the normal destructive
-relocation rules.
+HUC guarantees this; it is not an optional optimization. `init` sees the final
+`this` address, and constructing a fixed Advanced value needs no writable
+temporary first. More complex expressions that supply an existing Advanced
+value still follow the normal transfer rules.
 
 Constructor initializer entries:
 
@@ -305,8 +318,8 @@ fn copy_values() -> void {
 }
 ```
 
-Structure fields are copied in declaration order. This is semantic field
-copying, not a promise that padding bytes are duplicated. Because a Basic type
+Structure fields are copied in declaration order. The rule copies field values;
+it does not promise to copy padding bytes. Because a Basic type
 has no `clone` or `drop` method and no Advanced field, ordinary copying does
 not invoke user copy code. It may still have constructors.
 
@@ -366,38 +379,40 @@ Rules:
 - it is an ordinary runtime `fn`, not `fn1` or `fn2`;
 - it has no explicit parameters;
 - its receiver is read-only because it has no trailing `mod`;
-- its return type is the enclosing nominal type;
-- it must not modify the source object's own storage or invalidate its
-  invariants;
+- it returns the same structure type in which it is declared;
+- it must not modify the source object's own storage or leave the source invalid;
 - it cannot be called directly or have its address taken;
 - ordinary binding, assignment, argument passing, and return never call it;
 - `copy source` calls it when `source` is an Advanced structure;
 - declaring it makes the structure Advanced even when every field is Basic;
 - omit `clone` when the type must not be copyable;
-- it is infallible in the HUC type system, although allocation failure or panic
+- it cannot return a recoverable error, although allocation failure or panic
   may terminate the process.
 
-“Independent logical duplicate” is the precise meaning of deep cloning in
-HUC. A `clone` must duplicate owned resources, or establish another valid
-independent ownership share such as a library reference count, so the two
-active values can later be destroyed independently. It does **not** recursively
-clone every reachable object: a `T*` is an observer, so cloning a raw-pointer
-field normally copies only that address. Shared external state, interned data,
-immutable tables, and other observed objects may deliberately remain shared.
-The type author defines this logical boundary and writes the necessary `copy`
-operations inside `clone`; the compiler cannot prove that a custom clone
-honored the contract. Allocation and external bookkeeping are permitted. For
-example, the clone protocol selected by `copy rc` for a probable HUC1
-`Rc<T>`
-may increment a shared control block through an explicitly writable observer
-while leaving the source handle's own storage and resource identity unchanged.
+An “independent logical duplicate” means that the original and its copy can
+each be destroyed without invalidating the other. To achieve this, `clone`
+must duplicate owned resources or create another valid ownership share, for
+example by increasing a library-managed reference count.
 
-A type needing recoverable duplication should expose a normally named function
-such as `try_copy` returning a probable HUC1 `Result<T, E>` specialization.
+Deep cloning in HUC does **not** mean copying every reachable object. A `T*`
+is an observer, so cloning a raw-pointer field normally copies only its
+address. Shared external state, interned data, immutable tables, and other
+observed objects may remain shared. The type author decides what belongs to
+the value and writes the necessary `copy` operations inside `clone`. The
+compiler cannot prove that the method follows these rules.
+
+Allocation and updates to external bookkeeping are allowed. For example, a
+future HUC1 `Rc<T>` could implement `copy rc` by increasing a shared reference
+count through an explicitly writable observer. The source handle's own
+storage must remain unchanged, and it must still refer to the same resource.
+
+A type that needs to report a copying failure should provide an ordinary
+function such as `try_copy`, returning a future HUC1 `Result<T, E>`
+specialization.
 That function is not selected by the `copy` expression.
 
 The initial language has one logical copy operation rather than separate
-custom copy-construction and copy-assignment hooks. Copy assignment is composed
+custom copy-construction and copy-assignment hooks. Copy assignment is built
 from `clone`, destruction of the old destination, and destructive relocation:
 
 ```huc
@@ -582,11 +597,12 @@ selects the specialized operation.
 
 ## 7. Transferring Advanced values
 
-Basic and Advanced name the type categories. **Transfer** is the everyday term
-for the Advanced operation; **destructive relocation** is its precise lifetime
-meaning. It is reasonable to say that a HUC value “moves,” but its lifetime
-behavior is intentionally different from C++ move construction. The compiler
-specification uses “relocation” when that distinction matters.
+Basic and Advanced are the type categories. **Transfer** is the everyday term
+for moving an Advanced value to a destination. The precise term is
+**destructive relocation**: the value continues in the destination, and the
+inline source becomes inactive. This differs from C++ move construction, which
+leaves the source alive. The compiler specification uses “relocation” when
+that distinction matters. Direct owner transfer has a separate rule below.
 
 Here `Packet` is Advanced because it contains an owner, even though it declares
 neither `clone` nor `drop`:
@@ -611,7 +627,7 @@ does not. Relocation continues the value in `destination` and ends the active
 `Packet` lifetime in `source`. It does not create a second live object and it
 does not leave a moved-from `Packet`.
 
-Non-owner relocation has fixed bitwise representation-transfer semantics:
+For a non-owner Advanced value, relocation transfers its stored representation:
 
 1. Transfer the whole value's representation to the destination.
 2. Make the entire source, including every field subobject, inactive.
@@ -628,10 +644,9 @@ The rule is the same whether the structure is Advanced because of `clone`, `drop
 or an Advanced field. It does not change ordinary binding of Basic types, which
 duplicates the value and leaves the source active.
 
-Field fixedness controls ordinary field assignment; it does not block the
-compiler from relocating that field as part of its containing value. The
-containing source place must be writable. For example, a fixed `T&` field is
-still transferred when its writable enclosing structure is relocated.
+A fixed field cannot be assigned to directly, but it can be transferred as
+part of a whole value. The containing source must be writable. For example,
+transferring a writable structure also transfers its fixed `T&` fields.
 
 The bytes of an inactive source need not be cleared and need not form a valid
 representation of `T`. The compiler tracks whether the *storage place* is
@@ -664,11 +679,11 @@ state. HUC destructive relocation ends the non-owner source lifetime
 immediately, so it needs neither a moved-from-state contract nor a source
 destructor call.
 
-Bitwise relocation is the language contract, not an optional replacement for
-recursive field operations. It does not require a literal memory-copy
-instruction or make padding bytes semantically significant. A backend may
-use bulk copies, loads/stores, registers, or eliminate the transfer when
-observably equivalent, while preserving source inactivity and cleanup.
+Bitwise relocation is the language rule, not an optimization of separate field
+transfers. It does not require a memory-copy instruction or give padding bytes
+a defined meaning. The backend may copy memory, use loads and stores, keep
+values in registers, or remove the transfer entirely. The program must still
+behave the same: the source becomes inactive, and cleanup stays correct.
 
 For example, `let T a = b;` for an inline Advanced `T` may keep the value in
 the same registers and need no machine instruction for the transfer. `b`
@@ -686,7 +701,7 @@ fn relocate(...) -> T;
 fn operator=(...) -> T;
 ```
 
-An ordinarily named method may implement a visible domain operation, but
+A normally named method may implement a type-specific operation, but
 binding, argument passing, returning, assignment, and container growth never
 select it implicitly.
 
@@ -694,23 +709,23 @@ Fixed destructive relocation provides:
 
 - no hidden allocation or I/O during ordinary transfer;
 - no overload resolution based on value categories;
-- no user code running merely because a value crosses a scope boundary;
-- predictable representation-transfer lowering;
+- no user code called by the transfer itself;
+- predictable compiler implementation of the transfer;
 - one rule for parameters, returns, assignments, and containers;
 - a guarantee that relocation itself cannot fail;
-- no requirement that resource wrappers reserve an “empty” sentinel merely
-  so a source destructor can run.
+- no need for a resource wrapper to reserve an “empty” value merely so a
+  source destructor can run.
 
-This is the best default for HUC0. A future proposal may add an explicit
-relocation customization point if real programs demonstrate that the
-address-dependent cases below are common enough to justify the additional
-type-system, generic-code, and failure-semantics complexity. Such a facility
-must not be smuggled in as another spelling of `init`.
+This is HUC0's chosen default. A future proposal may allow custom relocation
+if real programs show that the address-dependent cases below are common enough
+to justify more complex type rules, generic code, and failure handling. That
+would need a separate feature, not another form of `init`.
 
 ### 7.2 Address-dependent inline values
 
-Fixed relocation has one important boundary: it cannot repair an invariant
-that depends on the inline object's address. For example:
+Fixed relocation has one important limit: it cannot repair values that depend
+on the object's current address. A stored pointer to the object itself is one
+example:
 
 ```huc
 struct SelfIndexed {
@@ -739,8 +754,8 @@ let SelfIndexed second = first; // bitwise relocation; first becomes inactive
 // invariant is undefined behavior.
 ```
 
-HUC0 deliberately has no automatic self-pointer discovery or repair. A value
-with this invariant must instead:
+HUC0 does not automatically find or repair self-pointers. A value that needs
+such a pointer to stay correct must instead:
 
 - live behind `T&`, so relocation transfers only the owner word and the pointee
   address stays stable;
@@ -763,22 +778,22 @@ if (elsewhere->has_expected_address()) {
 }
 ```
 
-`Vector<SelfIndexed>` is invalid for this invariant when growth relocates
+`Vector<SelfIndexed>` breaks this requirement when growth relocates
 elements. `Vector<SelfIndexed&>` or a stable node container is appropriate.
 The same caveat applies to by-value parameters, returns, aggregate fields, and
 assignment. HUC is unchecked: obvious cases may be warned about, but the
 compiler is not required to prove address independence.
 
-### 7.3 Eligible source places
+### 7.3 Where a transfer may take its value from
 
-Destructive relocation of a non-owner Advanced value is allowed only from an
-entire compiler-tracked root place:
+Transferring a non-owner Advanced value requires a whole value whose active
+state the compiler tracks directly:
 
 - a named local or parameter with the required trailing `mod`;
 - a fresh temporary or function-result place.
 
-Whole-aggregate relocation includes all its subobjects in one transfer; it
-does not perform separate move-outs from an otherwise active aggregate.
+Transferring a whole structure or array includes all its fields or elements.
+It does not remove them one at a time while leaving the containing value active.
 
 HUC0 rejects explicit non-owner move-out from a pointee or subobject:
 
@@ -788,11 +803,11 @@ let Lease lease = session.lease;       // error: Advanced subobject source
 let Packet packet = packets[index];    // error: Advanced element source
 ```
 
-Otherwise the enclosing object, owner allocation, or array could remain active
-while one of the places its later cleanup assumes active no longer contains a
-live value. In the first example, `file_owner` would still be non-null and
-would later try to drop an inactive `File`, violating the one-word-owner
-contract.
+Otherwise the containing object, owner, or array could remain active even
+though one of the values it must later destroy is already inactive. In the
+first example, `file_owner` would still be non-null and would later try to
+drop an inactive `File`. Tracking that extra state would break the one-word
+owner model.
 
 This restriction does not affect:
 
@@ -880,10 +895,11 @@ private:
 
 The C++ source must write a sentinel because `source` remains a live `File`
 whose destructor later runs. HUC does not have that requirement. Its backend
-uses static liveness where possible and a sidecar active flag only at
-control-flow joins that need one; it must not add a hidden field to `File`.
+uses compile-time knowledge of whether the value is active where possible.
+Where control-flow paths join and that state is uncertain, it uses a separate
+flag if needed; it must not add a hidden field to `File`.
 
-## 8. Relocation assignment and exact self-relocation
+## 8. Assignment by transfer, including self-assignment
 
 A writable destination can be replaced by destructively relocating another
 value:
@@ -899,7 +915,7 @@ For distinct active objects, relocation assignment:
 
 1. evaluates the destination location once;
 2. evaluates the source location once;
-3. checks whether they denote exactly the same storage;
+3. checks whether they refer to exactly the same storage;
 4. destroys the old active destination;
 5. relocates the source into the now-inactive destination.
 
@@ -911,7 +927,8 @@ value:
 current = current;
 ```
 
-Non-identical overlapping source and destination storage is undefined behavior.
+Using source and destination storage that overlaps but is not identical is
+undefined behavior.
 The compiler should diagnose obvious cases.
 
 Assignment to an already inactive destination skips destination destruction
@@ -962,7 +979,7 @@ It must:
 `drop` cannot be called directly or have its address taken. The compiler calls
 it once when an active value is **destroyed**. Destructive relocation is not
 destruction: it ends the source lifetime without calling source `drop`, and the
-relocated destination later carries the cleanup obligation. `drop` is intended
+destination becomes responsible for later cleanup. `drop` is intended
 to release resources that are not already represented by automatically
 destroyed fields.
 
@@ -1077,7 +1094,7 @@ let i32 ordering = compare_versions(copy document, document);
 HUC clones `document` for `left`, then relocates the original into `right`.
 
 C17 does not provide the same left-to-right argument guarantee. The backend
-must therefore materialize each argument's **parameter value** before it begins
+must therefore initialize each argument's **parameter value** before it begins
 the next argument. For the owner example, generated code is conceptually:
 
 ```c
@@ -1091,15 +1108,15 @@ The first declaration completes the owner-to-observer conversion. Binding the
 second parameter then transfers the pointer and clears `document`. Merely
 saving pointers to source places and postponing both conversions until the
 final C call would be incorrect. The pointer to `huc_param_1` transports an
-already initialized parameter place; the callee's generated cleanup owns its
-destruction responsibility. This internal C pointer-to-pointer does not add a
-composed pointer type to HUC. The actual emitter uses concrete typed holders
-or an explicit call frame and preserves their cleanup. Optimizers remain free
-to reorder pure work when observable behavior is unchanged.
+already initialized parameter slot, and the called function's generated code
+is responsible for its cleanup. This internal C pointer-to-pointer does not
+add a combined pointer type to HUC. The emitter uses typed storage for each
+parameter, either separately or in a call frame, and preserves cleanup order.
+Optimizers may reorder pure computation when the program still behaves the same.
 
 ## 11. Return values
 
-Returning a Basic value copies it semantically:
+Returning a Basic value follows the normal copy rule:
 
 ```huc
 fn origin() -> Point {
@@ -1150,13 +1167,13 @@ std::unique_ptr<Widget> make_widget(std::int32_t id) {
 
 ## 12. Containers and element value semantics
 
-The following APIs are a probable standard-library design, not yet a separately
-accepted container specification. They demonstrate how a container can use the
+The following APIs illustrate a possible standard library; the container
+design is not yet approved. They show how a container can use the
 same Basic/Advanced rules without adding another ownership model.
 
 The code in this section is HUC1-facing library source: `Vector<T>` is a
 phase-1 family request. Before HUC0 checking, staging replaces every request
-with a concrete nominal type name. HUC0 itself never parses `Vector<T>`.
+with the name of a concrete type. HUC0 itself never parses `Vector<T>`.
 
 ```huc
 module examples.vector_values;
@@ -1203,9 +1220,9 @@ A reallocation of `Vector<T>`:
 - may invalidate raw pointers into its storage without a diagnostic.
 
 The container is responsible for its backing storage and initialized element
-range, including ensuring that retired source slots receive no element
-cleanup. The only additional raw-storage lifetime intrinsics planned are
-`std::construct_at` and `std::destruct_at`; their interfaces and detailed
+range. It must ensure that old slots whose values were transferred receive
+no element cleanup. The only additional raw-storage lifetime intrinsics
+planned are `std::construct_at` and `std::destruct_at`; their interfaces and detailed
 semantics will be designed later. Ordinary relocation-source restrictions and
 the absence of user-defined relocation hooks remain unchanged.
 
@@ -1463,7 +1480,7 @@ Useful warnings include:
 
 Warnings do not turn HUC into a memory-safe language and may be disabled.
 
-## 16. Backend obligations
+## 16. Backend requirements
 
 The HUC0-to-C17 transpiler must preserve these source semantics rather than
 inheriting C defaults:
