@@ -123,7 +123,7 @@ The examples below cover these use cases:
 | HUC1 | Call-site and module-scope raw generation |
 | Pipeline | Per-module HUC1-to-HUC0 expansion |
 | Pipeline | Standalone hand-written HUC0 |
-| Pipeline | Generated C++20 with explicit evaluation sequencing |
+| Pipeline | Generated C17 with explicit evaluation sequencing and cleanup |
 | Systems | Target-specific layouts without preprocessor directives |
 | Systems | Small-buffer and pointer-shape specialization |
 | Systems | Embedded register-map generation |
@@ -162,7 +162,7 @@ fn calculate() -> i32 {
 `let` means “the next declaration introduces storage.” It does not imply
 mutability. `mod` is the only mutability marker.
 
-The expected result is `42`. A backend may map `base` to a C++ `const` local,
+The expected result is `42`. A backend may map `base` to a C `const` local,
 but HUC’s rule is authoritative even if a backend chooses another
 representation.
 
@@ -769,17 +769,17 @@ fn run() -> i32 {
 }
 ```
 
-HUC requires both `trace` and `result` to become `123`. A C++ backend must
-introduce ordered temporaries if a direct C++ call would not preserve this
+HUC requires both `trace` and `result` to become `123`. The C17 backend must
+introduce ordered temporaries if a direct C call would not preserve this
 contract.
 
-Conceptual generated C++:
+Conceptual generated C (module-qualified names shortened):
 
-```cpp
-auto __huc_arg0 = next(1);
-auto __huc_arg1 = next(2);
-auto __huc_arg2 = next(3);
-auto result = combine(__huc_arg0, __huc_arg1, __huc_arg2);
+```c
+int32_t huc_arg0 = next(1);
+int32_t huc_arg1 = next(2);
+int32_t huc_arg2 = next(3);
+int32_t result = combine(huc_arg0, huc_arg1, huc_arg2);
 ```
 
 ### 3.11 Relocating the same owner twice in one call

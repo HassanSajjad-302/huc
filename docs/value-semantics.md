@@ -506,7 +506,8 @@ private:
 
 The user writes five C++ special members here. The HUC user writes `clone` and
 `drop`; HUC supplies fixed destructive relocation. This comparison does not
-imply that the emitted C++ will have exactly this spelling.
+describe the emitted backend code: the first backend emits C17 with explicit
+lifetime operations, not C++ special members.
 
 ### 6.2 Unique-owner copying
 
@@ -1028,23 +1029,26 @@ let i32 ordering = compare_versions(copy document, document);
 
 HUC clones `document` for `left`, then relocates the original into `right`.
 
-C++20 does not provide the same left-to-right argument guarantee. The backend
+C17 does not provide the same left-to-right argument guarantee. The backend
 must therefore materialize each argument's **parameter value** before it begins
 the next argument. For the owner example, generated code is conceptually:
 
-```cpp
-Document* huc_param_0 = document.get();
-huc_rt::owner<Document> huc_param_1 = std::move(document);
-receive(huc_param_0, std::move(huc_param_1));
+```c
+const Document *huc_param_0 = document;
+Document *huc_param_1 = document;
+document = NULL;
+receive_impl(huc_param_0, &huc_param_1);
 ```
 
-The first declaration completes the owner-to-observer conversion. The second
-then clears `document`. Merely saving `auto&&` aliases and postponing both
-parameter conversions until the final C++ call would be incorrect. The final
-`std::move` above is backend transport from an already initialized holder, not
-another HUC operation. The actual emitter uses concrete typed holders or an
-explicit call frame and preserves their cleanup. Optimizers remain free to
-reorder pure work when observable behavior is unchanged.
+The first declaration completes the owner-to-observer conversion. Binding the
+second parameter then transfers the pointer and clears `document`. Merely
+saving pointers to source places and postponing both conversions until the
+final C call would be incorrect. The pointer to `huc_param_1` transports an
+already initialized parameter place; the callee's generated cleanup owns its
+destruction responsibility. This internal C pointer-to-pointer does not add a
+composed pointer type to HUC. The actual emitter uses concrete typed holders
+or an explicit call frame and preserves their cleanup. Optimizers remain free
+to reorder pure work when observable behavior is unchanged.
 
 ## 11. Return values
 
@@ -1414,10 +1418,11 @@ Warnings do not turn HUC into a memory-safe language and may be disabled.
 
 ## 16. Backend obligations
 
-The HUC0-to-C++20 transpiler must preserve these source semantics rather than
-inheriting C++ defaults:
+The HUC0-to-C17 transpiler must preserve these source semantics rather than
+inheriting C defaults:
 
-1. `T&` lowers to a pointer-sized owner representation, never a C++ reference.
+1. `T&` lowers to one typed C pointer; ownership is enforced by HUC analysis,
+   not by the C type system.
 2. Copy/Move classification is decided by HUC semantic analysis.
 3. `clone` runs only for an evaluated `copy` that requires it.
 4. relocation is structural, non-failing, and independent of user overloads;
@@ -1426,18 +1431,22 @@ inheriting C++ defaults:
 7. exact self-relocation assignment is a no-op;
 8. `drop` runs before reverse field cleanup;
 9. arguments and parameter initialization are left-to-right;
-10. generated C++ special members are implementation machinery, not extra HUC
-    customization points;
+10. generated initialization, clone, drop, and relocation functions are
+    implementation machinery, not extra HUC customization points;
 11. active/inactive state belongs to a storage place and must not add a hidden
     field to nominal `T` or to pointer-sized `T&`;
-12. user `drop` must not be placed in an unconditional C++ destructor that
-    would also run for an inactive raw-handle source;
+12. explicit cleanup covers every normal exit and active replacement; no drop
+    call may be emitted for an inactive raw-handle source merely because its
+    physical C storage leaves scope;
 13. non-owner relocation sources must satisfy the root-place restriction, and
     a possibly aliasing indirect destination must be checked before replacement.
 
 The middle-end must make construction, copy, relocation, activation,
-deactivation, and cleanup explicit before C++ emission. This keeps the
-semantics usable by a future C-output or native-code backend.
+deactivation, and cleanup explicit before C emission. C assignment and byte
+copying are permitted implementations only when they preserve the complete
+HUC operation, including owner nulling and active state, and obey C's storage
+and aliasing rules. This keeps the semantics usable by a future C++ or
+native-code backend without changing HUC value semantics.
 
 ## 17. Design references
 

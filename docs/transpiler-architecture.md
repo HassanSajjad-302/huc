@@ -9,7 +9,7 @@ disagreement remains, the plan controls.
 ## 1. Recommendation
 
 The first two HUC translators and their command-line driver are implemented in
-portable ISO C++20:
+portable ISO C++20. Their first output language is ISO C17:
 
 ```text
 HUC1 source
@@ -20,47 +20,54 @@ printable per-module HUC0 source
     |
     | huc0_transpile
     v
-C++20 headers + one root translation unit
+C17 headers + one root translation unit
 ```
 
 The translators are independently usable. Milestone 1 implements
-HUC0-to-C++20 first. Milestone 2 then implements HUC1-to-HUC0 and invokes the
+HUC0-to-C17 first. Milestone 2 then implements HUC1-to-HUC0 and invokes the
 already public HUC0 translator only through the written textual module tree.
 A user may always write, inspect, and compile HUC0 without using HUC1.
 
 This is a bootstrap choice, not a semantic dependency. HUC has its own parser,
 type checker, staging evaluator, specialization engine, ownership lowering,
-and intermediate representation, all implemented in C++20. The generated
-C++20 is a separate artifact and is never treated as HUC's semantic authority.
+and intermediate representation, all implemented in C++20. Generated C17 is a
+separate artifact and is never treated as HUC's semantic authority.
 
-The decisive reason is deterministic cleanup. A C++ output backend can map HUC
-`T&` to a one-word move-only RAII wrapper and can use generated C++ scopes to
-handle normal exits. A C output backend would require the first compiler to lower
-every scope exit, early return, partial initialization, and conditional drop
-into explicit cleanup branches before even the smallest useful HUC program
-could run.
+The reason for choosing C is explicit semantic lowering. HUC already needs
+to resolve construction, destructive relocation, active/inactive state,
+destruction, and evaluation order. C structures, pointers, and generated free
+functions express those operations without adding implicit constructor,
+assignment, or destructor behavior.
 
-The middle end must nevertheless make destructive relocations and drops
-explicit. That keeps the language independent of C++ and makes a later C
-output backend or LLVM backend straightforward.
+The first compiler must emit cleanup for every normal scope exit, early
+return, loop exit, replacement, and abandoned initialized prefix, with flags
+where conditional liveness requires them. This is part of MIR elaboration,
+not an optional later feature. The same explicit MIR can support future C++
+or native-code output without redoing HUC semantic analysis.
 
 ## 2. C versus C++ as the first emitted backend
 
-| Concern | Future C backend | C++20 backend |
+| Concern | First C17 backend | Possible later C++ backend |
 |---|---|---|
-| `T&` cleanup | Compiler emits all cleanup paths | One-word generated RAII wrapper |
-| Methods and namespaces | Lower immediately | Direct mapping |
-| Move-only values | Manual structs/functions/drop flags | Generated special members |
-| Generic specializations | Name-mangled functions and structs | Name-mangled concrete types; no templates required |
-| Early bootstrap size | Larger | Smaller |
-| Generated code simplicity | Mechanically simple but verbose | More compact |
-| Risk of inheriting backend semantics | Moderate | Higher; must be fenced carefully |
-| C ABI integration | Native | Easy through `extern "C"` |
-| Future backend neutrality | Good if IR exists | Equally good if IR exists |
+| `T&` representation | One typed pointer with explicit cleanup | Plain pointer or a carefully matched helper |
+| Methods and modules | Mangled free functions and explicit receivers | Free functions or native namespace/member syntax |
+| Move values | Plain storage plus MIR-controlled relocation and drops | The same model; ordinary C++ moves alone are insufficient |
+| Generic specializations | Concrete functions and structures | Concrete functions and structures; templates are unnecessary |
+| Lifetime implementation | Cleanup edges and conditional flags | Same HUC analysis; optional RAII only where equivalent |
+| Backend constraints | C effective types, aliasing, alignment, and sequencing | C++ object lifetimes, aliasing, alignment, and sequencing |
+| Foreign integration | Direct supported C ABI; adapters for C++ later | C ABI plus potential direct C++ bindings later |
 
-The C++ emitter must not translate HUC source by token substitution. In
-particular, HUC `T&` must never be emitted as C++ `T&`; it is emitted as
-`::huc_rt::owner<T>`.
+The C emitter must not translate HUC source by token substitution. HUC owners
+and observers may share a C pointer representation while retaining different
+HUC operations. Copying such a C pointer does not by itself implement an owner
+transfer or discharge any cleanup obligation. The compiler also implements
+final-destination construction and HUC fixedness rather than inheriting them
+from C declarations.
+
+Use ISO C17 as the initial output baseline. Compiler-specific extensions,
+direct C++ interoperability, and additional backends are not bootstrap
+requirements. C17 does not guarantee faster output; correctness and generated
+operation counts must be tested.
 
 The table compares output languages. The transpiler executable, frontend,
 staging interpreter, middle end, emitters, and driver are C++20 programs.
@@ -96,10 +103,10 @@ declaration collection -> name/type/lifecycle checking
 concrete typed HIR -> ownership/drop elaboration -> sequenced MIR
     |
     v
-C++20 emitter + source map + runtime header
+C17 emitter + source map + runtime header
     |
     v
-clang++ / g++ -> object files -> linker
+clang / gcc (-std=c17) -> object files -> linker
 ```
 
 `huc0_transpile` accepts source files, not an HUC1 AST or an undocumented
@@ -108,9 +115,9 @@ pass those paths to `huc0_transpile`. This boundary is both a correctness test
 and the reason generated HUC0 remains a useful inspection and interchange
 artifact.
 
-Neither translator asks the host C++ compiler to implement HUC families,
+Neither translator asks the downstream C compiler to implement HUC families,
 compile-time evaluation, overload selection, or phase semantics. All such work
-is complete before C++ is emitted.
+is complete before C is emitted.
 
 ## 4. Proposed repository layout
 
@@ -126,7 +133,7 @@ src/
   huc1/
   driver/
 runtime/
-  huc_runtime.hpp
+  huc_runtime.h
 tests/
   unit/
   golden/
@@ -144,12 +151,12 @@ The logical libraries are:
 - `huc_common`: sources, diagnostics, target configuration, module graphs,
   arenas, IDs, and shared delimiter/parser support;
 - `huc0`: the independently usable HUC0 frontend, HIR/MIR passes, ownership
-  lowering, and C++20 emitter;
+  lowering, and C17 emitter;
 - `huc1`: staged indexing, deferred-body handling, the phase interpreter,
   specialization, and printable HUC0 residualization;
 - `huc`: a thin C++20 command-line driver.
 
-The generated `huc_runtime.hpp` belongs to the C++20 output, not to either
+The generated `huc_runtime.h` belongs to the C17 output, not to either
 translator executable. Compiler sources do not include it.
 
 ### 4.1 C++20 implementation conventions
@@ -340,7 +347,7 @@ Important recovery points are:
 The parser preserves an ambiguous angle postfix when syntax alone cannot
 distinguish `name<arguments>` from comparison operators. Semantic name
 resolution later decides whether the name denotes a phase-1 family. This is
-not delegated to C++ parsing.
+not delegated to downstream C parsing.
 
 ### 5.4 AST
 
@@ -495,7 +502,7 @@ typedef enum HucTypeKind {
 `Owner<T>` and `RawPointer<T>` are distinct canonical nodes. HUC has no
 `const` type qualifier: fixedness and `mod` permissions are represented on the
 correct value, pointer-slot, owner-slot, and pointee layers, never inferred
-from C++ declarator strings.
+from emitted C declarator strings.
 
 Canonicalization rejects any raw-pointer or owner node whose pointee is itself
 raw-pointer- or owner-typed. `addressof` accepts only an inline non-pointer
@@ -616,8 +623,8 @@ typedef struct HucHirExprHeader {
 } HucHirExprHeader;
 ```
 
-This distinction prevents the C++ emitter from rediscovering ownership intent
-through emitted overload resolution.
+This distinction prevents the C emitter from rediscovering ownership intent
+from indistinguishable pointer representations.
 
 `Move` remains the name of a HUC type's transfer category. `Relocate` is the
 operation performed when a Move value is transferred: the destination becomes
@@ -885,10 +892,11 @@ _HU3app4math6select__A7F19C2E
 ```
 
 The HUC0 name is deterministic for the defining family, canonical arguments,
-and target-relevant configuration. The C++ backend may mangle it again as an
-ordinary concrete HUC0 symbol. Exact spellings remain implementation details
-until a native HUC ABI is specified; comments and origin maps recover the
-source family and compile-time arguments.
+and target-relevant configuration. The C backend encodes this HUC0 symbol as
+a collision-free C identifier without using C implementation-reserved names;
+the HUC-only prefix above is not emitted verbatim. Exact spellings remain
+implementation details until a native HUC ABI is specified; comments and
+origin maps recover the source family and compile-time arguments.
 
 When a request originates in another module, its generated concrete HUC0
 declaration remains in the defining module and the requesting module refers to
@@ -1009,7 +1017,7 @@ Return
 Unreachable
 ```
 
-MIR semantics are sequenced. The C++ emitter must introduce temporaries when
+MIR semantics are sequenced. The C emitter must introduce temporaries when
 necessary to preserve HUC's left-to-right order.
 
 `Relocate` is the complete destructive-relocation operation, not one half of
@@ -1075,16 +1083,17 @@ The pass adds cleanup before:
 
 There are no exception cleanup edges in 0.1.
 
-Even though the C++ backend can perform cleanup through RAII, explicit MIR
-cleanup is still valuable:
+Explicit MIR cleanup is mandatory for the C backend:
 
-- it verifies HUC destruction order independently;
+- it implements HUC destruction order independently of C scope exit;
 - it supports deterministic MIR dumps in compiler tests and debug builds;
-- it prepares the C output backend;
-- it prevents accidental dependence on C++ temporary-lifetime rules.
+- it handles HUC temporaries, abandoned initialized prefixes, and conditional
+  liveness without implicit backend cleanup;
+- it provides the same semantic input to future backends.
 
-The first emitter may coalesce explicit cleanup into generated RAII where the
-result is provably equivalent.
+The emitter may share cleanup tails through labels and branches or emit
+equivalent calls directly on each exit. Static analysis removes unnecessary
+flags; remaining flags belong to storage places, not nominal value layouts.
 
 ### 12.4 Special-operation elaboration
 
@@ -1131,9 +1140,9 @@ Its representation may retain old bits, but the compiler never calls its
 active lifetime. This is destructive relocation, not a C++-style move
 construction that leaves behind a destructible moved-from object.
 
-No HIR or MIR operation performs overload resolution for relocation. A C++
-move constructor or move helper emitted for backend convenience is compiler
-machinery, not a HUC customization point. See
+No HIR or MIR operation performs overload resolution for relocation. A C
+relocation helper emitted for backend convenience is compiler machinery, not
+a HUC customization point. See
 [Value Semantics and Special Operations](value-semantics.md).
 
 The compiler does not repair self-pointers or other address-dependent
@@ -1146,124 +1155,100 @@ The backend may replace structural fieldwise relocation with a representation
 copy only when layout and alias analysis prove the replacement has identical
 HUC effects, including required standalone-owner nulling, source deactivation,
 and drop state. Owner bits inside an inactive aggregate source need not be
-cleared if the backend also proves that neither C++ nor HUC cleanup can observe
-them. This is an optimization, never a user-visible `trivially_relocatable`
-promise in HUC 0.1.
+cleared if the backend also proves that neither generated cleanup nor any
+permitted access can observe them. This is an optimization, never a
+user-visible `trivially_relocatable` promise in HUC 0.1.
 
-## 13. C++20 lowering
+## 13. C17 lowering
 
 ### 13.1 Runtime owner
 
-The generated runtime support contains conceptually:
+Each HUC primitive owner is represented by one typed C pointer. Concrete
+generated helpers provide its operations; no C++ smart pointer, destructor,
+deleter field, or hidden liveness field is involved. For one pointee type,
+the generated support is conceptually:
 
-```cpp
-namespace huc_rt {
+```c
+#include <stddef.h>
 
-namespace generated {
+typedef struct huc_Widget huc_Widget;
+typedef huc_Widget *huc_Widget_owner;
 
-// Specialized/generated for every owned HUC pointee type. It runs HUC
-// drop-in-place logic, ends the C++ storage lifetime, and deallocates.
-template<class T>
-void destroy_owned(T* pointer) noexcept;
+// Generated for this pointee: HUC drop, reverse field cleanup, then
+// deallocation compatible with the original allocation.
+static void huc_Widget_destroy_owned(huc_Widget *pointer);
 
+static huc_Widget *huc_Widget_owner_release(huc_Widget_owner *slot) {
+    huc_Widget *result = *slot;
+    *slot = NULL;
+    return result;
 }
 
-template<class T>
-class owner {
-    T* pointer_ = nullptr;
-
-public:
-    owner() noexcept = default;
-    explicit owner(T* pointer) noexcept : pointer_(pointer) {}
-
-    owner(const owner&) = delete;
-    owner& operator=(const owner&) = delete;
-
-    owner(owner&& other) noexcept
-        : pointer_(other.release()) {}
-
-    owner& operator=(owner&& other) noexcept {
-        if (this != &other) {
-            reset();
-            pointer_ = other.release();
-        }
-        return *this;
+static void huc_Widget_owner_reset(huc_Widget_owner *slot) {
+    if (*slot != NULL) {
+        huc_Widget_destroy_owned(*slot);
+        *slot = NULL;
     }
-
-    ~owner() { reset(); }
-
-    T* get() const noexcept { return pointer_; }
-
-    T* release() noexcept {
-        T* result = pointer_;
-        pointer_ = nullptr;
-        return result;
-    }
-
-    void reset(T* replacement = nullptr) noexcept {
-        T* old = pointer_;
-        pointer_ = replacement;
-        if (old != nullptr) {
-            generated::destroy_owned(old);
-        }
-    }
-};
-
 }
 ```
 
-`destroy_owned<T>` is selected statically from `T`; no deleter or function
-pointer is stored in `owner<T>`. The real implementation must handle incomplete
-generated types, over-aligned allocation, and partially emitted modules
-carefully. The wrapper remains one pointer.
+These are internal backend operations, not new HUC intrinsics. A pointer to a
+C owner slot is permitted in generated code; it does not add `T&*` or `T**`
+to HUC. Owner and observer distinctions remain in HUC semantic analysis even
+when their C representations coincide. MIR controls whether a reset leaves
+an active null owner or whether final cleanup makes the HUC place inactive.
+
+The destroy helper is selected statically from the pointee type. The emitter
+must handle forward declarations, allocation alignment, and matching
+deallocation without changing the one-pointer owner representation.
 
 ### 13.2 Operation mapping
 
-| HUC operation | Generated C++ |
+| HUC operation | Generated C17 |
 |---|---|
-| `T*` | `T*` |
-| `T&` | `huc_rt::owner<T>` |
-| owner observation | `.get()` |
-| `addressof(value)` | `std::addressof(value)` or an equivalent raw address |
+| `T*` / `mod T*` | Typed C pointers with HUC access permissions checked before emission |
+| `T&` | One typed C pointer with MIR-controlled ownership |
+| owner observation | Read the pointer without transferring it |
+| `addressof(value)` | Address of the corresponding typed storage place |
 | `std::slot_of(place)` | the slot's data-storage address converted to target `usize` |
 | `ptr_as<T*>(address)` for `usize` | target-supported integer-to-data-pointer reconstruction |
-| owner destructive relocation | `std::move(owner)` or `.release()` into a wrapper |
-| `T(values)` initializing a final place | direct initialization or placement construction in that place |
-| `new T(values)` | nonthrowing allocation, terminate-on-null check, then direct construction in that allocation |
+| owner destructive relocation | Transfer the pointer, then null the source slot |
+| `T(values)` initializing a final place | Generated initializer with an explicit final-destination pointer |
+| `new T(values)` | Aligned allocation, terminate-on-failure check, then initialization in that allocation |
 | `copy owner` | allocate, then fieldwise-copy or clone the pointee |
-| `adopt<T>(raw)` | explicit owner construction |
-| `release(owner)` | `.release()` |
-| `reset(owner)` | `.reset()` |
+| `adopt<T>(raw)` | Store a compatible allocation's pointer and establish the HUC cleanup obligation |
+| `release(owner)` | Return the pointer and null the owner slot |
+| `reset(owner)` | Drop/deallocate the pointee if non-null, then leave a null owner |
 
 The backend must preserve the specified data-address round trip, using
-`std::uintptr_t` or an equivalent target-supported unsigned representation.
-This requires no allocation or helper call. Taking an owner slot's address
-addresses its stored owner representation, never `.get()`. Representation
+`uintptr_t` or an equivalent target-supported unsigned representation. Targets
+must support the specified pointer-width integer round trip. Taking a slot
+address requires no allocation or runtime helper call. Taking an owner slot's
+address addresses the pointer slot itself, not the pointee. Representation
 access must respect HUC's byte-aliasing rules, not depend on an incompatible
-C++ typed dereference. Raw writes do not automatically update HUC drop flags
+C typed dereference. Raw writes do not automatically update HUC drop flags
 or perform lifecycle operations; ordinary owner cleanup must observe any valid
 changes to its stored representation.
 
-Generated C++ may use `std::move`; HUC source never does. In generated code,
-that spelling only selects compiler-generated transport machinery. It does not
-give HUC C++ move-constructor semantics and is never a source-level
-customization point.
+Methods, constructors, clone/drop helpers, and relocation helpers are ordinary
+generated C functions. HUC overloads are resolved before emission and receive
+distinct C names. Owner replacement drops the active destination before
+transfer, after checking exact self-relocation where aliasing is possible.
 
-Generated HUC functions, constructors, clone/drop helpers, and relocation
-helpers are `noexcept`. Allocation uses a nonthrowing primitive followed by an
-explicit HUC termination path before any constructor executes. An equivalent
-backend-wide exception fence is acceptable only if it terminates immediately
-without unwinding generated HUC scopes. A throwing C++ `new T(...)` is not an
-acceptable direct lowering because HUC 0.1 has no exception unwinding.
+Allocation uses a primitive with an explicit failure result and a HUC
+termination path before initialization executes. HUC 0.1 has no exception
+unwinding. Foreign adapters must not unwind or otherwise bypass generated
+cleanup across a HUC frame; a later C++ adapter must catch and translate or
+terminate before an exception crosses that boundary.
 
 ### 13.3 Sequencing
 
-Although C++20 does not choose a left-to-right order for all function
+Although C17 does not choose a left-to-right order for all function
 arguments, HUC requires each argument expression *and its corresponding
 by-value parameter initialization* to complete before evaluation of the next
-argument begins. Retaining aliases such as `auto&&` is insufficient: it delays
-the Copy/Relocate operation that binds the actual parameter until the final
-C++ call.
+argument begins. Retaining pointers to argument source places is insufficient:
+it delays the Copy/Relocate operation that binds the actual parameter until
+the final C call.
 
 MIR therefore creates a typed parameter place for each by-value HUC parameter
 and fills those places sequentially. A backend call frame is typed raw storage
@@ -1277,23 +1262,23 @@ call(first(), second());
 becomes conceptually, using pseudocode rather than a required public runtime
 API:
 
-```cpp
-call_frame_for_call _hu_frame;
+```c
+call_frame_for_call huc_frame;
 
 // Evaluate first(), then complete Copy/Relocate/direct construction of
 // parameter 0 in its final typed holder.
-evaluate_and_bind_parameter_0_in_place(&_hu_frame.parameter_0);
+evaluate_and_bind_parameter_0_in_place(&huc_frame.parameter_0);
 
 // Only now evaluate second() and complete parameter 1.
-evaluate_and_bind_parameter_1_in_place(&_hu_frame.parameter_1);
+evaluate_and_bind_parameter_1_in_place(&huc_frame.parameter_1);
 
-call_impl(&_hu_frame.parameter_0, &_hu_frame.parameter_1);
+call_impl(&huc_frame.parameter_0, &huc_frame.parameter_1);
 ```
 
 Internal generated function implementations may accept pointers to these
-already initialized parameter places instead of C++ by-value parameters. That
+already initialized parameter places instead of C by-value parameters. That
 makes final ABI transport semantically inert: it cannot invoke a clone,
-relocation, constructor, or user hook in an order chosen by C++. The callee
+relocation, constructor, or user hook in an order chosen by C. The callee
 still sees ordinary HUC by-value parameter storage, and MIR controls its
 cleanup. Generated wrapper thunks may recover a conventional ABI where needed
 after all observable HUC parameter binding has completed.
@@ -1304,78 +1289,80 @@ parameters use the resolved observer value, and direct constructor/function
 results use their final destination place. The same call-frame lowering must
 preserve temporary and parameter destruction order.
 
-### 13.4 Generated special members
+Function results with observable destination identity also use an explicit
+result pointer supplied by the caller. Initializers write directly into that final
+storage; ordinary C structure returns must not introduce an observable
+intermediate address. Scalar results and other cases proven equivalent may
+use ordinary C returns. This preserves HUC construction guarantees without
+depending on backend copy elision.
 
-HUC destruction cannot be implemented by placing the user `drop` body directly
-in an unconditional C++ destructor. Consider a HUC structure that contains one
-raw operating-system handle and declares `drop`. Its fixed HUC destructive
-relocation transfers the handle representation and makes the source storage
-inactive without calling source `drop`; it is not required to rewrite the raw
-integer to a sentinel. An unconditional C++ destructor on the source would
-therefore close the transferred handle.
+### 13.4 Plain storage and explicit lifecycle functions
 
-For each HUC Move structure, the emitter instead generates:
+Each concrete HUC structure becomes a C structure containing its physical
+fields. HUC Copy/Move classification does not follow the C representation:
+an owning HUC value can have a C structure representation that C would freely
+copy. Only HUC's resolved operations authorize copying or relocation.
 
-- deleted C++ copy constructor and copy assignment;
-- compiler-only fieldwise relocation machinery, which may be expressed as C++
-  move construction/assignment or as generated free functions, and which never
-  invokes user code;
-- a `huc_drop_in_place(T*)` helper that runs user `drop` and then recursively
-  cleans fields in reverse order;
-- a backend C++ destructor shell that never invokes HUC `drop` merely because
-  C++ storage leaves scope;
-- an explicit clone helper when the HUC clone protocol exists.
+For each HUC type, generate the required concrete functions or equivalent
+inline code for:
 
-MIR calls `huc_drop_in_place` only for an active HUC place. It then neutralizes
-generated owner and Move-classified fields so the later C++ destructor shell is
-a no-op. A destructively relocated raw handle may retain its old bits, but its
-HUC place is inactive and never receives the HUC drop call. A standalone
-relocated-from `T&` is different: generated owner machinery writes null, so the
-source remains an active and usable empty owner.
+- initialization in supplied final storage;
+- fieldwise relocation without a user relocation hook;
+- user `drop` followed by reverse field cleanup;
+- explicit logical cloning when supported;
+- compatible allocation and deallocation where ownership requires them.
 
-When conditional control flow prevents static cleanup selection, the emitter
-uses a sidecar `slot_guard<T>` or boolean that refers to the value without
-changing its representation. HUC temporaries are handled by the same MIR
-liveness rules rather than by C++ full-expression lifetime rules.
+MIR emits drop calls only for active HUC places. A destructively relocated raw
+handle may retain its old bits, but the source never receives a HUC drop call.
+No automatic C cleanup must be neutralized. A standalone relocated-from `T&`
+is different: the transfer writes null, leaving an active usable empty owner.
 
-Generated source never asks C++ overload resolution to choose these members.
-They exist solely to carry already-resolved HUC operations. The backend may
-replace special members with generated free functions where that produces more
-obviously correct code.
+Conditional liveness uses a sidecar boolean where static analysis cannot
+select cleanup directly. It is never a member of the nominal C value type.
+HUC temporaries follow the same MIR rules. Cleanup calls or shared cleanup
+labels cover every normal exit and active destination replacement.
 
-HUC fixed-by-default permission is enforced before emission. The backend must
-not add C++ `const` to physical storage when doing so would prevent synthesized
-relocation assignment, cleanup neutralization, or reinitialization of an
-inactive HUC place. Read-only access remains a HUC semantic property even when
-generated C++ storage is physically writable.
+HUC fixed-by-default permissions are enforced before emission. Do not add C
+`const` to physical storage when doing so would prevent permitted compiler
+relocation or reinitialization. Read-only access remains a HUC semantic
+property even when the underlying C storage is physically writable.
 
-For a HUC Copy structure—one whose fields are all Copy and which declares
-neither `clone` nor `drop`—generated C++ may use defaulted copy operations
-after layout and ordering checks.
+C structure assignment or `memcpy` may implement a transfer only when it is
+equivalent to the resolved HUC operation, including source owner nulling and
+activation state. Observe C effective-type, alignment, and aliasing rules;
+an arbitrarily cast byte buffer is not automatically valid typed storage.
+Prefer concrete typed storage and explicitly aligned allocation. HUC
+inactivity is compiler bookkeeping and need not force the physical C storage
+object's lifetime to end at the same point.
 
-### 13.5 Namespaces and modules
+### 13.5 Names and modules
 
-Each HUC module maps to a unique generated namespace and normally produces:
+Each HUC module maps to a unique generated identifier prefix and normally
+produces:
 
 ```text
-build/cpp/huc_runtime.hpp
-build/cpp/app/main.huc.hpp
-build/cpp/app/main.huc.cpp
-build/cpp/app/main.huc.map
-build/cpp/dependency/module.huc.hpp
+build/c/huc_runtime.h
+build/c/app/main.huc.h
+build/c/app/main.huc.c
+build/c/app/main.huc.map
+build/c/dependency/module.huc.h
 ```
 
 Every HUC module produces a guarded header. Runtime imports become generated
-header includes. The root `.cpp` includes the root header and is the only
+header includes. The root `.c` includes the root header and is the only
 translation unit compiled by the first whole-program backend. This avoids
 pretending that the initial generated ABI already supports independent object
 compilation.
 
-The root translation unit also defines the host C++ `int main()` adapter. It
-calls the configured root module's HUC `fn main() -> i32`, returns that value,
-and terminates without unwinding if backend or foreign code attempts to throw
-across the HUC boundary. Operating-system arguments remain behind the deferred
-standard-library argument API.
+Names are mangled deterministically to distinguish modules, overloads,
+methods, and generated helpers. Headers include required forward declarations
+and concrete type definitions before function bodies that need complete types.
+No C namespace or overload facility is assumed.
+
+The root translation unit also defines the hosted C `int main(void)` adapter.
+It calls the configured root module's HUC `fn main() -> i32` and returns that
+value through the documented target mapping. Operating-system arguments remain
+behind the deferred standard-library argument API.
 
 ### 13.6 Diagnostics and source mapping
 
@@ -1391,44 +1378,48 @@ diagnostics to HUC locations and includes the raw backend message under
 
 Generated code must use:
 
-- fully qualified runtime names;
-- reserved mangled identifiers;
-- no unqualified argument-dependent lookup;
-- no backend templates derived directly from user generics;
-- no backend overload resolution to decide HUC ownership;
+- collision-free generated identifiers outside C's implementation-reserved
+  namespace;
+- concrete types and resolved function symbols, with no unresolved families or
+  overloads;
+- explicit lifecycle functions and cleanup edges;
 - explicit temporaries for HUC sequencing;
-- inert pointer/reference transport for already bound internal parameter
-  places;
-- explicit casts for HUC numeric conversions.
+- inert pointer transport for already bound internal parameter and result
+  places where their identities matter;
+- explicit casts for HUC numeric conversions;
+- typed storage and target-validated alignment, aliasing, and integer/pointer
+  representations;
+- ISO C17 facilities, with extensions considered separately only if required.
 
-These rules stop C++ from silently becoming the specification.
+These rules stop C from silently becoming the specification. C integer
+promotions, floating-point transformations, and expression sequencing must not
+change defined HUC behavior.
 
-## 14. C output backend later
+## 14. Additional backends and C++ interoperability later
 
-A later C output emitter, still implemented as part of the C++20 compiler,
-consumes the same MIR:
+A later C++ or native-code emitter consumes the same concrete, sequenced MIR,
+including final destinations, relocation, active state, and cleanup. No phase
+evaluator or semantic pass should need replacement. If another emitter must
+reinterpret HUC ownership, the MIR is too weak.
 
-- structures become C structs;
-- methods become name-mangled free functions with explicit `this`;
-- owners become pointer fields or raw pointers plus explicit MIR drops;
-- overloads and modules use mangled names;
-- generated `clone`, `drop`, and allocation thunks become free functions;
-- cleanup edges become labels and branches.
-
-No phase evaluator or semantic pass should need replacement. If adding the C
-output backend requires interpreting HUC semantics again, the MIR is too weak.
+C++ interoperability is independent of the first output language. A C backend
+can call C-linkage adapters implemented in C++; a future C++ backend or binding
+layer may support more direct integration. Either path needs explicit rules
+for foreign types, allocation/deallocation, exceptions, and object lifetimes.
+Neither a C++ output backend nor arbitrary C++ header import is a bootstrap
+requirement.
 
 ## 15. Driver and build pipeline
 
 ### 15.1 Commands
 
 ```text
-huc lower <root.huc0> --out-dir <cpp-dir>
+huc lower <root.huc0> --out-dir <c-dir>
 huc stage <root.huc1> --out-dir <huc0-dir>
 huc build <root.huc1> --out-dir <build-dir>
 ```
 
-`lower` is the public, independently usable HUC0-to-C++20 translation and is
+`lower` is the public, independently usable HUC0-to-C17 translation and is
 implemented first. `stage` is the public HUC1-to-printable-HUC0 translation
 and is implemented second. `build` runs `stage`, closes and writes every
 generated HUC0 module, and then invokes `lower` on those files. It must not
@@ -1443,30 +1434,34 @@ above.
 
 The driver searches, in order:
 
-1. `--cxx <path>`;
+1. `--cc <path>`;
 2. a project configuration;
-3. `clang++`;
-4. `g++`.
+3. `clang`;
+4. `gcc`.
 
-It invokes a backend in a deterministic argument order and records:
+It invokes the generated-code compiler in C17 mode (`-std=c17` for Clang/GCC),
+in a deterministic argument order, and records:
 
 - executable identity/version;
 - target triple;
 - compile flags;
 - HUC runtime header hash.
 
+This selects the compiler for generated C, not the C++20 compiler used to
+build the HUC transpiler and driver.
+
 ### 15.3 Build artifacts
 
 ```text
 build/
   huc0/          printable staged module tree
-  cpp/           generated C++ headers, root source, runtime header, maps
+  c/             generated C17 headers, root source, runtime header, maps
   cache/         content-addressed frontend/staging cache
   obj/           backend object files
   compile_commands.json
 ```
 
-Generated HUC0 and C++ are inspectable build artifacts. Normal builds may
+Generated HUC0 and C are inspectable build artifacts. Normal builds may
 remove them only through an explicit build-system operation.
 
 ## 16. Caching and separate compilation
@@ -1483,7 +1478,7 @@ Initial cacheable units:
 - emitted per-module HUC0 text plus its origin map;
 - HUC0 lexed/parsed module and runtime interface;
 - concrete HUC0 HIR/MIR;
-- generated C++ header, root source, and object.
+- generated C17 header, root source, and object.
 
 Even on a cache hit, `build` materializes the HUC0 module files before invoking
 the HUC0 translator. A cached private AST is not a substitute for the textual
@@ -1551,10 +1546,10 @@ Store input plus expected:
 - printable per-module HUC0;
 - concrete HIR;
 - MIR;
-- generated C++.
+- generated C17.
 
-Golden C++ tests should ignore nondeterministic temporary numbers by making
-temporary naming deterministic.
+Golden C tests require deterministic temporary names rather than masking
+nondeterministic numbering.
 
 ### 17.3 Execute tests
 
@@ -1579,11 +1574,13 @@ Compile and run small programs that record:
 
 ### 17.4 ABI and cost assertions
 
-Generated C++ contains static assertions:
+Generated C contains concrete per-type C17 static assertions, for example:
 
-```cpp
-static_assert(sizeof(huc_rt::owner<T>) == sizeof(void*));
-static_assert(alignof(huc_rt::owner<T>) == alignof(void*));
+```c
+_Static_assert(sizeof(huc_Widget_owner) == sizeof(void *),
+               "HUC owners require one data-pointer word");
+_Static_assert(_Alignof(huc_Widget_owner) == _Alignof(void *),
+               "HUC owner alignment must match the target data pointer");
 ```
 
 Compiler tests should inspect optimized assembly for representative owner
@@ -1592,13 +1589,15 @@ than a language guarantee.
 
 ### 17.5 Differential backend tests
 
-When a C output backend exists, run the same MIR through both backends and
-compare observable results. The C++ output backend must not become the oracle
-for undefined HUC behavior.
+Initially compile generated C17 with both Clang and GCC, at unoptimized and
+optimized settings, and compare defined observable results. Use strict C17
+diagnostics to detect accidental reliance on extensions. When another HUC
+backend exists, run the same MIR through both emitters as well. No backend
+becomes the oracle for undefined HUC behavior.
 
 ## 18. Implementation milestones
 
-### Milestone 1: HUC0 to C++20
+### Milestone 1: HUC0 to C17
 
 Implement in this order:
 
@@ -1610,12 +1609,13 @@ Implement in this order:
    checking;
 4. typed HIR and sequenced MIR with explicit parameter places,
    direct-construction destinations, relocation, and cleanup;
-5. scalar C++20 headers plus one root translation unit;
-6. the one-word owner runtime, structural destructive relocation, clone/drop,
-   sidecar active-state handling, and lifecycle hardening.
+5. scalar C17 headers plus one root translation unit;
+6. pointer-represented owners, explicit structural relocation and clone/drop
+   functions, cleanup edges, sidecar active-state handling, and lifecycle
+   hardening.
 
 Milestone 1 is complete only when user-written `.huc0` programs compile and
-run through generated C++20, lifecycle and left-to-right tests pass, and no
+run through generated C17, lifecycle and left-to-right tests pass, and no
 HUC1 facility is required by `huc0_transpile`.
 
 ### Milestone 2: HUC1 to HUC0
@@ -1660,7 +1660,7 @@ local declarations
 if/while/return
 ordinary calls
 concrete HIR/MIR
-C++20 root translation unit
+C17 root translation unit
 ```
 
 Then complete HUC0 with:
@@ -1681,8 +1681,8 @@ This prevents staging from concealing unresolved runtime semantics.
 
 The following should be enforced in code review and tests:
 
-1. No HUC phase rule is delegated to C++ templates or `constexpr`.
-2. No ownership decision is delegated to C++ overload resolution.
+1. No HUC phase rule is delegated to the downstream C compiler or preprocessor.
+2. No ownership decision is inferred from the generated C representation.
 3. HIR records Copy, Relocate, Observe, and Clone explicitly.
 4. MIR is fully concrete and contains no phase construct.
 5. Compile-time evaluation has no ambient untracked host effects.
@@ -1694,5 +1694,5 @@ The following should be enforced in code review and tests:
    by-value parameter initialization.
 9. `T&` remains one word under the default allocator.
 10. Diagnostics retain source and expansion chains across both translators.
-11. A future C output backend can consume MIR without recreating semantic
-    analysis.
+11. A future C++ or native-code backend can consume MIR without recreating
+    semantic analysis.

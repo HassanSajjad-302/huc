@@ -59,7 +59,7 @@ HUC 0.1 makes these promises:
 - Compilation removes every phase-1 and phase-2 construct before backend code
   generation.
 - Selected HUC1 syntax is residualized structurally. Bootstrap raw strings are
-  parsed and type-checked by the independent HUC0 translator before any C++ is
+  parsed and type-checked by the independent HUC0 translator before any C is
   emitted.
 
 HUC does not promise:
@@ -385,7 +385,8 @@ initializes a local, a constructor field entry, a by-value parameter, or a
 `return` result. `new T(arguments)` constructs directly in the final
 allocation. No temporary `T` exists and no destructive relocation occurs in
 these contexts. This guaranteed destination construction lets `init` observe
-the final `this` address; it is not optional C++ backend copy elision.
+the final `this` address; it is not optional backend copy elision. The C17
+backend may use explicit destination pointers to preserve this guarantee.
 
 `init` has an implicit `mod T* this` receiver. Constructor initializer entries
 and default initialization establish every field before the body begins; the
@@ -956,7 +957,7 @@ printable per-module HUC0 source
     |
     | runtime transpilation
     v
-C++20 source
+C17 source
 ```
 
 The first translator must finish all compiler work and write ordinary HUC0.
@@ -981,7 +982,7 @@ contains no numbered declaration or control-flow keyword, `import2`, `@`,
 unresolved family binder, specialization request, compiler-only value, or
 compiler metadata handle. Ordinary `import` declarations remain. The HUC1
 translator writes one HUC0 module for every residual runtime module before the
-HUC0-to-C++20 translator begins.
+HUC0-to-C17 translator begins.
 
 The built-in HUC0 forms `as<T>`, `ptr_as<T*>`, and `adopt<T>` use
 an angle-delimited type operand but are not phase-family requests. No nominal
@@ -1687,9 +1688,11 @@ C-layout structure attributes, opaque foreign handle declarations, pointer
 chains, and C variadics are deferred from 0.1. A small C shim can flatten such
 an interface to the supported scalar and one-level-pointer boundary.
 
-The bootstrap compiler's generated C++20 backend output is an implementation
-technique, not a promise that arbitrary C++ headers or ABIs are directly
-consumable. The bootstrap compiler itself will also be implemented in C++20.
+The bootstrap compiler emits ISO C17 with explicit HUC construction,
+relocation, and cleanup. Generated C is an implementation technique, not a
+stable HUC binary ABI. C++ interoperability may be added later through C ABI
+adapters or a separate binding/backend design; arbitrary C++ headers are not
+directly consumable in 0.1. The compiler itself is implemented in C++20.
 
 ## 14. Undefined behavior summary
 
@@ -1772,7 +1775,7 @@ substitution rules, or unspecified operand order.
 The bootstrap driver exposes:
 
 ```text
-huc lower <root.huc0> --out-dir <cpp-directory>
+huc lower <root.huc0> --out-dir <c-directory>
 huc stage <root.huc1> --out-dir <huc0-directory>
 huc build <root.huc1> --out-dir <build-directory>
 ```
@@ -1780,11 +1783,12 @@ huc build <root.huc1> --out-dir <build-directory>
 Every implementation must report its language revision and target triple.
 Feature experiments must be opt-in and must not silently change 0.1 semantics.
 
-The language specification, not emitted C++ behavior, is authoritative. If the
+The language specification, not emitted C behavior, is authoritative. If the
 backend language has a different evaluation order, destruction rule, or name
 lookup rule, the transpiler must generate code that preserves HUC semantics.
 The planned bootstrap transpilers and command-line driver will be implemented
-in C++20; the first HUC0 backend also emits C++20 source.
+in C++20; the first HUC0 backend emits C17 source. Ownership and cleanup are
+lowered explicitly before emission rather than supplied by backend RAII.
 
 ## Appendix A: Consolidated example
 

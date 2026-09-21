@@ -13,6 +13,8 @@ out/
 *.dll
 *.exe
 
+*.huc.h
+*.huc.c
 *.huc.hpp
 *.huc.cpp
 *.huc.map

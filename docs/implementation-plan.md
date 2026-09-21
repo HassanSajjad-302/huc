@@ -6,7 +6,7 @@ Language name: HUC, “Hassan’s Update on C”
 
 Implementation language: C++20
 
-First backend: C++20
+First output language: C17
 
 License: MIT
 
@@ -29,16 +29,23 @@ printable per-module HUC0 source
     |
     | huc0_transpile
     v
-C++20 headers + one root translation unit
+C17 headers + one root translation unit
 ```
 
 The implementation order is:
 
-1. **Milestone 1: HUC0 to C++20.**
+1. **Milestone 1: HUC0 to C17.**
 2. **Milestone 2: HUC1 to HUC0.**
 
 This order is intentional. HUC0 gives HUC1 a concrete, executable target and
 prevents the staging implementation from hiding unresolved runtime semantics.
+
+C17 is the first output language because HUC already needs explicit lifetime
+and evaluation-order lowering. Plain C structures, pointers, and generated
+functions carry those resolved operations without implicit special members.
+The compiler itself remains C++20. C++ interoperability and other output
+backends are later work, not requirements of the first emitter. The initial
+output uses ISO C17 rather than requiring compiler-specific extensions.
 
 ## 2. Product position
 
@@ -463,9 +470,9 @@ short-circuit, and only the selected arm of `?:` executes.
 
 The backend must materialize each argument's typed by-value parameter value
 before evaluating the next argument, rather than merely retaining expression
-aliases or inheriting C++20's unspecified choice of argument order. Generated
+aliases or inheriting C's unspecified choice of argument order. Generated
 typed holders or an explicit call frame may transport those already-bound
-values into the C++ ABI call. Optimizers may still reorder pure computation
+values into the C ABI call. Optimizers may still reorder pure computation
 when the change is not observable.
 
 ### 5.8 Runtime overloading
@@ -792,8 +799,8 @@ diagnose `@this`; exact APIs and dependency semantics are a separate design.
 
 ## 8. Compiler organization
 
-All compiler and command-line driver code is ISO C++20. C++20 is also the
-language of the first generated backend.
+All compiler and command-line driver code is ISO C++20. The first generated
+output is ISO C17; implementation and output languages are separate choices.
 
 The repository will contain:
 
@@ -809,7 +816,7 @@ src/
   huc1/
   driver/
 runtime/
-  huc_runtime.hpp
+  huc_runtime.h
 tests/
   unit/
   golden/
@@ -822,7 +829,7 @@ Logical libraries:
 - `huc_common`: sources, diagnostics, tokens, module graph, canonical IDs,
   target information, arenas, and common parser facilities;
 - `huc0`: standalone HUC0 frontend, semantic analysis, HIR, MIR, ownership
-  lowering, and C++20 emission;
+  lowering, and C17 emission;
 - `huc1`: HUC1 indexing, deferred-body spans, phase checking, interpreter,
   specialization, and HUC0 residualization;
 - `huc`: thin command-line driver.
@@ -885,7 +892,7 @@ diagnostics rather than thrown as exceptions.
 The driver commands are:
 
 ```text
-huc lower <root.huc0> --out-dir <cpp-dir>
+huc lower <root.huc0> --out-dir <c-dir>
 huc stage <root.huc1> --out-dir <huc0-dir>
 huc build <root.huc1> --out-dir <build-dir>
 ```
@@ -893,29 +900,30 @@ huc build <root.huc1> --out-dir <build-dir>
 `lower` is implemented first. `stage` is implemented in Milestone 2. `build`
 chains `stage` and `lower` through files, not an undocumented AST shortcut.
 
-## 10. Milestone 1: HUC0 to C++20
+## 10. Milestone 1: HUC0 to C17
 
 ### 10.1 Exit result
 
 Given an acyclic `.huc0` module tree, the translator emits:
 
 ```text
-build/cpp/
-  huc_runtime.hpp
-  app/main.huc.hpp
-  app/main.huc.cpp
+build/c/
+  huc_runtime.h
+  app/main.huc.h
+  app/main.huc.c
   app/main.huc.map
-  dependency/module.huc.hpp
+  dependency/module.huc.h
 ```
 
 Each HUC module becomes a guarded generated header. A runtime import becomes:
 
-```cpp
-#include "dependency/module.huc.hpp"
+```c
+#include "dependency/module.huc.h"
 ```
 
-The root `.cpp` includes the root header. Only the root `.cpp` is compiled, so
-the initial backend produces one C++ translation unit.
+The root `.c` includes the root header. Only the root `.c` is compiled, so
+the initial backend produces one C17 translation unit. Module names and HUC
+overloads become deterministic, collision-free C identifiers.
 
 ### 10.2 Increment A: project and source infrastructure
 
@@ -1018,7 +1026,7 @@ MIR records:
 - conditional drop flags only where control flow requires them;
 - owner nulling after relocations.
 
-No semantic decision is deferred to C++ overload resolution.
+No semantic decision is deferred to the C compiler or its ABI lowering.
 
 Acceptance:
 
@@ -1026,43 +1034,49 @@ Acceptance:
 - argument and operand sequencing is explicit;
 - cleanup is exactly once on every normal control-flow exit.
 
-### 10.6 Increment E: scalar C++20 backend
+### 10.6 Increment E: scalar C17 backend
 
 Emit:
 
 - deterministic generated identifiers;
-- module namespaces;
+- mangled identifier prefixes for modules and overloads;
 - guarded headers;
 - the root source file;
-- a global C++ `int main()` adapter for the configured root module's sole HUC
+- a C `int main(void)` adapter for the configured root module's sole HUC
   `fn main() -> i32`;
 - scalar and raw-pointer declarations;
 - fixed-signature C-linkage declarations;
-- structures, functions, constructors, methods, and runtime control flow;
+- structures, functions, and runtime control flow;
 - explicit temporaries preserving left-to-right evaluation;
+- generated free functions for methods and constructor initialization, using
+  explicit receivers and final-destination pointers where needed;
 - `#line` or sidecar source-map information where practical.
 
-Generated C++ is an implementation artifact, not HUC’s semantic authority.
+Generated C is an implementation artifact, not HUC's semantic authority. HUC
+fixedness is checked before emission; physical C storage must remain writable
+where compiler-generated relocation or reinitialization requires it. Lowering
+must respect C alignment, effective-type, aliasing, and arithmetic rules.
 
 Acceptance:
 
-- scalar examples compile with a selected C++20 compiler;
+- scalar examples compile with a selected C compiler in ISO C17 mode;
 - execute tests match expected output and side-effect order;
 - generated output is stable across repeated builds.
 
 ### 10.7 Increment F: ownership and lifecycle
 
-Provide a private one-word owner helper. Its C++ type:
+Represent each primitive owner with one typed C pointer. HUC semantic analysis
+rejects implicit owner duplication; the C representation itself is not a
+move-only type. Generate concrete per-type helpers or equivalent inline code
+for release, reset, observation, relocation, and pointee destruction followed
+by compatible deallocation. Check the one-word layout with C17 static
+assertions. No owner stores a deleter or liveness field.
 
-- contains only a pointer;
-- has deleted copying;
-- can release, reset, observe, and relocate;
-- invokes generated HUC drop logic before deallocation;
-- has size/alignment assertions.
-
-MIR remains authoritative for inactive aggregate state and conditional cleanup.
-The backend clears/reset fields after explicit cleanup so later C++ storage
-destruction is a no-op rather than a second HUC destruction.
+MIR determines all cleanup edges, inactive aggregate state, and conditional
+drop flags. Emit cleanup on normal exits, early returns, loop exits, and
+replacement of active destinations. An inactive non-owner source receives no
+cleanup and need not be cleared; a relocated primitive owner remains active
+and null. C scope exit does not perform HUC cleanup automatically.
 
 Implement:
 
@@ -1085,20 +1099,22 @@ with trailing `mod`.
 
 Acceptance:
 
-- `sizeof(owner<T>) == sizeof(void*)`;
+- each generated owner representation has the size and alignment of one target
+  data-pointer word;
 - straight-line owner relocations require no hidden state;
 - conditional aggregate relocations use flags only when necessary;
 - raw-handle `drop` types relocate without duplicate cleanup;
 - indirect non-owner move-out is rejected without adding owner liveness state;
 - ordinary binding never invokes `clone`;
 - sanitizers find no backend double destruction;
-- optimized operation counts match equivalent simple C++ owner code.
+- optimized operation counts match equivalent explicit C resource-management
+  code.
 
 ### 10.8 Milestone 1 completion gate
 
 Milestone 1 is complete when:
 
-- standalone `.huc0` programs compile and run through generated C++20;
+- standalone `.huc0` programs compile and run through generated C17;
 - ownership, constructors, `drop`, `clone`, and left-to-right semantics have
   executable tests;
 - the HUC0 grammar/specification match the implementation;
@@ -1262,14 +1278,14 @@ Milestone 2 is complete when:
 - global/type/local phase control, specialization, and raw generation have
   golden and negative tests;
 - the full two-stage driver compiles representative HUC1 programs to runnable
-  C++20.
+  programs through generated C17.
 
 ## 12. Source maps and diagnostics
 
 Every node or emitted range carries an origin chain:
 
 ```text
-C++ range
+C range
   -> HUC0 range
   -> HUC1 selected source or raw emission
   -> compile-time call site
@@ -1304,7 +1320,7 @@ Check exact:
 
 - AST, HIR, and MIR dumps;
 - HUC1-to-HUC0 module trees;
-- HUC0-to-C++ module headers and root source;
+- HUC0-to-C17 module headers and root source;
 - diagnostic text and source spans;
 - stable generated names.
 
@@ -1339,7 +1355,7 @@ Include:
 
 ### 13.4 Execute tests
 
-Compile generated C++20 and test:
+Compile generated C17 and test:
 
 - scalar computation;
 - argument side-effect ordering;
@@ -1370,7 +1386,7 @@ Fuzz:
 - specialization pattern matcher.
 
 Compile the same input repeatedly with different allocator and hash seeds and
-require byte-identical HUC0/C++ artifacts.
+require byte-identical HUC0/C artifacts.
 
 ## 14. Documentation work
 
@@ -1406,7 +1422,7 @@ Implementation commits should be small and milestone-oriented:
 1. common C++20 project skeleton;
 2. HUC0 lexer/parser;
 3. HUC0 semantic core;
-4. HIR/MIR and scalar C++ output;
+4. HIR/MIR and scalar C17 output;
 5. ownership/lifecycle;
 6. HUC0 hardening;
 7. HUC1 staging skeleton;

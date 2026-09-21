@@ -107,11 +107,13 @@ corresponding current design in detail.
 
 The implementation order is:
 
-1. HUC0 to C++20.
+1. HUC0 to C17.
 2. HUC1 to HUC0.
 
-Both transpilers and the command-line driver will be written in C++20. C++20
-is also the first generated backend language.
+Both transpilers and the command-line driver will be written in C++20. The
+first output language is C17. Generated C uses plain storage representations
+and explicit construction, relocation, and cleanup from HUC's lowered IR;
+the output language does not supply HUC's ownership semantics.
 
 ## Short positioning statement
 
