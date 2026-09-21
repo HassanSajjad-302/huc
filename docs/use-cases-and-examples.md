@@ -95,9 +95,9 @@ The examples below cover these use cases:
 | Runtime | Automatic unique ownership and deterministic cleanup |
 | Runtime | Explicit consumption through an owner parameter |
 | Runtime | Owner-containing structures and destructive relocation |
-| Runtime | Ordinary fieldwise-Copy value semantics |
+| Runtime | Ordinary copying of Basic values |
 | Runtime | Explicit deep copying with `copy` and `clone` |
-| Runtime | Custom clone opting a type into the Move category |
+| Runtime | Custom clone opting a type into the Advanced category |
 | Runtime | Fixed, non-overridable destructive relocation |
 | Runtime | Relocation assignment, exact self-relocation, and reinitialization |
 | Runtime | Address-dependent values, self-pointers, and stable ownership |
@@ -347,7 +347,7 @@ fn run() -> i32 {
 }
 ```
 
-`Node` is in the Move category because it contains owners. Its fixed
+`Node` is in the Advanced category because it contains owners. Its fixed
 destructive relocation:
 
 1. transfers the entire representation, including `value` and both owner words;
@@ -494,10 +494,10 @@ HUC has three user-visible lifecycle declarations:
 | Declaration | What it customizes |
 |---|---|
 | `fn init(...)` | Construction |
-| `fn clone() -> T` | Explicit `copy` of a Move structure |
+| `fn clone() -> T` | Explicit `copy` of an Advanced structure |
 | `fn drop() mod -> void` | Cleanup before automatic field destruction |
 
-`Move` is a type category, not the name of a user-overridable constructor.
+`Advanced` is a type category, not the name of a user-overridable constructor.
 Transferring a value in that category performs **destructive relocation**:
 
 1. Transfer the whole value's representation with bitwise relocation semantics.
@@ -505,7 +505,7 @@ Transferring a value in that category performs **destructive relocation**:
 3. Run neither the source's `drop` body nor its automatic field cleanup.
 
 Embedded owners require no source nulling. This rule does not depend on whether
-`clone`, `drop`, or an owning field made the structure Move.
+`clone`, `drop`, or an owning field made the structure Advanced.
 
 There is no user move constructor, move-assignment operator, or relocation
 hook. Relocation assignment first cleans an active destination and then applies
@@ -564,7 +564,7 @@ fn lifecycle() -> void {
 }
 ```
 
-Declaring either `clone` or `drop` puts `NativeLease` in the Move category. The
+Declaring either `clone` or `drop` puts `NativeLease` in the Advanced category. The
 logical copy duplicates the operating-system resource. Ordinary binding never
 calls `clone`, and destructive relocation never calls user code. In particular,
 the relocation does not write `-1` into `original.handle`: the complete source
@@ -650,7 +650,7 @@ value after its address changes. This matters for:
 - an object registered as callback user data in a C API;
 - a native object whose ABI requires a stable address.
 
-The following type opts into the Move category with `drop` so it cannot be
+The following type opts into the Advanced category with `drop` so it cannot be
 implicitly copied. Its constructor establishes a self-pointer:
 
 ```huc
@@ -671,7 +671,7 @@ struct SelfIndexed {
     }
 
     fn drop() mod -> void {
-        // Empty cleanup still opts the structure into the Move category.
+        // Empty cleanup still opts the structure into the Advanced category.
     }
 }
 
@@ -735,7 +735,7 @@ an ownership-equivalent substitute: `T*` does not keep its pointee alive.
 A future standard library may also provide a stable-address node container,
 but HUC0 does not need a special pin type for the initial milestone.
 
-Relocating non-owner Move elements through raw storage is not an ordinary HUC0
+Relocating non-owner Advanced elements through raw storage is not an ordinary HUC0
 source operation. Contiguous containers manage backing storage and initialized
 element ranges explicitly, including preventing cleanup of retired source
 slots. The only additional raw-storage lifetime intrinsics planned are
@@ -1554,7 +1554,7 @@ This example combines:
 - runtime destructive relocation and cleanup;
 - probable allocator APIs.
 
-For clarity, this bootstrap sketch assumes that `T` is Copy. A production
+For clarity, this bootstrap sketch assumes that `T` is Basic. A production
 standard-library version would state that requirement through the future
 compiler type-query API or add element-wise relocation/drop handling.
 
@@ -1947,8 +1947,8 @@ Usefulness:
 ## 12. Large case study: ECS component storage
 
 Entity-component systems often need type-directed storage. The following
-illustrates a family that chooses inline storage for small Copy components and
-owner storage for Move components.
+illustrates a family that chooses inline storage for small Basic components and
+owner storage for Advanced components.
 
 The predicate helpers are probable future compiler type queries.
 
@@ -1976,7 +1976,7 @@ struct Sprite {
 }
 
 struct1 ComponentStore(auto T) {
-    if1 (@compiler::type<T>().is_move()) {
+    if1 (@compiler::type<T>().is_advanced()) {
         let collections::Vector<T&> mod values;
 
         fn add(T& mod value) mod -> usize {
@@ -2016,8 +2016,8 @@ struct World {
 This exact predicate depends on the future reflection API and is therefore
 non-bootstrap. It demonstrates why HUC reserves stable type metadata:
 
-- Copy components can be stored inline.
-- Move components can be stored through unique owners.
+- Basic components can be stored inline.
+- Advanced components can be stored through unique owners.
 - users interact with a uniform `get` observer;
 - each concrete store is generated in HUC0;
 - runtime storage contains no reflection metadata.
@@ -2154,7 +2154,7 @@ Possible tools include:
 |---|---|---|
 | `T&` | `unique_ptr`, owned boxes, library wrapper | One-word unique ownership integrated with relocation-by-binding |
 | `init` / `clone` / `drop` | C++ special members, RAII wrappers | Custom construction, explicit logical copy, and cleanup |
-| Fixed destructive relocation | C++ move constructors and move assignment | Bitwise non-failing transfer of inline Move values that ends the source lifetime, with no user hook or value-category overload |
+| Fixed destructive relocation | C++ move constructors and move assignment | Bitwise non-failing transfer of inline Advanced values that ends the source lifetime, with no user hook or value-category overload |
 | Layered `mod` | const qualifiers, mutable references, capabilities | Slot and pointee permissions remain visually separate |
 | `if1` in a type body | conditional members, macros, template/static conditionals | Selected declarations become normal HUC0; discarded body is not parsed |
 | `fn1` partial specialization | overloads, traits, macros | Same primary/partial/full mechanism as structure and variable families |

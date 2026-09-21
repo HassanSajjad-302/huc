@@ -14,7 +14,7 @@ points.
 
 HUC uses three related type forms:
 
-| HUC type | Meaning | Copy behavior |
+| HUC type | Meaning | Transfer behavior |
 |---|---|---|
 | `T` | An inline `T` value | Determined by `T` |
 | `T*` | A nullable, unchecked, non-owning pointer | Copies one address |
@@ -83,7 +83,7 @@ These declarations are field forms. A fixed local requires an explicit
 initializer. Every constructor must initialize each fixed field that lacks a
 declaration initializer; mutable pointer and owner fields omitted by a
 constructor default to null. HUC0 globals are separately restricted to
-drop-free Copy scalars and raw pointers, so owners are never global in 0.1.
+drop-free Basic scalars and raw pointers, so owners are never global in 0.1.
 
 A fixed containing structure prevents assignment to its field slots and
 writable access to inline field subobjects. It does not remove an explicit
@@ -92,12 +92,12 @@ For example, a read-only method may mutate the pointee of a `mod T*` field but
 may not reseat that field. This preserves the layer distinctions above.
 
 A trailing `mod` is required when source code will relocate from, reset,
-release, or reseat a **named** pointer, owner, or other Move slot.
+release, or reseat a **named** pointer, owner, or other Advanced slot.
 Compiler-inserted destruction at the end of the slot's lifetime does not
 require source-level `mod`.
 
 A fresh unnamed result place is intrinsically consumable. Function results,
-`new T(...)` owner results, evaluated `copy` results, and other temporary Move
+`new T(...)` owner results, evaluated `copy` results, and other temporary Advanced
 values may relocate directly into their next binding without a source-level
 `mod` that could not be written:
 
@@ -110,29 +110,38 @@ Only relocation from named storage tests its trailing `mod`. Direct
 constructor initialization, described in section 4, creates no intermediate
 source place at all.
 
-## 2. Copy and Move types
+## 2. Basic and Advanced types
 
-Every complete runtime type is classified as either **Copy** or **Move**.
+Every complete runtime type is classified as either **Basic** or **Advanced**.
 
-Copy types are:
+The short rule is: **Basic values are copied; Advanced values are transferred.**
+Ordinary binding leaves a Basic source usable. Transferring an inline Advanced
+value makes its source inactive; directly transferring an owner leaves its
+source active and null. Explicit `copy` requests a separate logical value
+when the type supports it.
+
+Basic types are:
 
 - scalar arithmetic and boolean types;
 - raw pointers;
-- arrays whose element type is Copy;
-- structures whose fields are all Copy and which declare neither `clone` nor
+- arrays whose element type is Basic;
+- structures whose fields are all Basic and which declare neither `clone` nor
   `drop`.
 
-Move types are:
+Advanced types are:
 
 - unique owners;
-- arrays whose element type is Move;
-- structures containing at least one Move field;
+- arrays whose element type is Advanced;
+- structures containing at least one Advanced field;
 - structures declaring `clone`;
 - structures declaring `drop`.
 
-Declaring `clone` intentionally makes an otherwise fieldwise-Copy structure
-Move. Otherwise ordinary binding could silently bypass the custom copy
-behavior:
+Having `init()` alone does not make a structure Advanced. A raw `T*` is Basic
+even when `T` is Advanced; it copies only the observer address. In contrast,
+an inline Advanced field makes its containing structure Advanced too.
+
+Declaring `clone` intentionally makes an otherwise Basic structure Advanced.
+Otherwise ordinary binding could silently bypass the custom copy behavior:
 
 ```huc
 struct Ticket {
@@ -151,11 +160,11 @@ let Ticket moved = original;       // destructive relocation; clone is not calle
 let Ticket copied = copy moved;    // calls Ticket.clone
 ```
 
-There is no `copy struct` or `move struct` declaration. Classification follows
-the structural rules above.
+Basic and Advanced are category names, not keywords or declaration modifiers.
+Classification follows the structural rules above.
 
 An intentionally non-copyable scalar-only token may use an empty `drop` to opt
-into Move semantics in HUC0:
+into Advanced semantics in HUC0:
 
 ```huc
 struct UniqueTicket {
@@ -165,7 +174,7 @@ struct UniqueTicket {
     }
 
     fn drop() mod -> void {
-        // No external cleanup; this lifecycle declaration makes the type Move.
+        // No external cleanup; this lifecycle declaration makes the type Advanced.
     }
 }
 ```
@@ -197,11 +206,11 @@ Their roles are:
 | Operation | User customization | Invocation |
 |---|---|---|
 | Construction | `fn init(...)` | `T(...)` or `new T(...)` |
-| Fieldwise copy of a Copy type | None | Ordinary binding or `copy` |
-| Logical copy of a Move structure | `fn clone() -> T` | Only requested by `copy` |
-| Logical copy of a Move array | None | `copy` applies logical copy to each element |
-| Destructive relocation initialization | None | Ordinary binding of a Move value |
-| Destructive relocation assignment | None | Ordinary assignment of a Move value |
+| Fieldwise copy of a Basic type | None | Ordinary binding or `copy` |
+| Logical copy of an Advanced structure | `fn clone() -> T` | Only requested by `copy` |
+| Logical copy of an Advanced array | None | `copy` applies logical copy to each element |
+| Destructive relocation initialization | None | Ordinary binding of an Advanced value |
+| Destructive relocation assignment | None | Ordinary assignment of an Advanced value |
 | Destruction | `fn drop() mod -> void` | Inserted by the compiler |
 | Field destruction | None | Inserted after `drop`, in reverse field order |
 
@@ -238,9 +247,9 @@ applies when a constructor expression directly initializes:
 - a function result in `return T(arguments)`.
 
 This is a semantic guarantee, not optional backend copy elision. It lets `init`
-observe the final `this` address and lets a fixed Move value be constructed
+observe the final `this` address and lets a fixed Advanced value be constructed
 without first requiring a writable source temporary. More complex expressions
-that produce an existing Move value still follow the normal destructive
+that produce an existing Advanced value still follow the normal destructive
 relocation rules.
 
 Constructor initializer entries:
@@ -268,9 +277,9 @@ struct ScaledPoint {
 }
 ```
 
-## 5. Ordinary Copy value semantics
+## 5. Copying Basic values
 
-A structure made entirely from Copy fields, with no `clone` and no `drop`, is
+A structure made entirely from Basic fields, with no `clone` and no `drop`, is
 copied field by field:
 
 ```huc
@@ -297,9 +306,9 @@ fn copy_values() -> void {
 ```
 
 Structure fields are copied in declaration order. This is semantic field
-copying, not a promise that padding bytes are duplicated. Because a Copy type
-cannot contain a lifecycle hook or Move field, ordinary copying does not invoke
-user copy code.
+copying, not a promise that padding bytes are duplicated. Because a Basic type
+has no `clone` or `drop` method and no Advanced field, ordinary copying does
+not invoke user copy code. It may still have constructors.
 
 The direct C++20 value-semantic equivalent is:
 
@@ -325,14 +334,14 @@ The C++ example uses `const` because it is C++ source. HUC source has no
 `const` keyword; HUC declarations are fixed unless a relevant layer has
 `mod`.
 
-Writable Copy assignment is also direct:
+Writable Basic assignment is also direct:
 
 ```huc
 let Point mod current = Point(1, 2);
 let Point replacement = Point(8, 9);
 
-current = replacement;       // fieldwise Copy assignment
-current = copy replacement;  // equivalent for a Copy type
+current = replacement;       // fieldwise copy of a Basic value
+current = copy replacement;  // equivalent for a Basic type
 ```
 
 ```cpp
@@ -345,7 +354,7 @@ current = replacement;
 
 ## 6. Custom logical copying with `clone`
 
-A Move structure is not implicitly copied. It may support explicit logical
+An Advanced structure is not implicitly copied. It may support explicit logical
 copying by declaring exactly one method with this signature:
 
 ```huc
@@ -362,8 +371,8 @@ Rules:
   invariants;
 - it cannot be called directly or have its address taken;
 - ordinary binding, assignment, argument passing, and return never call it;
-- `copy source` calls it when `source` is a Move structure;
-- declaring it makes the structure Move even when every field is Copy;
+- `copy source` calls it when `source` is an Advanced structure;
+- declaring it makes the structure Advanced even when every field is Basic;
 - omit `clone` when the type must not be copyable;
 - it is infallible in the HUC type system, although allocation failure or panic
   may terminate the process.
@@ -525,8 +534,8 @@ For a valid source, the operation:
 
 1. evaluates `first`;
 2. allocates uninitialized storage for one `HeapText`;
-3. logically copies `*first` into that storage, using fieldwise Copy or
-   `clone`;
+3. logically copies `*first` into that storage, using fieldwise copying for a
+   Basic pointee or `clone` for an Advanced structure;
 4. returns a new independent owner.
 
 The pointee type must support logical copying at compile time. A null value
@@ -571,15 +580,15 @@ buffer.assign_from(addressof(other));
 `assign_from` is not an implicit copy-assignment hook. The call site explicitly
 selects the specialized operation.
 
-## 7. Move-category transfer is destructive relocation
+## 7. Transferring Advanced values
 
-`Move` is the type category; **destructive relocation** is the transfer
-operation. In ordinary conversation it is reasonable to say that a HUC value
-“moves,” but its lifetime behavior is intentionally different from C++ move
-construction. “Destructive move” is an acceptable informal name; the
-specification uses “relocation” when the lifetime distinction matters.
+Basic and Advanced name the type categories. **Transfer** is the everyday term
+for the Advanced operation; **destructive relocation** is its precise lifetime
+meaning. It is reasonable to say that a HUC value “moves,” but its lifetime
+behavior is intentionally different from C++ move construction. The compiler
+specification uses “relocation” when that distinction matters.
 
-Here `Packet` is Move because it contains an owner, even though it declares
+Here `Packet` is Advanced because it contains an owner, even though it declares
 neither `clone` nor `drop`:
 
 ```huc
@@ -612,11 +621,11 @@ Owner words inside the aggregate transfer unchanged. In particular, the
 operation need not write null to `source.payload`; that field is inactive,
 not a second live owner. Neither it nor `source` may be used as a value before
 the whole source is reinitialized. No source `drop` body or source-field
-cleanup runs. Arrays in the Move category use the same whole-value rule.
+cleanup runs. Arrays in the Advanced category use the same whole-value rule.
 The operation invokes no user code and cannot fail in the HUC type system.
 
-The rule is the same whether the structure is Move because of `clone`, `drop`,
-or a Move field. It does not change ordinary binding of Copy types, which
+The rule is the same whether the structure is Advanced because of `clone`, `drop`,
+or an Advanced field. It does not change ordinary binding of Basic types, which
 duplicates the value and leaves the source active.
 
 Field fixedness controls ordinary field assignment; it does not block the
@@ -660,6 +669,10 @@ recursive field operations. It does not require a literal memory-copy
 instruction or make padding bytes semantically significant. A backend may
 use bulk copies, loads/stores, registers, or eliminate the transfer when
 observably equivalent, while preserving source inactivity and cleanup.
+
+For example, `let T a = b;` for an inline Advanced `T` may keep the value in
+the same registers and need no machine instruction for the transfer. `b`
+still becomes inactive; physical reuse does not make it usable afterward.
 
 ### 7.1 Why relocation is not customizable in HUC0
 
@@ -715,7 +728,7 @@ struct SelfIndexed {
     }
 
     fn drop() mod -> void {
-        // Empty: this opts the scalar-only structure into Move.
+        // Empty: this opts the scalar-only structure into Advanced.
     }
 }
 
@@ -758,7 +771,7 @@ compiler is not required to prove address independence.
 
 ### 7.3 Eligible source places
 
-Destructive relocation of a non-owner Move value is allowed only from an
+Destructive relocation of a non-owner Advanced value is allowed only from an
 entire compiler-tracked root place:
 
 - a named local or parameter with the required trailing `mod`;
@@ -770,9 +783,9 @@ does not perform separate move-outs from an otherwise active aggregate.
 HUC0 rejects explicit non-owner move-out from a pointee or subobject:
 
 ```huc
-let File value = *file_owner;          // error: indirect Move source
-let Lease lease = session.lease;       // error: Move subobject source
-let Packet packet = packets[index];    // error: Move element source
+let File value = *file_owner;          // error: indirect Advanced source
+let Lease lease = session.lease;       // error: Advanced subobject source
+let Packet packet = packets[index];    // error: Advanced element source
 ```
 
 Otherwise the enclosing object, owner allocation, or array could remain active
@@ -783,7 +796,7 @@ contract.
 
 This restriction does not affect:
 
-- Copy values, which are copied rather than consumed;
+- Basic values, which are copied rather than consumed;
 - `copy *file_owner`, which clones while leaving the pointee active;
 - relocation of the whole `file_owner`, which leaves its source owner null;
 - relocation of a primitive owner field, because that source subobject remains
@@ -823,7 +836,7 @@ fn transfer() -> void {
 } // output.drop closes the handle exactly once
 ```
 
-Declaring `drop` makes `File` a Move type. Bitwise relocation transfers the
+Declaring `drop` makes `File` an Advanced type. Bitwise relocation transfers the
 integer handle into the destination and deactivates the source. It need not
 write `-1` into `input.handle`: the source's `drop` is skipped because the
 source no longer contains an active `File`.
@@ -985,10 +998,10 @@ Destruction order is:
 2. `socket` pointee destruction and deallocation;
 3. `log` pointee destruction and deallocation.
 
-`drop` must not manually destroy owner or Move fields that normal field cleanup
+`drop` must not manually destroy owner or Advanced fields that normal field cleanup
 will destroy. It may relocate a primitive owner field elsewhere, after which
 field cleanup observes a null owner. HUC0's source-place rule forbids
-relocating a non-owner Move field out of the still-addressable object, even
+relocating a non-owner Advanced field out of the still-addressable object, even
 from `drop`.
 
 There is no exception unwinding in HUC0. A terminating panic need not execute
@@ -1008,7 +1021,7 @@ fn revise(mod Document* document) -> void {
 }
 
 fn summarize(Metadata metadata) -> void {
-    // copies when Metadata is Copy
+    // copies when Metadata is Basic
 }
 
 fn consume(Document& document) -> void {
@@ -1086,7 +1099,7 @@ to reorder pure work when observable behavior is unchanged.
 
 ## 11. Return values
 
-Returning a Copy value copies it semantically:
+Returning a Basic value copies it semantically:
 
 ```huc
 fn origin() -> Point {
@@ -1095,7 +1108,7 @@ fn origin() -> Point {
 }
 ```
 
-Returning a Move value destructively relocates it:
+Returning an Advanced value destructively relocates it:
 
 ```huc
 fn open_file(text::View path) -> File {
@@ -1139,7 +1152,7 @@ std::unique_ptr<Widget> make_widget(std::int32_t id) {
 
 The following APIs are a probable standard-library design, not yet a separately
 accepted container specification. They demonstrate how a container can use the
-same Copy/Move rules without adding another ownership model.
+same Basic/Advanced rules without adding another ownership model.
 
 The code in this section is HUC1-facing library source: `Vector<T>` is a
 phase-1 family request. Before HUC0 checking, staging replaces every request
@@ -1157,8 +1170,8 @@ fn point_values() -> void {
         collections::Vector<Point>();
     let Point point = Point(3, 4);
 
-    points.push(point);      // Point is Copy: copies into the vector
-    points.push(copy point); // equivalent, but redundant for Copy Point
+    points.push(point);      // Point is Basic: copies into the vector
+    points.push(copy point); // equivalent, but redundant for Basic Point
 }
 
 fn text_values() -> void {
@@ -1182,8 +1195,8 @@ fn owner_values() -> void {
 
 A reallocation of `Vector<T>`:
 
-- copies elements when `T` is Copy;
-- uses fixed destructive relocation when `T` is Move;
+- copies elements when `T` is Basic;
+- uses fixed destructive relocation when `T` is Advanced;
 - never calls `clone` merely to relocate elements;
 - does not drop old element places that relocation made inactive;
 - drops every element that remains active exactly once;
@@ -1197,7 +1210,7 @@ semantics will be designed later. Ordinary relocation-source restrictions and
 the absence of user-defined relocation hooks remain unchanged.
 
 If `Vector<T>` itself supports logical copying, its library implementation can
-declare `clone` and explicitly copy each element. Copying a vector of Move
+declare `clone` and explicitly copy each element. Copying a vector of Advanced
 elements is then available only when those elements support `copy`.
 
 Comparable C++20 calls are:
@@ -1220,8 +1233,8 @@ widgets.push_back(std::move(widget));
 ```
 
 This is the same container-level value model as C++ RAII, with two policy
-changes: HUC makes expensive logical copying explicit and makes relocation of a
-Move type automatic and non-overridable.
+changes: HUC makes expensive logical copying explicit and makes relocation of
+an Advanced type automatic and non-overridable.
 
 ## 13. A complete owner-valued example
 
@@ -1374,7 +1387,7 @@ int main() {
 
 Both programs provide:
 
-- inline values with copy or move classification;
+- inline values with Basic or Advanced classification;
 - explicit unique heap ownership;
 - non-owning observation;
 - mutable observation;
@@ -1396,11 +1409,11 @@ relocation behavior, C++ references, or C++ value-category overloads.
 |---|---|---|
 | `let T value = T(...)` | `const T value(...)` | HUC is fixed by default |
 | `let T mod value = T(...)` | `T value(...)` | HUC spells writable storage explicitly |
-| `let T b = a` for Copy `T` | `T b = a` | Both copy |
-| `let T b = a` for Move `T` | `T b = std::move(a)` | HUC destructively relocates and ends the non-owner source lifetime |
-| `copy a` for Move `T` | Copy construction | HUC makes a potentially expensive copy explicit |
+| `let T b = a` for Basic `T` | `T b = a` | Both copy |
+| `let T b = a` for Advanced `T` | `T b = std::move(a)` | HUC destructively relocates and ends the non-owner source lifetime |
+| `copy a` for Advanced `T` | Copy construction | HUC makes a potentially expensive copy explicit |
 | `destination = copy source` | Copy assignment | HUC composes clone plus replace |
-| `destination = source` for Move `T` | Move assignment | HUC drops the destination, then performs non-overridable relocation |
+| `destination = source` for Advanced `T` | Move assignment | HUC drops the destination, then performs non-overridable relocation |
 | `T*` | `const T*` by default | HUC pointer is always raw and unchecked |
 | `mod T*` | `T*` | Writable pointee |
 | `T&` | `std::unique_ptr<T>` | HUC `&` is ownership, not reference |
@@ -1421,9 +1434,9 @@ member, reference category, allocator hook, or overload pattern exists in HUC.
 The compiler must reject:
 
 - relocating from a fixed source slot;
-- explicit relocation of a non-owner Move value from a pointee, field
+- explicit relocation of a non-owner Advanced value from a pointee, field
   subobject, or array element;
-- copying a Move structure that has no valid `clone`;
+- copying an Advanced structure that has no valid `clone`;
 - a `clone` with parameters, a writable receiver, or the wrong return type;
 - more than one `clone` in a structure;
 - direct calls to `clone`;
@@ -1457,7 +1470,7 @@ inheriting C defaults:
 
 1. `T&` lowers to one typed C pointer; ownership is enforced by HUC analysis,
    not by the C type system.
-2. Copy/Move classification is decided by HUC semantic analysis.
+2. Basic/Advanced classification is decided by HUC semantic analysis.
 3. `clone` runs only for an evaluated `copy` that requires it.
 4. non-owner relocation transfers the representation, makes the whole source
    inactive, and requires no clearing of embedded owner words; it is

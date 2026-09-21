@@ -21,12 +21,16 @@ the non-overloadable `addressof(value)` intrinsic obtains a raw observer to an
 inline value. The unchecked `std::slot_of(place)` intrinsic instead returns
 an untyped slot address as `usize`, including for raw-pointer and owner slots.
 
-A type whose ordinary binding transfers rather than copies is classified
-**Move**, but that transfer operation is destructive relocation rather than
-C++ move construction. Inline relocation transfers the representation and makes
-the entire source inactive without running its `drop`, cleaning its fields,
-or requiring embedded-owner nulling. A directly relocated `T&` source instead
-remains usable as a null owner.
+**Basic values are copied; Advanced values are transferred.** Numbers, raw
+pointers, and structures containing only Basic fields with neither `clone()`
+nor `drop()` are Basic. Owners and structures with an Advanced field,
+`clone()`, or `drop()` are Advanced. Use `copy value` for an explicit duplicate;
+Advanced structures support this by defining `clone()`.
+
+An inline Advanced transfer is bitwise relocation, not C++ move construction.
+It makes the entire source inactive without running its `drop`, cleaning its
+fields, or requiring embedded-owner nulling. A directly transferred `T&`
+source instead remains usable as a null owner.
 
 ```huc
 module readme.example;
@@ -71,7 +75,7 @@ low runtime cost, not static memory safety.
 HUC is for programmers who want the C/C++ cost model but do not want several
 overlapping languages hiding inside one compiler. Runtime code, specialization,
 and compiler execution use one visible numbered vocabulary. Ownership has two
-spellings. Mutation is explicit. Moving a Move value means one thing:
+spellings. Mutation is explicit. Transferring an Advanced value means one thing:
 destructive relocation. Expensive duplication happens only when the source
 says `copy`.
 

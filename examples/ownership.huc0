@@ -14,7 +14,7 @@ struct Widget {
           native_handle(probable_open_widget(value)) {
     }
 
-    // This customizes explicit `copy`. Declaring clone makes Widget Move.
+    // This customizes explicit `copy`. Declaring clone makes Widget Advanced.
     fn clone() -> Widget {
         return Widget(this->value); // opens an independent native handle
     }
@@ -43,7 +43,7 @@ fn main() -> i32 {
     inspect(first);
 
     let Widget* observer = first;
-    // Primitive owner relocation transfers one address. Unlike an inline Move
+    // Primitive owner relocation transfers one address. Unlike an inline Advanced
     // source, first remains an active, usable owner in its null state.
     let Widget& mod second = first;
 

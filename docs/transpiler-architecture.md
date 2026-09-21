@@ -51,7 +51,7 @@ or native-code output without redoing HUC semantic analysis.
 |---|---|---|
 | `T&` representation | One typed pointer with explicit cleanup | Plain pointer or a carefully matched helper |
 | Methods and modules | Mangled free functions and explicit receivers | Free functions or native namespace/member syntax |
-| Move values | Plain storage plus MIR-controlled relocation and drops | The same model; ordinary C++ moves alone are insufficient |
+| Advanced values | Plain storage plus MIR-controlled relocation and drops | The same model; ordinary C++ moves alone are insufficient |
 | Generic specializations | Concrete functions and structures | Concrete functions and structures; templates are unnecessary |
 | Lifetime implementation | Cleanup edges and conditional flags | Same HUC analysis; optional RAII only where equivalent |
 | Backend constraints | C effective types, aliasing, alignment, and sequencing | C++ object lifetimes, aliasing, alignment, and sequencing |
@@ -442,10 +442,10 @@ The HUC0 translator owns runtime semantic analysis:
 5. build concrete typed HIR;
 6. elaborate sequencing, relocation, and cleanup into MIR.
 
-The module checker admits runtime globals only for drop-free Copy scalars and
+The module checker admits runtime globals only for drop-free Basic scalars and
 raw pointers. It requires constant initializers for fixed globals, supplies
 zero/null only to omitted mutable initializers, and rejects owners, structures,
-Move values, runtime initialization, and global cleanup in 0.1.
+Advanced values, runtime initialization, and global cleanup in 0.1.
 
 HUC1 performs its own phase checking, family matching, and selected-body
 analysis before printing HUC0. The HUC0 translator then reparses and checks
@@ -530,7 +530,7 @@ that field to a separately allocated pointee.
 Each concrete type records:
 
 - size and alignment;
-- transfer mode (Copy or Move);
+- type category (Basic or Advanced);
 - whether it requires drop;
 - field layout;
 - phase class;
@@ -591,7 +591,7 @@ filter candidates but never rank them.
 An `extern "C"` signature is accepted only when every parameter and result
 lowers through the target's documented C ABI mapping. HUC0 permits built-in
 arithmetic scalars, `void` results, and one-level raw pointers to built-in
-types. It rejects owners, structures, fixed arrays, Move/drop types, phase
+types. It rejects owners, structures, fixed arrays, Advanced/drop types, phase
 types, compiler metadata, pointer chains, opaque foreign handles, and
 variadics. Aliases are checked after canonicalization so they cannot hide a
 forbidden boundary type.
@@ -626,11 +626,12 @@ typedef struct HucHirExprHeader {
 This distinction prevents the C emitter from rediscovering ownership intent
 from indistinguishable pointer representations.
 
-`Move` remains the name of a HUC type's transfer category. `Relocate` is the
-operation performed when a Move value is transferred: the destination becomes
-active, the non-owner source becomes inactive without receiving `drop`, and a
-standalone `T&` source instead remains active as a null owner. HIR names the
-operation, not merely the category.
+Basic and Advanced are type categories; `Copy`, `Clone`, and `Relocate` name
+compiler operations, not categories. Ordinary Basic binding uses `Copy`.
+An inline Advanced transfer uses `Relocate`: the destination becomes active
+and the source becomes inactive without receiving `drop`. A direct `T&`
+transfer instead uses `OwnerRelocate`, leaving an active null source. Explicit
+duplication through `clone()` uses `Clone`.
 
 Representative HIR operations:
 
@@ -656,7 +657,7 @@ relocation. A call that returns a structure uses an explicit result place so
 the callee can construct directly there.
 
 HIR place metadata distinguishes named storage from a fresh unnamed
-Move-producing result. Relocation from a named place requires the source slot
+Advanced-producing result. Relocation from a named place requires the source slot
 permission expressed by trailing `mod`. A fresh function result, `new T`
 owner result, explicit `copy`/clone result, or unavoidable constructor
 temporary is intrinsically consumable exactly once and needs no writable
@@ -665,7 +666,7 @@ no such temporary.
 
 The metadata also distinguishes compiler-trackable root places from
 subobjects and indirect places. An explicit source-level relocation of a
-non-owner Move value is accepted only from a whole tracked local, parameter,
+non-owner Advanced value is accepted only from a whole tracked local, parameter,
 temporary, or result. It is rejected from `value.field`, `array[i]`,
 `*pointer`, and `pointer->field`: the enclosing cleanup would otherwise need
 hidden liveness inside nominal object storage. A whole-root representation
@@ -1048,7 +1049,7 @@ for the backend.
 
 ### 12.1 Place state
 
-The pass tracks whether each place of a Move-classified type is:
+The pass tracks whether each place of an Advanced-classified type is:
 
 ```text
 Inactive
@@ -1101,14 +1102,14 @@ flags; remaining flags belong to storage places, not nominal value layouts.
 
 ### 12.4 Special-operation elaboration
 
-Semantic analysis classifies a structure as Copy only when every field is Copy
+Semantic analysis classifies a structure as Basic only when every field is Basic
 and it declares neither `clone` nor `drop`. Declaring either method makes the
-structure Move.
+structure Advanced.
 
 Elaboration handles the operations as follows:
 
-- ordinary Copy binding becomes fieldwise `Copy`;
-- `copy` of a Move structure with the required protocol becomes `Clone` into
+- ordinary Basic binding becomes fieldwise `Copy`;
+- `copy` of an Advanced structure with the required protocol becomes `Clone` into
   the copy expression's result place; lacking `clone` is a diagnostic, and
   copy assignment specifically uses a fresh result before destination
   destruction;
@@ -1117,12 +1118,12 @@ Elaboration handles the operations as follows:
   undefined behavior, with no required runtime null check or null-preserving
   branch. This precondition applies even when copying `T` would not read its
   storage. Copying `T*` copies only the observer address and permits null;
-- binding from a Move non-owner becomes one fixed representation-transfer
+- binding from an Advanced non-owner becomes one fixed representation-transfer
   `Relocate`, which intrinsically makes the source and all subobjects inactive
   without requiring source-field clearing;
 - `T&` binding becomes `OwnerRelocate`; it transfers the pointer and stores
   null in the still-active source owner;
-- a fresh unnamed Move-producing result place is intrinsically consumable;
+- a fresh unnamed Advanced-producing result place is intrinsically consumable;
   relocation from named storage requires trailing `mod`;
 - relocation assignment first proves distinctness or compares source and
   destination storage addresses at runtime when aliasing is possible; exact
@@ -1222,7 +1223,7 @@ deallocation without changing the one-pointer owner representation.
 | `std::slot_of(place)` | the slot's data-storage address converted to target `usize` |
 | `ptr_as<T*>(address)` for `usize` | target-supported integer-to-data-pointer reconstruction |
 | owner destructive relocation | Transfer the pointer, then null the source slot |
-| non-owner Move relocation | Transfer the whole representation; deactivate the source and all subobjects without requiring embedded-owner nulling |
+| non-owner Advanced relocation | Transfer the whole representation; deactivate the source and all subobjects without requiring embedded-owner nulling |
 | `T(values)` initializing a final place | Generated initializer with an explicit final-destination pointer |
 | `new T(values)` | Aligned allocation, terminate-on-failure check, then initialization in that allocation |
 | `copy owner` | Assume a non-null source; allocate, then fieldwise-copy or clone the pointee |
@@ -1294,7 +1295,7 @@ cleanup. Generated wrapper thunks may recover a conventional ABI where needed
 after all observable HUC parameter binding has completed.
 
 The holder's concrete type and initialization operation come from typed HIR:
-Copy parameters use `Copy`, Move parameters use `Relocate`, observing
+Basic parameters use `Copy`, Advanced parameters use `Relocate`, observing
 parameters use the resolved observer value, and direct constructor/function
 results use their final destination place. The same call-frame lowering must
 preserve temporary and parameter destruction order.
@@ -1309,7 +1310,7 @@ depending on backend copy elision.
 ### 13.4 Plain storage and explicit lifecycle functions
 
 Each concrete HUC structure becomes a C structure containing its physical
-fields. HUC Copy/Move classification does not follow the C representation:
+fields. HUC Basic/Advanced classification does not follow the C representation:
 an owning HUC value can have a C structure representation that C would freely
 copy. Only HUC's resolved operations authorize copying or relocation.
 
@@ -1317,7 +1318,7 @@ For each HUC type, generate the required concrete functions or equivalent
 inline code for:
 
 - initialization in supplied final storage;
-- whole-representation relocation of non-owner Move values without a user
+- whole-representation relocation of non-owner Advanced values without a user
   relocation hook or required embedded-owner clearing;
 - user `drop` followed by reverse field cleanup;
 - explicit logical cloning when supported;
@@ -1627,7 +1628,7 @@ Implement in this order:
 1. common C++20 project/source infrastructure, diagnostics, target data, and
    acyclic module discovery;
 2. the standalone HUC0 lexer and recursive-descent/Pratt parser;
-3. names, concrete types, permissions, constructors, overloads, Copy/Move
+3. names, concrete types, permissions, constructors, overloads, Basic/Advanced
    classification, type aliases, fixed-signature C linkage, and lifecycle
    checking;
 4. typed HIR and sequenced MIR with explicit parameter places,
@@ -1692,7 +1693,7 @@ Then complete HUC0 with:
 T*, mod layers, and T&
 constructors and direct destination construction
 new/adopt/release/reset
-Move/Copy classification
+Basic/Advanced classification
 destructive relocation, clone, and drop
 left-to-right typed parameter binding
 ```

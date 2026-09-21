@@ -175,9 +175,9 @@ global requires an initializer. In a structure, each fixed field without a
 declaration initializer must be supplied by every constructor; mutable pointer
 and owner fields omitted by a constructor default to null.
 
-Runtime globals in HUC0 are limited to drop-free Copy scalars and raw
+Runtime globals in HUC0 are limited to drop-free Basic scalars and raw
 pointers. Fixed globals require constant initializers. Mutable globals may omit
-an initializer and become zero or null. Move globals, owners, structure
+an initializer and become zero or null. Advanced globals, owners, structure
 globals, runtime initialization code, and global destruction are deferred.
 
 A fixed containing object prevents assignment to one of its field slots and
@@ -259,27 +259,35 @@ Attempting to relocate from a fixed owner is a compile-time diagnostic.
 
 Fresh unnamed result places are intrinsically consumable. This includes
 function results, `new` owner results, `copy`/`clone` results, and other
-temporary Move values. They may bind onward without a source-level trailing
+temporary Advanced values. They may bind onward without a source-level trailing
 `mod`; only named source storage is checked for that permission. A direct
 `T(arguments)` destination construction has no temporary result place.
 
-### 5.4 Copy and Move classification
+### 5.4 Basic and Advanced classification
 
-Copy types include:
+Basic values are copied by ordinary binding; Advanced values are transferred.
+These are category names, not source keywords or declaration modifiers.
+
+Basic types include:
 
 - scalar arithmetic and boolean types;
 - raw pointers;
-- structures whose fields are all Copy and which declare neither `clone` nor
+- structures whose fields are all Basic and which declare neither `clone` nor
   `drop`.
 
-Move types include:
+Advanced types include:
 
 - owners;
-- structures containing a Move field;
+- structures containing an Advanced field;
 - structures declaring `clone`;
 - structures declaring `drop`.
 
-`Move` is the source-level transfer category. Its operation is **destructive
+Classification is recursive through inline fields. Having `init()` alone does
+not make a structure Advanced. A raw `T*` remains Basic even when its pointee
+is Advanced; `T&` is always Advanced. Explicit `copy` uses the existing
+`clone()` method when duplicating an Advanced structure.
+
+`Advanced` is the source-level transfer category. Its operation is **destructive
 relocation**, not C++ move construction. Relocating a non-owner value continues
 that value in destination storage and ends the active value in the source
 storage. No source `drop` or field cleanup runs.
@@ -293,9 +301,9 @@ Non-owner relocation has fixed bitwise representation-transfer semantics:
 
 Embedded owner words transfer unchanged; no recursive owner relocation or
 source-field nulling is required. The old field bits do not denote separately
-active owners. This rule applies whether classification as Move follows from
-`clone`, `drop`, or a Move field. Copy classification is unchanged: ordinary
-Copy binding duplicates the value and leaves its source active.
+active owners. This rule applies whether classification as Advanced follows
+from `clone`, `drop`, or an Advanced field. Ordinary Basic binding duplicates
+the value and leaves its source active.
 
 Field fixedness constrains ordinary assignment, not compiler relocation of a
 whole value. A writable containing source permits relocation of its fixed
@@ -313,11 +321,11 @@ flow-sensitive use-after-relocation prevention.
 
 `copy expression` explicitly requests logical duplication:
 
-- a Copy type is copied;
+- a Basic type is copied;
 - an owner allocates and copies its pointee; the source must be non-null,
   and copying a null owner is undefined behavior rather than producing null;
-- a Move structure must supply a read-only `fn clone() -> T`;
-- a Move array is copied elementwise when its element type supports `copy`;
+- an Advanced structure must supply a read-only `fn clone() -> T`;
+- an Advanced array is copied elementwise when its element type supports `copy`;
 - a raw pointer copy duplicates only the address.
 
 Owner copying requires a logically copyable pointee type at compile time and
@@ -325,7 +333,7 @@ has no required runtime null check. Callers that need null-preserving
 duplication must handle null explicitly. Copying a null raw pointer remains
 valid, and null-owner relocation and destruction are unchanged.
 
-Declaring `clone` opts an otherwise fieldwise-Copy structure into Move. This
+Declaring `clone` opts an otherwise Basic structure into Advanced. This
 prevents an ordinary binding from bypassing custom logical-copy behavior.
 The `clone` contract is deep across the type's logical ownership boundary:
 owned resources are duplicated or given another valid ownership share so the
@@ -356,7 +364,7 @@ Explicit non-owner relocation is restricted to entire compiler-tracked root
 places: named locals and parameters, and fresh temporary/result places. Moving
 a whole aggregate includes its subobjects in the same operation; it does not
 move them individually out of an otherwise active object. HUC0 rejects
-moving a non-owner Move value out through `*pointer`, `pointer->field`,
+moving a non-owner Advanced value out through `*pointer`, `pointer->field`,
 `value.field`, or `array[index]`. Leaving such a subobject inactive while its
 owner or containing object remains active would make later cleanup invalid
 without storing additional liveness state.
@@ -431,7 +439,7 @@ fn value() -> i32 { ... }
 fn increment() mod -> void { ... }
 ```
 
-A Move structure may define:
+An Advanced structure may define:
 
 ```huc
 fn drop() mod -> void {
@@ -446,7 +454,7 @@ Fixed arrays destroy active elements in decreasing index order. Elementwise
 copy and construction track an initialized prefix; a normal edge that abandons
 that prefix cleans it from its highest active index down to zero.
 
-A Move structure may customize explicit logical copying with exactly one
+An Advanced structure may customize explicit logical copying with exactly one
 read-only method:
 
 ```huc
@@ -457,7 +465,7 @@ fn clone() -> T {
 
 Only an evaluated `copy` expression selects `clone`; ordinary binding never
 does, and source code cannot call `clone` directly or take its address. Copy
-assignment of a Move type is expressed as `destination = copy source`, which
+assignment of an Advanced type is expressed as `destination = copy source`, which
 clones to a temporary, destroys the old destination, and relocates the
 temporary into place. Users cannot customize relocation initialization or
 relocation assignment.
@@ -1018,7 +1026,7 @@ Acceptance:
 - `mod` cannot be gained implicitly;
 - fixed storage cannot be assigned through ordinary typed operations;
 - fixed owners cannot be relocated;
-- non-owner Move subobjects cannot be explicit relocation sources;
+- non-owner Advanced subobjects cannot be explicit relocation sources;
 - all constructor field obligations are checked.
 - every accepted C-linkage signature has a documented target ABI mapping.
 
@@ -1039,7 +1047,7 @@ MIR records:
 - ordered temporaries;
 - places and assignments;
 - calls and control-flow blocks;
-- active/inactive Move state;
+- active/inactive Advanced state;
 - cleanup edges;
 - conditional drop flags only where control flow requires them;
 - source nulling for direct owner relocations, not for owner words inside
@@ -1102,12 +1110,12 @@ Implement:
 - `new T(args)`;
 - owner observation;
 - owner relocation initialization and assignment;
-- structural Copy/Move classification, including `clone` opting into Move;
+- structural Basic/Advanced classification, including `clone` opting into Advanced;
 - exact self-relocation as a no-op;
 - `copy`;
 - `clone`;
 - clone-then-replace assignment;
-- fixed bitwise relocation of non-owner Move values with no user relocation
+- fixed bitwise relocation of non-owner Advanced values with no user relocation
   hook or embedded-owner clearing;
 - user `drop`;
 - reverse field cleanup;
@@ -1364,7 +1372,7 @@ Include:
 - `std::slot_of` applied to a literal, temporary value, or function symbol;
 - `ptr_as` with an invalid source type or a composed pointer target;
 - mutation without `mod`;
-- copying a Move type without `clone`;
+- copying an Advanced type without `clone`;
 - malformed or duplicate `clone` and `drop` methods;
 - attempted custom move or relocation hooks;
 - constructor obligation failures;
@@ -1387,7 +1395,7 @@ Compile generated C17 and test:
 - slot addresses for inline, pointer, owner, and fixed storage;
 - slot-address round trips and byte access without extra ownership operations;
 - conditional relocations;
-- Copy-value binding and assignment;
+- Basic-value binding and assignment;
 - explicit copy/clone and clone-then-replace assignment;
 - non-null owner copying, explicitly guarded nullable-owner copying, and
   copying null raw pointers;

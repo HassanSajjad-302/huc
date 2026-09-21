@@ -4,7 +4,7 @@ module examples.value_semantics;
 import std.io as io;
 import std.memory as memory;
 
-// Point is Copy: every field is Copy and it declares neither clone nor drop.
+// Point is Basic: every field is Basic and it declares neither clone nor drop.
 struct Point {
     let i32 x;
     let i32 y;
@@ -15,7 +15,7 @@ struct Point {
     }
 }
 
-// NativeBuffer is Move because it declares clone and drop.
+// NativeBuffer is Advanced because it declares clone and drop.
 struct NativeBuffer {
     let mod u8* mod data;
     let usize size;
@@ -52,7 +52,7 @@ struct NativeBuffer {
     }
 }
 
-// Packet is Move because of its owner field, despite having no clone or drop.
+// Packet is Advanced because of its owner field, despite having no clone or drop.
 struct Packet {
     let i32 tag;
     let NativeBuffer& mod payload;
@@ -63,7 +63,7 @@ struct Packet {
     }
 }
 
-// AddressDependent is Move because its empty drop suppresses implicit Copy.
+// AddressDependent is Advanced because its empty drop suppresses implicit copying.
 // Its self pointer makes inline destructive relocation invalid unless the
 // programmer can prove the pointer will never be used afterward.
 struct AddressDependent {
@@ -88,7 +88,7 @@ fn receive(NativeBuffer* observed, NativeBuffer& owned) -> u8 {
 fn demonstrate_copy_values() -> void {
     let Point first = Point(10, 20);
     let Point second = first;       // implicit fieldwise copy
-    let Point third = copy second;  // equivalent for a Copy type
+    let Point third = copy second;  // equivalent for a Basic type
 
     io::println(first.x, second.x, third.x);
 }
