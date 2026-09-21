@@ -350,14 +350,14 @@ fn run() -> i32 {
 `Node` is in the Move category because it contains owners. Its fixed
 destructive relocation:
 
-1. copies `value`;
-2. recursively relocates `left`;
-3. recursively relocates `right`;
-4. ends the source `Node` lifetime without running its cleanup.
+1. transfers the entire representation, including `value` and both owner words;
+2. makes the source `Node` and its field subobjects inactive;
+3. leaves the destination responsible for cleanup, with no source cleanup.
 
-Relocating each `T&` field leaves that source owner as a usable null owner. The
-source `Node` as a whole is inactive, however; it is not a C++-style
-moved-from object.
+The source's `left` and `right` fields need not be nulled. Their old bits are
+not independently active owners and must not be used or destroyed. This is
+also valid for a leaf whose child owners are null. In contrast, moving just
+`root.left` while `root` remains active nulls that individual owner slot.
 
 At the end of `run`, cleanup recursively destroys both children. No reference
 count or tracing collector is involved.
@@ -394,6 +394,10 @@ fn duplicate(Node* source) -> Node {
     return copy *source;
 }
 ```
+
+The child-owner tests are required to preserve empty children: `copy` on a
+null owner is undefined behavior. When a child is absent, the corresponding
+field in `result` retains its default null value.
 
 Ordinary binding of `Node` destructively relocates it. Only `copy` asks for a
 logical duplicate. This keeps potentially expensive allocation visible at the
@@ -496,20 +500,23 @@ HUC has three user-visible lifecycle declarations:
 `Move` is a type category, not the name of a user-overridable constructor.
 Transferring a value in that category performs **destructive relocation**:
 
-1. Visit each field in declaration order.
-2. Copy a Copy field or recursively relocate a Move field.
-3. After the last field, the source ceases to contain an active structure.
-4. Neither the source's `drop` body nor its automatic field cleanup runs.
+1. Transfer the whole value's representation with bitwise relocation semantics.
+2. Make the entire source and all its subobjects inactive.
+3. Run neither the source's `drop` body nor its automatic field cleanup.
+
+Embedded owners require no source nulling. This rule does not depend on whether
+`clone`, `drop`, or an owning field made the structure Move.
 
 There is no user move constructor, move-assignment operator, or relocation
 hook. Relocation assignment first cleans an active destination and then applies
 the same fixed operation. Exact self-relocation assignment is a no-op.
 
-`T&` is the primitive exception to the otherwise inactive-source rule.
-Relocating an owner transfers its one address and leaves the source as an
-active, usable null owner. This makes conditional owner consumption practical
-without a borrow checker. It does not make a containing structure active after
-that structure has been relocated.
+Direct `T&` relocation is the primitive exception to the otherwise
+inactive-source rule. Relocating an owner slot transfers its one address and
+leaves the source as an active, usable null owner. This makes conditional owner
+consumption practical without a borrow checker. It also applies to an owner
+field moved individually, but not to its bits transferred as part of a whole
+structure relocation.
 
 ```huc
 module examples.native_lease;
@@ -678,7 +685,7 @@ fn unsafe_inline_relocation() -> u64 {
 }
 ```
 
-Structural relocation correctly copies the raw pointer field; it cannot know
+Bitwise relocation preserves the raw pointer field; it cannot know
 that this particular pointer was meant to equal the object's current address.
 The compiler need not reject the example. HUC is an unchecked systems
 language, so preserving an address-dependent invariant remains the
@@ -2147,7 +2154,7 @@ Possible tools include:
 |---|---|---|
 | `T&` | `unique_ptr`, owned boxes, library wrapper | One-word unique ownership integrated with relocation-by-binding |
 | `init` / `clone` / `drop` | C++ special members, RAII wrappers | Custom construction, explicit logical copy, and cleanup |
-| Fixed destructive relocation | C++ move constructors and move assignment | Fieldwise non-failing transfer that ends the source lifetime, with no user hook or value-category overload |
+| Fixed destructive relocation | C++ move constructors and move assignment | Bitwise non-failing transfer of inline Move values that ends the source lifetime, with no user hook or value-category overload |
 | Layered `mod` | const qualifiers, mutable references, capabilities | Slot and pointee permissions remain visually separate |
 | `if1` in a type body | conditional members, macros, template/static conditionals | Selected declarations become normal HUC0; discarded body is not parsed |
 | `fn1` partial specialization | overloads, traits, macros | Same primary/partial/full mechanism as structure and variable families |

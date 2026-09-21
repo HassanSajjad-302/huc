@@ -284,20 +284,29 @@ relocation**, not C++ move construction. Relocating a non-owner value continues
 that value in destination storage and ends the active value in the source
 storage. No source `drop` or field cleanup runs.
 
-Structural relocation proceeds in declaration order:
+Non-owner relocation has fixed bitwise representation-transfer semantics:
 
-1. Visit each field in declaration order.
-2. Copy a Copy field; recursively relocate a Move field.
-3. After the final field, make the aggregate source place inactive.
+1. Transfer the whole value's representation to the destination without
+   invoking `clone`, `drop`, or any user transfer hook.
+2. Make the entire source, including all its field subobjects, inactive.
+3. Transfer the cleanup obligation to the destination without source cleanup.
+
+Embedded owner words transfer unchanged; no recursive owner relocation or
+source-field nulling is required. The old field bits do not denote separately
+active owners. This rule applies whether classification as Move follows from
+`clone`, `drop`, or a Move field. Copy classification is unchanged: ordinary
+Copy binding duplicates the value and leaves its source active.
 
 Field fixedness constrains ordinary assignment, not compiler relocation of a
 whole value. A writable containing source permits relocation of its fixed
 fields.
 
 The bytes of an inactive source need not be cleared or form a valid `T`.
-Assigning a new value begins a new active lifetime there. A primitive owner is
-the deliberate exception: relocating `T&` transfers its address and leaves the
-source as a usable null owner.
+Assigning a new value begins a new active lifetime there. Direct relocation of
+a primitive owner is the deliberate exception: relocating `T&` transfers its
+address and leaves the source as a usable null owner. This includes moving an
+owner field individually, but not transferring its bits as part of relocating
+the containing aggregate. Null owner words are valid in either operation.
 
 Obvious invalid use should be diagnosed, but HUC does not promise complete
 flow-sensitive use-after-relocation prevention.
@@ -305,10 +314,16 @@ flow-sensitive use-after-relocation prevention.
 `copy expression` explicitly requests logical duplication:
 
 - a Copy type is copied;
-- a non-null owner allocates and copies its pointee;
+- an owner allocates and copies its pointee; the source must be non-null,
+  and copying a null owner is undefined behavior rather than producing null;
 - a Move structure must supply a read-only `fn clone() -> T`;
 - a Move array is copied elementwise when its element type supports `copy`;
 - a raw pointer copy duplicates only the address.
+
+Owner copying requires a logically copyable pointee type at compile time and
+has no required runtime null check. Callers that need null-preserving
+duplication must handle null explicitly. Copying a null raw pointer remains
+valid, and null-owner relocation and destruction are unchanged.
 
 Declaring `clone` opts an otherwise fieldwise-Copy structure into Move. This
 prevents an ordinary binding from bypassing custom logical-copy behavior.
@@ -322,7 +337,7 @@ Relocation cannot be overloaded. There is no HUC move constructor: one is not
 needed to restore a destructible moved-from state because no non-owner source
 object remains alive. Exact self-relocation assignment is a no-op.
 
-An inline type whose invariant depends on its own address is not structurally
+An inline type whose invariant depends on its own address is not bitwise
 relocatable. HUC0 does not silently repair self-pointers. Such a value must be
 kept in directly constructed fixed read-only storage, redesigned to compute
 internal addresses, placed in a stable-address library container, or allocated
@@ -331,13 +346,16 @@ address-dependent objects should normally use `T&`; HUC0 has no first-class
 pinning qualifier. Relocating a value that violates this contract is undefined
 behavior.
 
-The backend may replace structural relocation with a representation transfer
-only when it proves the result equivalent. This is an optimization; it does not
-create a user customization point.
+Bitwise relocation is the language contract, not an optional optimization of
+recursive field operations. It does not mandate a literal memory-copy
+instruction or give padding bytes semantic significance. The backend may use
+bulk copies, loads/stores, registers, or elision when observably equivalent;
+source inactivity and exactly-once cleanup must still be preserved.
 
 Explicit non-owner relocation is restricted to entire compiler-tracked root
-places: named locals and parameters; fresh temporary/result places; and
-compiler-generated recursive relocation of a whole aggregate. HUC0 rejects
+places: named locals and parameters, and fresh temporary/result places. Moving
+a whole aggregate includes its subobjects in the same operation; it does not
+move them individually out of an otherwise active object. HUC0 rejects
 moving a non-owner Move value out through `*pointer`, `pointer->field`,
 `value.field`, or `array[index]`. Leaving such a subobject inactive while its
 owner or containing object remains active would make later cleanup invalid
@@ -1024,7 +1042,8 @@ MIR records:
 - active/inactive Move state;
 - cleanup edges;
 - conditional drop flags only where control flow requires them;
-- owner nulling after relocations.
+- source nulling for direct owner relocations, not for owner words inside
+  relocated aggregates.
 
 No semantic decision is deferred to the C compiler or its ABI lowering.
 
@@ -1088,7 +1107,8 @@ Implement:
 - `copy`;
 - `clone`;
 - clone-then-replace assignment;
-- fixed structural relocation with no user relocation hook;
+- fixed bitwise relocation of non-owner Move values with no user relocation
+  hook or embedded-owner clearing;
 - user `drop`;
 - reverse field cleanup;
 - `adopt`, `release`, and `reset`.
@@ -1104,6 +1124,9 @@ Acceptance:
 - straight-line owner relocations require no hidden state;
 - conditional aggregate relocations use flags only when necessary;
 - raw-handle `drop` types relocate without duplicate cleanup;
+- owner-bearing aggregates lower to whole-value `Relocate` without embedded
+  `OwnerRelocate` operations or required field null stores;
+- directly moving an individual owner field still clears that field;
 - indirect non-owner move-out is rejected without adding owner liveness state;
 - ordinary binding never invokes `clone`;
 - sanitizers find no backend double destruction;
@@ -1366,7 +1389,11 @@ Compile generated C17 and test:
 - conditional relocations;
 - Copy-value binding and assignment;
 - explicit copy/clone and clone-then-replace assignment;
-- structural relocation, source deactivation, and self-relocation;
+- non-null owner copying, explicitly guarded nullable-owner copying, and
+  copying null raw pointers;
+- bitwise relocation, whole-source deactivation, and self-relocation;
+- relocation of nested owner-bearing aggregates, including null owner fields,
+  with exactly-once destination cleanup and no inactive-source cleanup;
 - user `drop` and reverse field cleanup;
 - module imports;
 - full HUC1-to-program examples.

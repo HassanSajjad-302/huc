@@ -50,8 +50,10 @@ HUC 0.1 makes these promises:
 
 - `T*` is pointer-sized and has no ownership or lifetime tracking.
 - `T&` is pointer-sized when the default allocator is used.
-- Relocating a `T&` transfers its address and leaves the source as a usable
-  null owner.
+- Directly relocating a `T&` transfers its address and leaves the source as a
+  usable null owner. Relocating an inline aggregate instead transfers its
+  representation and makes the whole source inactive without requiring
+  embedded-owner nulling.
 - Destruction is deterministic and occurs at statically defined scope exits.
 - Function arguments and subexpressions evaluate from left to right.
 - A Move transfer is fixed, compiler-defined destructive relocation, never an
@@ -618,15 +620,20 @@ Exact self-relocation is therefore a defined no-op.
 Assignment cannot be overloaded. A named method must express domain-specific
 operations such as merge, append, swap, or replace.
 
-### 6.4 Structural relocation of other Move values
+### 6.4 Bitwise relocation of other Move values
 
-Relocating a non-owner Move value performs a fixed structural operation.
-Structure fields transfer in declaration order:
+Relocating a non-owner Move value performs a fixed representation transfer:
 
-1. a Copy component is copied into the corresponding destination component;
-2. a Move component is recursively destructively relocated;
-3. after all components have transferred, the source value's lifetime ends and
-   its storage becomes **inactive**.
+1. the whole value's representation transfers to the destination;
+2. the source value's lifetime ends, and its storage and all field subobjects
+   become **inactive**;
+3. the destination receives the cleanup obligation, with no source cleanup.
+
+This is bitwise relocation, not recursive invocation of the individual fields'
+transfer operations. Embedded owner words transfer unchanged and need not be
+nulled in the source. No source field remains an independently active value.
+The rule applies whether `clone`, `drop`, or a Move field makes the type Move;
+ordinary binding of a Copy type still leaves its source active.
 
 Field fixedness restricts ordinary field assignment; it does not prevent the
 compiler from relocating that field as part of a writable containing source.
@@ -640,12 +647,14 @@ assigning a new value into the source storage starts a new lifetime there.
 For relocation assignment, the compiler first checks for exact
 self-relocation. If source and destination are the same storage, the operation
 is a no-op. Otherwise it destroys the old active destination and then performs
-the structural relocation above.
+the representation transfer above.
 
 This algorithm is not overloadable. HUC 0.1 has no move constructor,
-relocation constructor, relocation method, or move-assignment hook. A backend
-may replace the fieldwise operation with a bitwise representation transfer only
-when that is observably equivalent to the fixed semantics.
+relocation constructor, relocation method, or move-assignment hook. Bitwise
+relocation is a semantic guarantee, not a requirement to emit a literal
+memory-copy instruction or to give padding bytes semantic significance.
+Equivalent bulk copies, loads/stores, register transfers, and elision are
+permitted when they preserve observable behavior, inactivity, and cleanup.
 
 Using inactive storage before reactivation is undefined behavior. A compiler
 should diagnose an obvious straight-line use, but HUC does not promise
@@ -660,17 +669,20 @@ lifetime checking. Straight-line relocations require no flag.
 possible.
 
 An explicit non-owner Move source must be an entire compiler-tracked root
-place: a named local, parameter, or global; a fresh temporary/result place; or
-the source of compiler-generated recursive whole-value relocation. HUC0
+place: a named local or parameter, or a fresh temporary/result place.
+Whole-value relocation includes subobjects in the same transfer. HUC0
 rejects moving a non-owner value out through a pointer, owner dereference,
 field selection, or array indexing. Otherwise the containing object or owner
 could remain active and later try to clean an inactive subobject without
 having liveness state in its representation.
 
-A primitive `T&` field or element is exempt because relocation stores null in
-the source owner, which remains active. `copy *owner` is also valid because it
-leaves the pointee active, as is relocating the whole owner. An eligible root
-source may replace a valid indirect destination; if it may alias that
+A primitive `T&` field or element moved individually is exempt because direct
+owner relocation stores null in that source slot, which remains active. This
+does not apply to its bits transferred within a whole aggregate relocation.
+Null owner words are valid in either operation. `copy *owner` is also valid for
+a non-null owner with a copyable pointee because it leaves the pointee active.
+Relocating the whole owner remains valid, including when null. An eligible
+root source may replace a valid indirect destination; if it may alias that
 destination, exact storage identity is checked before destruction. Containers
 manage backing storage and initialized element ranges explicitly. The deferred
 raw-storage lifetime intrinsics are limited to `std::construct_at` and
@@ -712,9 +724,17 @@ implementation-defined diagnostic output; it need not run pending destructors.
 - For a Copy type, it performs the ordinary copy.
 - For a Move structure, it calls a method with the effective signature
   `fn clone() -> T`.
-- For `T&`, null produces a null owner. A non-null owner allocates a new `T`
-  and initializes it with `copy *source`.
-- For a raw pointer, it copies the address and never clones the pointee.
+- For `T&`, the source must be non-null. The operation allocates a new `T`
+  and initializes it with `copy *source`. Copying a null owner is undefined
+  behavior, even if the pointee's copy operation would not read its storage;
+  no runtime null check or null-preserving result is required. `T` must support
+  logical copying at compile time.
+- For a raw pointer, it copies the address and never clones the pointee;
+  copying a null raw pointer is valid.
+
+Null-preserving owner duplication requires an explicit source test by the
+caller, including inside `clone` methods for optional owner fields. This does
+not change the validity of null-owner relocation or destruction.
 
 ```huc
 struct Text {
@@ -1700,6 +1720,7 @@ The following list is representative rather than exhaustive:
 
 - invalid raw-pointer dereference or arithmetic;
 - dereferencing a null owner after its ownership was relocated;
+- evaluating `copy` on a null owner;
 - use of inactive Move storage;
 - double adoption or adoption of an incompatible allocation;
 - violation of an external function's contract;

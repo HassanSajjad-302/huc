@@ -52,6 +52,17 @@ struct NativeBuffer {
     }
 }
 
+// Packet is Move because of its owner field, despite having no clone or drop.
+struct Packet {
+    let i32 tag;
+    let NativeBuffer& mod payload;
+
+    fn init(i32 tag, NativeBuffer& mod payload)
+        : tag(tag),
+          payload(payload) {
+    }
+}
+
 // AddressDependent is Move because its empty drop suppresses implicit Copy.
 // Its self pointer makes inline destructive relocation invalid unless the
 // programmer can prove the pointer will never be used afterward.
@@ -87,7 +98,7 @@ fn demonstrate_inline_relocation() -> void {
     original.fill(7);
 
     let NativeBuffer duplicate = copy original; // invokes the clone protocol
-    // Fixed destructive relocation transfers fields without calling a user
+    // Fixed bitwise relocation transfers the representation without a user
     // move/relocation constructor. original's lifetime ends; neither its drop
     // nor its field cleanup runs, and its storage is now inactive.
     let NativeBuffer mod relocated = original;
@@ -117,6 +128,24 @@ fn demonstrate_owner_values() -> void {
     io::println(first_byte, duplicate->first());
 }
 
+fn demonstrate_embedded_owners() -> void {
+    let Packet mod source = Packet(1, new NativeBuffer(16));
+    let Packet mod destination = source;
+    // source and source.payload are inactive. No payload null store or source
+    // cleanup is required. Only destination owns the transferred buffer.
+    io::println(destination.tag, destination.payload->first());
+
+    // Moving a field individually is different: destination stays active,
+    // and its payload slot becomes an active null owner.
+    let NativeBuffer& extracted = destination.payload;
+    io::println(!destination.payload, extracted->first());
+
+    // A null embedded owner does not prevent whole-value relocation.
+    let Packet mod empty = Packet(2, null);
+    let Packet relocated_empty = empty;
+    io::println(relocated_empty.tag, !relocated_empty.payload);
+} // extracted destroys the buffer once; neither inactive Packet is cleaned up.
+
 fn demonstrate_address_stability() -> void {
     // Relocating an inline AddressDependent would leave its self pointer aimed
     // at inactive source storage. HUC neither repairs nor diagnoses that
@@ -132,6 +161,7 @@ fn main() -> i32 {
     demonstrate_copy_values();
     demonstrate_inline_relocation();
     demonstrate_owner_values();
+    demonstrate_embedded_owners();
     demonstrate_address_stability();
     return 0;
 }

@@ -668,8 +668,8 @@ subobjects and indirect places. An explicit source-level relocation of a
 non-owner Move value is accepted only from a whole tracked local, parameter,
 temporary, or result. It is rejected from `value.field`, `array[i]`,
 `*pointer`, and `pointer->field`: the enclosing cleanup would otherwise need
-hidden liveness inside nominal object storage. Compiler-generated recursive
-field relocation remains part of relocating a whole root value.
+hidden liveness inside nominal object storage. A whole-root representation
+transfer includes all subobjects without separate field-relocation operations.
 
 Primitive `T&` is the exception because relocation writes its active-null state
 in-band. An owner may relocate from any writable direct or indirect owner
@@ -1021,12 +1021,16 @@ MIR semantics are sequenced. The C emitter must introduce temporaries when
 necessary to preserve HUC's left-to-right order.
 
 `Relocate` is the complete destructive-relocation operation, not one half of
-an operation that requires a later `Deactivate`. For each field in declaration
-order, it copies a Copy component and recursively relocates a Move component.
-It makes the non-owner source inactive as an intrinsic postcondition and never
-calls source `drop` or performs source component cleanup. `OwnerRelocate` is the complete primitive
-`T&` operation: it transfers the pointer and leaves the source active and
-usable as a null owner.
+an operation that requires a later `Deactivate`. It transfers the whole
+non-owner value's representation and makes the source and all its subobjects
+inactive as an intrinsic postcondition. It never calls source `drop`, performs
+source component cleanup, or requires embedded-owner nulling. In particular,
+it does not expand owner fields into `OwnerRelocate` operations.
+
+`OwnerRelocate` is the complete direct primitive `T&` operation: it transfers
+the pointer and leaves the source active and usable as a null owner. This
+includes moving an owner field individually, but not transferring that word
+inside a whole aggregate relocation. Null owner words are valid in both cases.
 
 The two-place MIR operations have a distinct-storage precondition. Relocation
 assignment emits a static no-op or a runtime address-equality branch before
@@ -1108,11 +1112,14 @@ Elaboration handles the operations as follows:
   the copy expression's result place; lacking `clone` is a diagnostic, and
   copy assignment specifically uses a fresh result before destination
   destruction;
-- `copy` of `T&` requires a logically copyable `T`, preserves null, or
-  allocates a new `T` and logically copies the pointee; copying `T*` copies
-  only the observer address;
-- binding from a Move non-owner becomes one fixed fieldwise `Relocate`, which
-  intrinsically makes the source inactive;
+- `copy` of `T&` requires a logically copyable `T` and a non-null source,
+  allocates a new `T`, and logically copies the pointee; a null source is
+  undefined behavior, with no required runtime null check or null-preserving
+  branch. This precondition applies even when copying `T` would not read its
+  storage. Copying `T*` copies only the observer address and permits null;
+- binding from a Move non-owner becomes one fixed representation-transfer
+  `Relocate`, which intrinsically makes the source and all subobjects inactive
+  without requiring source-field clearing;
 - `T&` binding becomes `OwnerRelocate`; it transfers the pointer and stores
   null in the still-active source owner;
 - a fresh unnamed Move-producing result place is intrinsically consumable;
@@ -1132,7 +1139,7 @@ unchecked compiler cannot prove.
 
 Field fixedness affects source-level assignment, not this compiler operation.
 Once an allowed whole root source has the required writable slot permission,
-`Relocate` transfers its fixed fields recursively as part of the whole value.
+`Relocate` transfers the whole representation, including its fixed fields.
 
 The source of a successful non-owner relocation contains no active HUC value.
 Its representation may retain old bits, but the compiler never calls its
@@ -1146,18 +1153,20 @@ a HUC customization point. See
 [Value Semantics and Special Operations](value-semantics.md).
 
 The compiler does not repair self-pointers or other address-dependent
-invariants during structural relocation. Such inline values must remain in
+invariants during bitwise relocation. Such inline values must remain in
 directly constructed fixed storage, use a suitable future stable-address
 container, or normally live behind `T&`. Violating that contract and then
 relocating the value is undefined behavior.
 
-The backend may replace structural fieldwise relocation with a representation
-copy only when layout and alias analysis prove the replacement has identical
-HUC effects, including required standalone-owner nulling, source deactivation,
-and drop state. Owner bits inside an inactive aggregate source need not be
-cleared if the backend also proves that neither generated cleanup nor any
-permitted access can observe them. This is an optimization, never a
-user-visible `trivially_relocatable` promise in HUC 0.1.
+Representation transfer is the semantic definition of non-owner relocation,
+not an optional optimization of recursive field operations. No separate proof
+is needed to omit embedded-owner clearing: every source subobject is inactive,
+and reading it as a live value is invalid. The lowering must still preserve
+layout, valid C storage access, source deactivation, and exactly-once cleanup.
+It may use bulk copies, loads/stores, registers, or elision when observably
+equivalent; the contract neither mandates a literal memory-copy instruction
+nor gives padding bytes semantic significance. Direct `OwnerRelocate` remains
+distinct and must preserve the active-null source semantics.
 
 ## 13. C17 lowering
 
@@ -1213,9 +1222,10 @@ deallocation without changing the one-pointer owner representation.
 | `std::slot_of(place)` | the slot's data-storage address converted to target `usize` |
 | `ptr_as<T*>(address)` for `usize` | target-supported integer-to-data-pointer reconstruction |
 | owner destructive relocation | Transfer the pointer, then null the source slot |
+| non-owner Move relocation | Transfer the whole representation; deactivate the source and all subobjects without requiring embedded-owner nulling |
 | `T(values)` initializing a final place | Generated initializer with an explicit final-destination pointer |
 | `new T(values)` | Aligned allocation, terminate-on-failure check, then initialization in that allocation |
-| `copy owner` | allocate, then fieldwise-copy or clone the pointee |
+| `copy owner` | Assume a non-null source; allocate, then fieldwise-copy or clone the pointee |
 | `adopt<T>(raw)` | Store a compatible allocation's pointer and establish the HUC cleanup obligation |
 | `release(owner)` | Return the pointer and null the owner slot |
 | `reset(owner)` | Drop/deallocate the pointee if non-null, then leave a null owner |
@@ -1307,7 +1317,8 @@ For each HUC type, generate the required concrete functions or equivalent
 inline code for:
 
 - initialization in supplied final storage;
-- fieldwise relocation without a user relocation hook;
+- whole-representation relocation of non-owner Move values without a user
+  relocation hook or required embedded-owner clearing;
 - user `drop` followed by reverse field cleanup;
 - explicit logical cloning when supported;
 - compatible allocation and deallocation where ownership requires them.
@@ -1327,10 +1338,12 @@ HUC fixed-by-default permissions are enforced before emission. Do not add C
 relocation or reinitialization. Read-only access remains a HUC semantic
 property even when the underlying C storage is physically writable.
 
-C structure assignment or `memcpy` may implement a transfer only when it is
-equivalent to the resolved HUC operation, including source owner nulling and
-activation state. Observe C effective-type, alignment, and aliasing rules;
-an arbitrarily cast byte buffer is not automatically valid typed storage.
+C structure assignment or `memcpy` may implement non-owner relocation when it
+preserves the representation-transfer semantics and activation state. Do not
+add owner-field null stores merely because an aggregate contains owners.
+Direct owner relocation separately preserves its required active-null source.
+Observe C effective-type, alignment, and aliasing rules; an arbitrarily cast
+byte buffer is not automatically valid typed storage.
 Prefer concrete typed storage and explicitly aligned allocation. HUC
 inactivity is compiler bookkeeping and need not force the physical C storage
 object's lifetime to end at the same point.
@@ -1551,6 +1564,11 @@ Store input plus expected:
 Golden C tests require deterministic temporary names rather than masking
 nondeterministic numbering.
 
+Relocation goldens must distinguish whole-aggregate `Relocate` from direct
+`OwnerRelocate`. Owner-bearing aggregates, including nested ones, require no
+recursive owner-null stores; an owner field moved individually must still
+lower to `OwnerRelocate` and leave that field active-null.
+
 ### 17.3 Execute tests
 
 Compile and run small programs that record:
@@ -1559,7 +1577,9 @@ Compile and run small programs that record:
 - direct-construction `this` addresses for locals, parameters, results, and
   allocations;
 - destructive-relocation and clone counts;
-- owner nulling;
+- source nulling after direct owner relocation, including an individual field;
+- relocation of aggregates with nested non-null and null owner fields, with
+  cleanup only through the active destination;
 - exact self-relocation behavior;
 - destruction order;
 - early-return cleanup;
@@ -1571,6 +1591,9 @@ Compile and run small programs that record:
 - HUC0 rejection of numbered syntax emitted as raw text;
 - acceptance of every successful staged module by the standalone HUC0
   translator.
+
+Tests verify relocated values through the active destination, not by reading
+inactive source fields or requiring their old bytes to remain intact.
 
 ### 17.4 ABI and cost assertions
 
@@ -1610,7 +1633,7 @@ Implement in this order:
 4. typed HIR and sequenced MIR with explicit parameter places,
    direct-construction destinations, relocation, and cleanup;
 5. scalar C17 headers plus one root translation unit;
-6. pointer-represented owners, explicit structural relocation and clone/drop
+6. pointer-represented owners, explicit bitwise relocation and clone/drop
    functions, cleanup edges, sidecar active-state handling, and lifecycle
    hardening.
 

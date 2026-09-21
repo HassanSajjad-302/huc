@@ -22,8 +22,9 @@ HUC uses three related type forms:
 
 `T&` is not a C++ reference. HUC has no general aliasing-reference type and no
 `T&&` type. A non-null `T&` owns an allocation, automatically destroys its
-pointee, and then deallocates that storage. Relocating it clears the source
-owner to null.
+pointee, and then deallocates that storage. Directly relocating an owner slot
+clears that source slot to null. Relocating an enclosing inline aggregate
+instead makes the entire source inactive without requiring owner-field nulling.
 
 HUC has no unary `&` expression. Address-taking uses the core,
 non-overloadable `addressof` intrinsic:
@@ -511,14 +512,16 @@ lifetime operations, not C++ special members.
 
 ### 6.2 Unique-owner copying
 
-`copy` on an owner performs an explicit deep copy of the owned object:
+`copy` on an owner performs an explicit deep copy of the owned object. The
+source owner must be non-null; evaluating `copy` on a null owner is undefined
+behavior. The operation has no implicit null-preserving case:
 
 ```huc
 let HeapText& mod first = new HeapText("hello");
 let HeapText& second = copy first;
 ```
 
-If `first` is null, `second` is null. Otherwise the operation:
+For a valid source, the operation:
 
 1. evaluates `first`;
 2. allocates uninitialized storage for one `HeapText`;
@@ -526,10 +529,18 @@ If `first` is null, `second` is null. Otherwise the operation:
    `clone`;
 4. returns a new independent owner.
 
-The pointee type must support logical copying at compile time even when the
-particular source owner happens to be null.
+The pointee type must support logical copying at compile time. A null value
+does not bypass this type requirement, and no runtime null check is required.
+The non-null precondition applies even if the pointee's copy operation would
+not otherwise read its storage.
 
-Copying a raw `HeapText*` never copies the pointee:
+Code that needs null-preserving duplication must test the source explicitly
+and produce a null result itself. This includes `clone` methods for structures
+with optional owner fields. Null owners remain valid values for observation,
+relocation, and destruction; only copying their nonexistent pointee is invalid.
+
+Copying a raw `HeapText*` never copies the pointee and is valid even when the
+pointer is null:
 
 ```huc
 let HeapText* observer = first;
@@ -568,8 +579,21 @@ operation. In ordinary conversation it is reasonable to say that a HUC value
 construction. “Destructive move” is an acceptable informal name; the
 specification uses “relocation” when the lifetime distinction matters.
 
+Here `Packet` is Move because it contains an owner, even though it declares
+neither `clone` nor `drop`:
+
 ```huc
-let Packet mod source = Packet(...);
+struct Packet {
+    let i32 tag;
+    let Widget& payload;
+
+    fn init(i32 tag, Widget& mod payload)
+        : tag(tag),
+          payload(payload) {
+    }
+}
+
+let Packet mod source = Packet(1, new Widget(7));
 let Packet destination = source; // destructive relocation
 ```
 
@@ -578,16 +602,22 @@ does not. Relocation continues the value in `destination` and ends the active
 `Packet` lifetime in `source`. It does not create a second live object and it
 does not leave a moved-from `Packet`.
 
-Structural relocation is fixed:
+Non-owner relocation has fixed bitwise representation-transfer semantics:
 
-1. Visit each field in declaration order.
-2. Copy it when its type is Copy; recursively relocate it when its type is
-   Move.
-3. After the final field, make the aggregate source place inactive.
+1. Transfer the whole value's representation to the destination.
+2. Make the entire source, including every field subobject, inactive.
+3. Leave the destination responsible for the value's eventual cleanup.
 
-Arrays use the same rule in increasing index order. No source `drop` body or
-source-field cleanup runs: those resources now belong to the destination. The
-operation invokes no user code and cannot fail in the HUC type system.
+Owner words inside the aggregate transfer unchanged. In particular, the
+operation need not write null to `source.payload`; that field is inactive,
+not a second live owner. Neither it nor `source` may be used as a value before
+the whole source is reinitialized. No source `drop` body or source-field
+cleanup runs. Arrays in the Move category use the same whole-value rule.
+The operation invokes no user code and cannot fail in the HUC type system.
+
+The rule is the same whether the structure is Move because of `clone`, `drop`,
+or a Move field. It does not change ordinary binding of Copy types, which
+duplicates the value and leaves the source active.
 
 Field fixedness controls ordinary field assignment; it does not block the
 compiler from relocating that field as part of its containing value. The
@@ -599,9 +629,9 @@ representation of `T`. The compiler tracks whether the *storage place* is
 active. Assigning a new value to an inactive place begins a new lifetime there.
 Using it as a value before reinitialization is undefined behavior.
 
-Primitive `T&` is the deliberate exception to the inactive-source rule.
-Relocating an owner transfers its address and writes null to the source. The
-source is then an active, usable null owner:
+Direct relocation of a primitive `T&` is the deliberate exception to the
+inactive-source rule. Relocating an owner slot transfers its address and
+writes null to the source. The source is then an active, usable null owner:
 
 ```huc
 let Widget& mod first = new Widget(7);
@@ -612,10 +642,11 @@ if (!first) {
 }
 ```
 
-This exception does not recursively make a source aggregate usable. After
-relocating a structure containing an owner, the whole source structure is
-inactive even though its owner field was cleared while implementing the
-relocation.
+This exception also applies when an owner field or element is moved
+individually while its containing object stays active. It does not apply to
+owner words transferred as part of a whole aggregate relocation: the source
+aggregate and all its fields become inactive, with no required null stores.
+Null owners remain valid to relocate directly or inside an aggregate.
 
 C++ move construction has a different lifetime model: it constructs a
 destination object while the source object remains alive and is destroyed
@@ -624,10 +655,11 @@ state. HUC destructive relocation ends the non-owner source lifetime
 immediately, so it needs neither a moved-from-state contract nor a source
 destructor call.
 
-The backend may replace recursive structural relocation with a bytewise or
-bulk representation transfer only when it proves the observable result
-equivalent. That is an optimization, not a separate HUC operation and not a
-promise that padding bytes are semantically significant.
+Bitwise relocation is the language contract, not an optional replacement for
+recursive field operations. It does not require a literal memory-copy
+instruction or make padding bytes semantically significant. A backend may
+use bulk copies, loads/stores, registers, or eliminate the transfer when
+observably equivalent, while preserving source inactivity and cleanup.
 
 ### 7.1 Why relocation is not customizable in HUC0
 
@@ -650,7 +682,7 @@ Fixed destructive relocation provides:
 - no hidden allocation or I/O during ordinary transfer;
 - no overload resolution based on value categories;
 - no user code running merely because a value crosses a scope boundary;
-- predictable recursive lowering;
+- predictable representation-transfer lowering;
 - one rule for parameters, returns, assignments, and containers;
 - a guarantee that relocation itself cannot fail;
 - no requirement that resource wrappers reserve an “empty” sentinel merely
@@ -688,7 +720,7 @@ struct SelfIndexed {
 }
 
 let SelfIndexed mod first = SelfIndexed(10);
-let SelfIndexed second = first; // structural relocation
+let SelfIndexed second = first; // bitwise relocation; first becomes inactive
 
 // second.self still contains the old inline address. Relying on the broken
 // invariant is undefined behavior.
@@ -730,8 +762,10 @@ Destructive relocation of a non-owner Move value is allowed only from an
 entire compiler-tracked root place:
 
 - a named local or parameter with the required trailing `mod`;
-- a fresh temporary or function-result place;
-- the source of compiler-generated recursive relocation of a whole aggregate.
+- a fresh temporary or function-result place.
+
+Whole-aggregate relocation includes all its subobjects in one transfer; it
+does not perform separate move-outs from an otherwise active aggregate.
 
 HUC0 rejects explicit non-owner move-out from a pointee or subobject:
 
@@ -789,7 +823,7 @@ fn transfer() -> void {
 } // output.drop closes the handle exactly once
 ```
 
-Declaring `drop` makes `File` a Move type. Structural relocation copies the
+Declaring `drop` makes `File` a Move type. Bitwise relocation transfers the
 integer handle into the destination and deactivates the source. It need not
 write `-1` into `input.handle`: the source's `drop` is skipped because the
 source no longer contains an active `File`.
@@ -1425,8 +1459,11 @@ inheriting C defaults:
    not by the C type system.
 2. Copy/Move classification is decided by HUC semantic analysis.
 3. `clone` runs only for an evaluated `copy` that requires it.
-4. relocation is structural, non-failing, and independent of user overloads;
-5. owner relocation clears the source to a usable null owner;
+4. non-owner relocation transfers the representation, makes the whole source
+   inactive, and requires no clearing of embedded owner words; it is
+   non-failing and independent of user overloads;
+5. direct owner relocation clears the source to a usable null owner, including
+   an owner field moved individually;
 6. inactive structure values are not dropped;
 7. exact self-relocation assignment is a no-op;
 8. `drop` runs before reverse field cleanup;
@@ -1444,8 +1481,8 @@ inheriting C defaults:
 The middle-end must make construction, copy, relocation, activation,
 deactivation, and cleanup explicit before C emission. C assignment and byte
 copying are permitted implementations only when they preserve the complete
-HUC operation, including owner nulling and active state, and obey C's storage
-and aliasing rules. This keeps the semantics usable by a future C++ or
+HUC operation, including direct-owner nulling and active state, and obey C's
+storage and aliasing rules. This keeps the semantics usable by a future C++ or
 native-code backend without changing HUC value semantics.
 
 ## 17. Design references
@@ -1462,6 +1499,6 @@ WG21's relocation work:
   explores a user-defined relocation constructor—the customization point HUC0
   deliberately defers.
 
-These papers do not define HUC semantics. In particular, HUC's recursive
-structural rule, null-owner exception, `mod` requirement, and unchecked
-address-dependence contract are HUC decisions.
+These papers do not define HUC semantics. In particular, HUC's bitwise
+relocation rule, direct-owner nulling exception, `mod` requirement, and
+unchecked address-dependence contract are HUC decisions.

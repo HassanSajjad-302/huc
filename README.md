@@ -23,9 +23,10 @@ an untyped slot address as `usize`, including for raw-pointer and owner slots.
 
 A type whose ordinary binding transfers rather than copies is classified
 **Move**, but that transfer operation is destructive relocation rather than
-C++ move construction. A relocated non-owner source becomes inactive without
-running its `drop` or field cleanup; the special `T&` source remains usable as
-a null owner.
+C++ move construction. Inline relocation transfers the representation and makes
+the entire source inactive without running its `drop`, cleaning its fields,
+or requiring embedded-owner nulling. A directly relocated `T&` source instead
+remains usable as a null owner.
 
 ```huc
 module readme.example;
