@@ -11,12 +11,12 @@ Its two central ideas are:
   execution, generics, reflection, and code generation: `fn`, `fn1`, `fn2`,
   `if1`, `for1`, `struct1`, and `struct2`.
 - A small ownership model in which `T*` is an unchecked non-owning pointer and
-  `T&` is a pointer-sized unique owner whose ownership transfers automatically
+  `T#` is a pointer-sized unique owner whose ownership transfers automatically
   and whose owned object is destroyed automatically.
 
-HUC `T&` is an owning handle, not a C++ reference. HUC has no general reference
-type and no `T&&`. `T*` and `T&` are the only pointer-like forms and cannot be
-combined, so `T**`, `T*&`, and `T&*` are invalid. HUC also has no unary `&`.
+HUC `T#` is an owning handle, not a C++ reference. HUC has no general reference
+type. `T*` and `T#` are the only pointer-like forms and cannot be combined,
+so `T**`, `T*#`, `T#*`, and `T##` are invalid. HUC also has no unary `&`.
 Use the built-in `addressof(value)` operation to get a non-owning pointer to
 an inline value. It cannot be overloaded. The unchecked `std::slot_of(place)`
 intrinsic instead returns the address of the storage slot as a `usize` integer.
@@ -32,7 +32,13 @@ An inline Advanced transfer is bitwise relocation, not C++ move construction.
 It makes the entire source inactive: the source can no longer be used as a
 value until reinitialized. The transfer does not run the source's `drop`,
 clean up its fields, or require its owner fields to be set to null. A directly
-transferred `T&` source instead remains usable as a null owner.
+transferred `T#` source instead remains usable as a null owner.
+
+Declarations use `name: Type`, with `mod` before a writable name. Conditions
+stay parenthesized, control-flow bodies require braces, and returning a value
+uses explicit `return`. Digit separators and trailing commas are optional. A small
+[formatting guide](docs/formatting.md) gives a default style without making
+spacing or indentation part of the grammar.
 
 ```huc
 module readme.example;
@@ -40,27 +46,27 @@ module readme.example;
 import std.io as io;
 
 struct Widget {
-    let i32 value;
+    let value: i32;
 
-    fn init(i32 value) : value(value) {
+    fn init(value: i32) : value(value) {
     }
 }
 
-fn inspect(Widget* widget) -> void {
+fn inspect(widget: Widget*) -> void {
     io::println(widget->value);
 }
 
-fn consume(Widget& widget) -> void {
+fn consume(widget: Widget#) -> void {
     inspect(widget);
 } // destroys widget unless its ownership was relocated elsewhere
 
 fn main() -> i32 {
-    let Widget& mod first = new Widget(42);
-    inspect(first);                       // observes; first still owns
+    let mod first: Widget# = new Widget(42);
+    inspect(first); // observes; first still owns
 
-    let Widget& mod second = first;      // relocates ownership; first is null
-    let Widget& third = copy second;     // explicit pointee duplication
-    consume(second);                      // relocates; second becomes null
+    let mod second: Widget# = first; // relocates ownership; first is null
+    let third: Widget# = copy second; // explicit pointee duplication
+    consume(second); // relocates; second becomes null
     return 0;
 }
 ```
@@ -77,7 +83,7 @@ low runtime cost, not static memory safety.
 HUC is for programmers who want the C/C++ cost model but do not want several
 overlapping languages hiding inside one compiler. Runtime code, specialization,
 and compile-time execution use one set of numbered keywords. `T*` observes;
-`T&` owns. Mutation is explicit. Transferring an Advanced value means one thing:
+`T#` owns. Mutation is explicit. Transferring an Advanced value means one thing:
 destructive relocation. Expensive duplication happens only when the source
 says `copy`.
 
@@ -100,6 +106,7 @@ needed. This reflection model is not part of the first two compiler milestones.
 - [HUC 0.1 language specification](docs/language-specification.md)
 - [Bootstrap transpiler architecture](docs/transpiler-architecture.md)
 - [Bootstrap grammar](docs/huc.ebnf)
+- [Default formatting guide](docs/formatting.md)
 - [Ownership example](examples/ownership.huc0)
 - [Value-semantics example](examples/value-semantics.huc0)
 - [Numbered-phase example](examples/phases.huc1)

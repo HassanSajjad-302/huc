@@ -52,7 +52,7 @@ constructor-decl-0
 
 constructor-initializer-list-0
                   = ":", field-initializer-0,
-                    { ",", field-initializer-0 } ;
+                    { ",", field-initializer-0 }, [ "," ] ;
 field-initializer-0
                   = identifier, argument-list-0 ;
 
@@ -62,7 +62,7 @@ struct-member-0   = field-decl-0
                   | function-decl-0
                   | constructor-decl-0 ;
 
-field-decl-0      = "let", type-0, [ "mod" ], identifier,
+field-decl-0      = "let", [ "mod" ], identifier, ":", type-0,
                     [ "=", expression-0 ], ";" ;
 global-let-decl-0 = field-decl-0 ;
 
@@ -100,7 +100,7 @@ constructor-decl-1
 
 constructor-initializer-list-1
                   = ":", field-initializer-1,
-                    { ",", field-initializer-1 } ;
+                    { ",", field-initializer-1 }, [ "," ] ;
 field-initializer-1
                   = identifier, argument-list-1 ;
 
@@ -113,7 +113,7 @@ struct-member-1   = field-decl-1
                   | phase-control-item
                   | phase-expression-item ;
 
-field-decl-1      = "let", type-1, [ "mod" ], identifier,
+field-decl-1      = "let", [ "mod" ], identifier, ":", type-1,
                     [ "=", expression-1 ], ";" ;
 global-let-decl-1 = field-decl-1 ;
 type-alias-decl-1 = "type", identifier, "=", type-1, ";" ;
@@ -139,13 +139,13 @@ phase1-struct-decl
                   = "struct1", identifier, phase-binder-list,
                     [ specialization-header ], deferred-body ;
 
-phase1-let-decl   = "let1", phase-binder-list,
-                    [ specialization-header ], identifier,
+phase1-let-decl   = "let1", identifier, phase-binder-list,
+                    [ specialization-header ],
                     deferred-body ;
 
 phase-binder-list = "(", [ phase-binder,
                     { ",", phase-binder }, [ "," ] ], ")" ;
-phase-binder      = ( "auto" | type-1 ), identifier,
+phase-binder      = identifier, ":", ( "auto" | type-1 ),
                     [ "=", expression-1 ] ;
 
 specialization-header
@@ -160,7 +160,7 @@ phase-argument-list
                     { ",", phase-argument }, [ "," ] ], ">" ;
 phase-argument    = type-pattern | expression-1 ;
 
-type-pattern      = [ "mod" ], type-pattern-primary, [ "*" | "&" ] ;
+type-pattern      = [ "mod" ], type-pattern-primary, [ "*" | "#" ] ;
 type-pattern-primary
                   = builtin-type
                   | symbol-path, [ phase-argument-list ] ;
@@ -189,7 +189,7 @@ phase2-struct-member
                   | phase-control-item
                   | phase-expression-item ;
 
-let2-decl         = "let2", ( type-1 | "auto" ), [ "mod" ], identifier,
+let2-decl         = "let2", [ "mod" ], identifier, ":", ( type-1 | "auto" ),
                     [ "=", expression-1 ], ";" ;
 global-let2-decl  = let2-decl ;
 
@@ -202,8 +202,8 @@ phase-control-item
 
 phase-if-item     = "if1", "(", expression-1, ")", deferred-body,
                     [ "else", deferred-body ] ;
-phase-for-item    = "for1", "(", "let2", ( type-1 | "auto" ),
-                    [ "mod" ], identifier, ":", expression-1, ")",
+phase-for-item    = "for1", "(", "let2", [ "mod" ], identifier,
+                    ":", ( type-1 | "auto" ), "in", expression-1, ")",
                     deferred-body ;
 phase-while-item  = "while1", "(", expression-1, ")", deferred-body ;
 
@@ -243,22 +243,22 @@ compiler-statement-1
 compiler-block-1  = "{", { compiler-statement-1 }, "}" ;
 compiler-if-statement-1
                   = "if", "(", expression-1, ")",
-                    compiler-statement-1,
-                    [ "else", compiler-statement-1 ] ;
+                    compiler-block-1,
+                    [ "else", ( compiler-block-1 | compiler-if-statement-1 ) ] ;
 compiler-while-statement-1
                   = "while", "(", expression-1, ")",
-                    compiler-statement-1 ;
+                    compiler-block-1 ;
 compiler-for-statement-1
                   = "for", "(", [ expression-1 ], ";",
                     [ expression-1 ], ";", [ expression-1 ], ")",
-                    compiler-statement-1 ;
+                    compiler-block-1 ;
 
 (* ---------- Types ---------- *)
 
-type-0            = [ "mod" ], type-primary-0, [ "*" | "&" ] ;
+type-0            = [ "mod" ], type-primary-0, [ "*" | "#" ] ;
 type-primary-0    = builtin-type | symbol-path ;
 
-type-1            = [ "mod" ], type-primary-1, [ "*" | "&" ] ;
+type-1            = [ "mod" ], type-primary-1, [ "*" | "#" ] ;
 type-primary-1    = builtin-type
                   | symbol-path, [ phase-argument-list ] ;
 
@@ -267,19 +267,27 @@ builtin-type      = "bool" | "c8"
                   | "u8" | "u16" | "u32" | "u64" | "usize"
                   | "f32" | "f64" | "void" | "never" ;
 
-(* A type may end in one optional suffix: * or &. The type-primary rules do
-   not include a suffix, so T**, T*&, T&*, and T&& cannot be parsed.
+(* A type may end in one optional suffix: * or #. The type-primary rules do
+   not include a suffix, so T**, T*#, T#*, and T## cannot be parsed.
+   & is not a type suffix; it remains an expression operator.
    Named HUC0 types never have phase arguments. *)
 
 (* ---------- Parameters and blocks ---------- *)
 
 parameter-list-0  = "(", [ parameter-0,
                     { ",", parameter-0 }, [ "," ] ], ")" ;
-parameter-0       = type-0, [ "mod" ], identifier ;
+parameter-0       = [ "mod" ], identifier, ":", type-0 ;
 
 parameter-list-1  = "(", [ parameter-1,
                     { ",", parameter-1 }, [ "," ] ], ")" ;
-parameter-1       = type-1, [ "mod" ], identifier ;
+parameter-1       = [ "mod" ], identifier, ":", type-1 ;
+
+(* A slot's mod precedes its name; a pointee's mod stays inside the type.
+   Variables and parameters always spell name: type. Inference uses : auto
+   only where the language specification permits it, not an omitted type.
+   Comma-separated lists allow one optional final comma after an item.
+   An empty list has no comma. Conditions, grouped expressions, subscripts,
+   and the single type operand of as/ptr_as/adopt are not such lists. *)
 
 block-0           = "{", { statement-0 }, "}" ;
 statement-0       = block-0
@@ -292,14 +300,14 @@ statement-0       = block-0
                   | "continue", ";"
                   | expression-statement-0 ;
 
-local-let-decl-0  = "let", ( type-0 | "auto" ), [ "mod" ], identifier,
+local-let-decl-0  = "let", [ "mod" ], identifier, ":", ( type-0 | "auto" ),
                     [ "=", expression-0 ], ";" ;
-if-statement-0    = "if", "(", expression-0, ")", statement-0,
-                    [ "else", statement-0 ] ;
-while-statement-0 = "while", "(", expression-0, ")", statement-0 ;
+if-statement-0    = "if", "(", expression-0, ")", block-0,
+                    [ "else", ( block-0 | if-statement-0 ) ] ;
+while-statement-0 = "while", "(", expression-0, ")", block-0 ;
 for-statement-0   = "for", "(", [ expression-0 ], ";",
                     [ expression-0 ], ";", [ expression-0 ], ")",
-                    statement-0 ;
+                    block-0 ;
 return-statement-0
                   = "return", [ expression-0 ], ";" ;
 expression-statement-0
@@ -320,14 +328,14 @@ statement-1       = block-1
                   | "continue", ";"
                   | expression-statement-1 ;
 
-local-let-decl-1  = "let", ( type-1 | "auto" ), [ "mod" ], identifier,
+local-let-decl-1  = "let", [ "mod" ], identifier, ":", ( type-1 | "auto" ),
                     [ "=", expression-1 ], ";" ;
-if-statement-1    = "if", "(", expression-1, ")", statement-1,
-                    [ "else", statement-1 ] ;
-while-statement-1 = "while", "(", expression-1, ")", statement-1 ;
+if-statement-1    = "if", "(", expression-1, ")", block-1,
+                    [ "else", ( block-1 | if-statement-1 ) ] ;
+while-statement-1 = "while", "(", expression-1, ")", block-1 ;
 for-statement-1   = "for", "(", [ expression-1 ], ";",
                     [ expression-1 ], ";", [ expression-1 ], ")",
-                    statement-1 ;
+                    block-1 ;
 return-statement-1
                   = "return", [ expression-1 ], ";" ;
 expression-statement-1
@@ -447,3 +455,11 @@ integer-literal   = ? integer literal token ? ;
 float-literal     = ? floating-point literal token ? ;
 string-literal    = ? UTF-8 string literal token ? ;
 character-literal = ? character or byte literal token ? ;
+
+(* Numeric tokens allow an optional single underscore between adjacent digits
+   valid for that digit sequence's base. This applies to integer, fractional,
+   and exponent digit sequences, but not across a base prefix, decimal point,
+   exponent marker or sign, or type suffix. Separators do not change the value
+   or type. Repeated or trailing separators are errors. See specification 3.2.
+   Whitespace separates tokens but does not select operator roles or blocks;
+   formatting recommendations are not additional grammar rules. *)

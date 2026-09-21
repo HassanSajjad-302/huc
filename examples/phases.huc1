@@ -5,7 +5,7 @@ import std.io as io;
 import2 compiler;
 
 // All let2 storage and every numbered construct disappear in generated HUC0.
-let2 bool BuildDiagnostics = true;
+let2 BuildDiagnostics: bool = true;
 
 // Module-scope phase control inserts a module declaration at this position.
 if1 (BuildDiagnostics) {
@@ -19,29 +19,29 @@ if1 (BuildDiagnostics) {
 // Phase control inside a type selects fields before its runtime layout is checked.
 struct Report {
     if1 (BuildDiagnostics) {
-        let u64 mod messages;
+        let mod messages: u64;
     } else {
-        let u32 mod messages;
+        let mod messages: u32;
     }
 }
 
 // A structure family has one primary, a pointer partial specialization, and a
 // bool full specialization. Requests use angle brackets.
-struct1 Cell(auto T) {
-    let T mod value;
+struct1 Cell(T: auto) {
+    let mod value: T;
 }
 
-struct1 Cell(auto T)<T*>(true) {
-    let T* mod value;
+struct1 Cell(T: auto)<T*>(true) {
+    let mod value: T*;
 }
 
 struct1 Cell()<bool> {
-    let bool mod value;
+    let mod value: bool;
 }
 
-struct1 CountedCell(auto T, usize Count) {
-    let T mod value;
-    let usize count = Count;
+struct1 CountedCell(T: auto, Count: usize) {
+    let mod value: T;
+    let count: usize = Count;
 
     fn capacity() -> usize {
         return this->count;
@@ -49,18 +49,18 @@ struct1 CountedCell(auto T, usize Count) {
 }
 
 // Function families use the same primary/partial/full pattern syntax.
-fn1 describe(auto T)(T value) -> c8* {
+fn1 describe(T: auto)(value: T) -> c8* {
     return "value";
 }
 
-fn1 describe(auto T)<T*>(true)(T* value) -> c8* {
+fn1 describe(T: auto)<T*>(true)(value: T*) -> c8* {
     if (value) {
         return "non-null pointer";
     }
     return "null pointer";
 }
 
-fn1 describe()<bool>(bool value) -> c8* {
+fn1 describe()<bool>(value: bool) -> c8* {
     if (value) {
         return "true";
     }
@@ -69,7 +69,7 @@ fn1 describe()<bool>(bool value) -> c8* {
 
 // The first list contains phase binders; the second contains runtime
 // parameters. if1 selects runtime syntax while ordinary if remains runtime.
-fn1 choose(auto T, bool Greater = true)(T mod left, T mod right) -> T {
+fn1 choose(T: auto, Greater: bool = true)(mod left: T, mod right: T) -> T {
     if1 (Greater) {
         if (left > right) {
             return left;
@@ -84,61 +84,61 @@ fn1 choose(auto T, bool Greater = true)(T mod left, T mod right) -> T {
 }
 
 struct2 BuildRecord {
-    let2 usize generated_declarations;
-    let2 bool used_raw_generation;
+    let2 generated_declarations: usize;
+    let2 used_raw_generation: bool;
 }
 
-fn2 add_at_compile_time(i32 left, i32 right) -> i32 {
-    let2 i32 sum = left + right;
+fn2 add_at_compile_time(left: i32, right: i32) -> i32 {
+    let2 sum: i32 = left + right;
     return sum;
 }
 
 // This compiler helper writes code where it is called, not here beside its
 // definition.
 fn2 declare_local_counter() -> void {
-    compiler::emit_huc("let i32 mod generated_counter = 0;");
+    compiler::emit_huc("let mod generated_counter: i32 = 0;");
 }
 
 // This raw HUC0 declaration is appended to this module's generated buffer.
 @compiler::emit_huc_module(
-    "fn generated_answer() -> i32 { return 42; }"
+    "fn generated_answer() -> i32 { return 42; }",
 );
 
 fn main() -> i32 {
-    let i32 left = 3;
-    let i32 right = 5;
+    let left: i32 = 3;
+    let right: i32 = 5;
 
     // Normal fn1 calls produce and call concrete runtime functions.
-    let i32 greater = choose<i32, true>(left, right);
+    let greater: i32 = choose<i32, true>(left, right);
     io::println(greater);
     io::println(describe<i32>(greater));
 
-    let Cell<i32> mod integer_cell;
+    let mod integer_cell: Cell<i32>;
     integer_cell.value = greater;
 
-    let Cell<i32*> mod pointer_cell;
+    let mod pointer_cell: Cell<i32*>;
     pointer_cell.value = addressof(integer_cell.value);
     io::println(describe<i32*>(pointer_cell.value));
 
-    let Cell<bool> mod bool_cell;
+    let mod bool_cell: Cell<bool>;
     bool_cell.value = true;
     io::println(describe<bool>(bool_cell.value));
 
-    let CountedCell<i32, 4> mod buffer;
+    let mod buffer: CountedCell<i32, 4>;
     buffer.value = left + right;
     io::println(buffer.capacity());
 
     // One variable family can produce different runtime let declarations.
-    let1(auto T) slot {
-        let T slot = T();
+    let1 slot(T: auto) {
+        let slot: T = T();
     }
 
-    let1(auto T)<T*>(true) slot {
-        let T* mod slot = null;
+    let1 slot(T: auto)<T*>(true) {
+        let mod slot: T* = null;
     }
 
-    let1()<bool> slot {
-        let bool mod slot = false;
+    let1 slot()<bool> {
+        let mod slot: bool = false;
     }
 
     io::println(slot<i32>);
@@ -146,8 +146,8 @@ fn main() -> i32 {
     slot<bool> = true;
 
     // @ runs the whole call at compile time and inserts the result as a literal.
-    let i32 folded = @add_at_compile_time(20, 22);
-    let i32 smaller = @choose<i32, false>(3, 5);
+    let folded: i32 = @add_at_compile_time(20, 22);
+    let smaller: i32 = @choose<i32, false>(3, 5);
     io::println(folded + smaller);
 
     // The helper writes its output here in this block. Only the second-round

@@ -23,7 +23,7 @@ The following syntax and behavior describe language rules, not library proposals
 
 - `let`, `let1`, and `let2`;
 - `mod`;
-- `T*` and `T&`;
+- `T*` and `T#`;
 - `addressof` for inline-place observation;
 - `std::slot_of` for unchecked, untyped slot addresses;
 - `fn`, `fn1`, and `fn2`;
@@ -92,7 +92,7 @@ Notable HUC-specific combinations are:
 5. A normal `fn1` call that generates and calls a runtime specialization, while
    the same call prefixed by `@` must run completely at compile time.
 6. Fixed/read-only-by-default declarations, layer-specific `mod`, and a
-   one-word unique owner expressed directly as `T&`.
+   one-word unique owner expressed directly as `T#`.
 
 ## 2. Use-case catalog
 
@@ -160,8 +160,8 @@ same runtime semantics are checked by HUC0.
 module examples.fixed_values;
 
 fn calculate() -> i32 {
-    let i32 base = 40;
-    let i32 mod adjustment = 2;
+    let base: i32 = 40;
+    let mod adjustment: i32 = 2;
 
     adjustment += 1;
     adjustment -= 1;
@@ -183,7 +183,7 @@ but the HUC rule still applies if a backend uses another representation.
 module examples.pointer_permissions;
 
 struct Counter {
-    let i32 mod value;
+    let mod value: i32;
 
     fn init() {
     }
@@ -197,21 +197,21 @@ struct Counter {
     }
 }
 
-fn observe(Counter* counter) -> i32 {
+fn observe(counter: Counter*) -> i32 {
     return counter->read();
 }
 
-fn mutate(mod Counter* counter) -> void {
+fn mutate(counter: mod Counter*) -> void {
     counter->increment();
 }
 
 fn example() -> i32 {
-    let mod Counter& mod owner = new Counter();
+    let mod owner: mod Counter# = new Counter();
 
-    let Counter* fixed_readonly = owner;
-    let mod Counter* fixed_writable = owner;
-    let Counter* mod reseatable_readonly = owner;
-    let mod Counter* mod reseatable_writable = owner;
+    let fixed_readonly: Counter* = owner;
+    let fixed_writable: mod Counter* = owner;
+    let mod reseatable_readonly: Counter* = owner;
+    let mod reseatable_writable: mod Counter* = owner;
 
     mutate(fixed_writable);
     reseatable_readonly = null;
@@ -226,8 +226,8 @@ This returns `2`.
 
 Important distinctions:
 
-- The leading `mod` controls access to the pointee.
-- The trailing `mod` controls the pointer or owner slot.
+- `mod` inside the type controls access to the pointee.
+- `mod` before the binding name controls the pointer or owner slot.
 - Observing an owner as a raw pointer does not relocate it.
 - None of the raw pointers keep the `Counter` alive.
 
@@ -235,8 +235,8 @@ Address-taking for inline storage is explicit and never overloadable:
 
 ```huc
 fn inline_address_example() -> i32 {
-    let Counter mod counter = Counter();
-    let mod Counter* observer = addressof(counter);
+    let mod counter: Counter = Counter();
+    let observer: mod Counter* = addressof(counter);
     observer->increment();
     return counter.read();
 }
@@ -252,9 +252,9 @@ Untyped slot addresses are a separate, unchecked facility:
 
 ```huc
 fn owner_slot_address_example() -> void {
-    let Counter& mod owner = new Counter();
-    let usize address = std::slot_of(owner);
-    let mod u8* bytes = ptr_as<mod u8*>(address);
+    let mod owner: Counter# = new Counter();
+    let address: usize = std::slot_of(owner);
+    let bytes: mod u8* = ptr_as<mod u8*>(address);
     // bytes addresses the owner word's representation, not the Counter.
     // Taking these addresses does not transfer ownership.
 }
@@ -265,7 +265,7 @@ reference or automatic lifecycle handling. Taking a fixed slot's address is
 also permitted; writing actually fixed storage remains undefined behavior,
 without compiler permission tracking through the integer and cast. The caller
 is responsible for storage lifetime, alignment, representation, and ownership
-rules. This does not make `Counter&*` a valid type.
+rules. This does not make `Counter#*` a valid type.
 
 ### 3.3 Observation and consumption
 
@@ -273,9 +273,9 @@ rules. This does not make `Counter&*` a valid type.
 module examples.consume;
 
 struct FileHandle {
-    let i32 mod native;
+    let mod native: i32;
 
-    fn init(i32 native) : native(native) {
+    fn init(native: i32) : native(native) {
     }
 
     fn valid() -> bool {
@@ -290,21 +290,21 @@ struct FileHandle {
     }
 }
 
-fn inspect(FileHandle* file) -> bool {
+fn inspect(file: FileHandle*) -> bool {
     return file->valid();
 }
 
-fn consume(FileHandle& file) -> void {
+fn consume(file: FileHandle#) -> void {
     // file owns the allocation for the duration of this call.
     if (file) {
         probable_log_file(file);
     }
 } // file and its pointee are destroyed here
 
-fn run(i32 native) -> bool {
-    let FileHandle& mod file = new FileHandle(native);
-    let bool was_valid = inspect(file); // observation
-    consume(file);                      // owner relocation; file becomes null
+fn run(native: i32) -> bool {
+    let mod file: FileHandle# = new FileHandle(native);
+    let was_valid: bool = inspect(file); // observation
+    consume(file); // owner relocation; file becomes null
     return was_valid;
 }
 ```
@@ -322,16 +322,16 @@ a saved pointer after `consume` would be undefined behavior.
 module examples.tree;
 
 struct Node {
-    let i32 value;
-    let Node& mod left;
-    let Node& mod right;
+    let value: i32;
+    let mod left: Node#;
+    let mod right: Node#;
 
-    fn init(i32 value) : value(value) {
+    fn init(value: i32) : value(value) {
         // left and right default to null.
     }
 
     fn sum() -> i32 {
-        let i32 mod result = this->value;
+        let mod result: i32 = this->value;
 
         if (this->left) {
             result += this->left->sum();
@@ -346,14 +346,14 @@ struct Node {
 }
 
 fn make_tree() -> Node {
-    let Node mod root = Node(10);
+    let mod root: Node = Node(10);
     root.left = new Node(20);
     root.right = new Node(30);
     return root; // fixed destructive relocation
 }
 
 fn run() -> i32 {
-    let Node tree = make_tree();
+    let tree: Node = make_tree();
     return tree.sum();
 }
 ```
@@ -379,15 +379,15 @@ count or tracing collector is involved.
 module examples.tree_copy;
 
 struct Node {
-    let i32 value;
-    let Node& mod left;
-    let Node& mod right;
+    let value: i32;
+    let mod left: Node#;
+    let mod right: Node#;
 
-    fn init(i32 value) : value(value) {
+    fn init(value: i32) : value(value) {
     }
 
     fn clone() -> Node {
-        let Node mod result = Node(this->value);
+        let mod result: Node = Node(this->value);
 
         if (this->left) {
             result.left = copy this->left;
@@ -401,7 +401,7 @@ struct Node {
     }
 }
 
-fn duplicate(Node* source) -> Node {
+fn duplicate(source: Node*) -> Node {
     return copy *source;
 }
 ```
@@ -423,14 +423,15 @@ keep the same address, not clone the object it points to.
 module examples.configuration;
 
 struct Configuration {
-    let i32 port;
-    let bool secure;
-    let i32 mod accepted_connections;
-    let u8* mod scratch;
+    let port: i32;
+    let secure: bool;
+    let mod accepted_connections: i32;
+    let mod scratch: u8*;
 
-    fn init(i32 port, bool secure)
+    fn init(port: i32, secure: bool)
         : port(port),
-          secure(secure) {
+          secure(secure),
+    {
         // accepted_connections becomes 0.
         // scratch becomes null.
     }
@@ -459,12 +460,13 @@ module examples.texture;
 import std.memory as memory;
 
 struct PixelBuffer {
-    let mod u8* mod bytes;
-    let usize size;
+    let mod bytes: mod u8*;
+    let size: usize;
 
-    fn init(usize size)
+    fn init(size: usize)
         : bytes(memory::allocate_raw_bytes(size)),
-          size(size) {
+          size(size),
+    {
     }
 
     fn drop() mod -> void {
@@ -474,12 +476,13 @@ struct PixelBuffer {
 }
 
 struct Texture {
-    let u32 mod gpu_id;
-    let PixelBuffer staging;
+    let mod gpu_id: u32;
+    let staging: PixelBuffer;
 
-    fn init(u32 gpu_id, PixelBuffer mod staging)
+    fn init(gpu_id: u32, mod staging: PixelBuffer)
         : gpu_id(gpu_id),
-          staging(staging) {
+          staging(staging),
+    {
     }
 
     fn drop() mod -> void {
@@ -522,7 +525,7 @@ There is no user move constructor, move-assignment operator, or relocation
 hook. Relocation assignment first cleans an active destination and then applies
 the same fixed operation. Exact self-relocation assignment is a no-op.
 
-Direct `T&` relocation is the primitive exception to the otherwise
+Direct `T#` relocation is the primitive exception to the otherwise
 inactive-source rule. Relocating an owner slot transfers its one address and
 leaves the source as an active, usable null owner. This makes conditional owner
 consumption practical without a borrow checker. It also applies to an owner
@@ -533,18 +536,19 @@ structure relocation.
 module examples.native_lease;
 
 struct NativeLease {
-    let i32 mod handle;
-    let u64 identity;
+    let mod handle: i32;
+    let identity: u64;
 
-    fn init(i32 handle, u64 identity)
+    fn init(handle: i32, identity: u64)
         : handle(handle),
-          identity(identity) {
+          identity(identity),
+    {
     }
 
     fn clone() -> NativeLease {
         return NativeLease(
             probable_duplicate_handle(this->handle),
-            this->identity
+            this->identity,
         );
     }
 
@@ -557,21 +561,21 @@ struct NativeLease {
 }
 
 fn lifecycle() -> void {
-    let NativeLease mod original = NativeLease(
+    let mod original: NativeLease = NativeLease(
         probable_open_handle(),
-        1001
+        1001,
     );
 
-    let NativeLease duplicate = copy original; // calls clone
-    let NativeLease relocated = original;       // destructive relocation
+    let duplicate: NativeLease = copy original; // calls clone
+    let relocated: NativeLease = original; // destructive relocation
     // original is inactive; relocated holds the original handle.
 
-    let NativeLease mod current = NativeLease(
+    let mod current: NativeLease = NativeLease(
         probable_open_handle(),
-        2002
+        2002,
     );
     current = copy duplicate; // clone, drop current, relocate the temporary
-    current = current;        // exact self-relocation is a no-op
+    current = current; // exact self-relocation is a no-op
 }
 ```
 
@@ -643,7 +647,7 @@ whose destructor will run later; the example must therefore exchange the
 source handle with `-1`. HUC destructive relocation ends the source lifetime
 and skips source cleanup. Using the inactive HUC source is undefined
 behavior, apart from the specified null-source behavior of a directly
-relocated `T&`.
+relocated `T#`.
 
 HUC makes the potentially expensive copy explicit and fixes relocation
 behavior instead of selecting user code through C++ value categories. The
@@ -668,12 +672,13 @@ implicitly copied. Its constructor establishes a self-pointer:
 module examples.address_dependent;
 
 struct SelfIndexed {
-    let SelfIndexed* mod self;
-    let u64 key;
+    let mod self: SelfIndexed*;
+    let key: u64;
 
-    fn init(u64 key)
+    fn init(key: u64)
         : self(null),
-          key(key) {
+          key(key),
+    {
         this->self = this;
     }
 
@@ -687,8 +692,8 @@ struct SelfIndexed {
 }
 
 fn unsafe_inline_relocation() -> u64 {
-    let SelfIndexed mod original = SelfIndexed(42);
-    let SelfIndexed relocated = original; // fixed destructive relocation
+    let mod original: SelfIndexed = SelfIndexed(42);
+    let relocated: SelfIndexed = original; // fixed destructive relocation
 
     // relocated.self still points at original's now-inactive storage.
     // Dereferencing it is undefined behavior.
@@ -707,15 +712,15 @@ owner:
 
 ```huc
 fn safe_owner_relocation() -> u64 {
-    let SelfIndexed& mod original = new SelfIndexed(42);
-    let SelfIndexed& relocated = original;
+    let mod original: SelfIndexed# = new SelfIndexed(42);
+    let relocated: SelfIndexed# = original;
 
     // original is a usable null owner. The allocation kept its address.
     return relocated->read_key_through_self();
 }
 ```
 
-Here the `T&` source becomes null, but the `SelfIndexed` pointee remains at the
+Here the `T#` source becomes null, but the `SelfIndexed` pointee remains at the
 address where `init` stored `this`. The pointee is destroyed exactly once when
 `relocated` leaves scope.
 
@@ -729,9 +734,9 @@ owners instead:
 import std.collections as collections;
 
 fn make_stable_index()
-    -> collections::Vector<SelfIndexed&> {
-    let collections::Vector<SelfIndexed&> mod values =
-        collections::Vector<SelfIndexed&>();
+    -> collections::Vector<SelfIndexed#> {
+    let mod values: collections::Vector<SelfIndexed#> =
+        collections::Vector<SelfIndexed#>();
 
     values.push(new SelfIndexed(10));
     values.push(new SelfIndexed(20));
@@ -740,7 +745,7 @@ fn make_stable_index()
 }
 ```
 
-The vector may relocate its `T&` elements, but each relocation transfers only
+The vector may relocate its `T#` elements, but each relocation transfers only
 an owned address and leaves each pointee at the same location.
 `Vector<SelfIndexed*>` does not provide the same ownership: `T*` does not keep
 its pointee alive.
@@ -757,7 +762,7 @@ semantics will be designed later.
 A fixed inline slot can be used only when the value is constructed directly in
 its final storage and no later path relocates, reorders, returns, or captures it
 by value. Mutable address-dependent values are therefore normally clearer as
-`T&`. A future user-defined relocation hook should be considered only if real
+`T#`. A future user-defined relocation hook should be considered only if real
 address-repair use cases prove that explicit stable ownership is inadequate.
 
 ### 3.10 Left-to-right evaluation
@@ -765,20 +770,20 @@ address-repair use cases prove that explicit stable ownership is inadequate.
 ```huc
 module examples.order;
 
-let i32 mod trace;
+let mod trace: i32;
 
-fn next(i32 digit) -> i32 {
+fn next(digit: i32) -> i32 {
     trace = trace * 10 + digit;
     return digit;
 }
 
-fn combine(i32 a, i32 b, i32 c) -> i32 {
+fn combine(a: i32, b: i32, c: i32) -> i32 {
     return a * 100 + b * 10 + c;
 }
 
 fn run() -> i32 {
     trace = 0;
-    let i32 result = combine(next(1), next(2), next(3));
+    let result: i32 = combine(next(1), next(2), next(3));
 
     if (trace != 123) {
         return -1;
@@ -807,14 +812,14 @@ int32_t result = combine(huc_arg0, huc_arg1, huc_arg2);
 module examples.double_relocation;
 
 struct Item {
-    let i32 value;
+    let value: i32;
 
-    fn init(i32 value) : value(value) {
+    fn init(value: i32) : value(value) {
     }
 }
 
-fn take(Item& first, Item& second) -> i32 {
-    let i32 mod result = 0;
+fn take(first: Item#, second: Item#) -> i32 {
+    let mod result: i32 = 0;
 
     if (first) {
         result += first->value;
@@ -828,7 +833,7 @@ fn take(Item& first, Item& second) -> i32 {
 }
 
 fn run() -> i32 {
-    let Item& mod item = new Item(7);
+    let mod item: Item# = new Item(7);
     return take(item, item);
 }
 ```
@@ -843,15 +848,15 @@ left-to-right rule rather than by backend argument ordering.
 module examples.conditional_relocation;
 
 struct Job {
-    let i32 id;
-    fn init(i32 id) : id(id) {}
+    let id: i32;
+    fn init(id: i32) : id(id) {}
 }
 
-fn consume(Job& job) -> void {
+fn consume(job: Job#) -> void {
 }
 
-fn run(bool transfer) -> i32 {
-    let Job& mod job = new Job(9);
+fn run(transfer: bool) -> i32 {
+    let mod job: Job# = new Job(9);
 
     if (transfer) {
         consume(job);
@@ -882,42 +887,44 @@ import std.result as result;
 import std.text as text;
 
 struct CopyStats {
-    let usize mod bytes;
-    let usize mod chunks;
+    let mod bytes: usize;
+    let mod chunks: usize;
 
     fn init() {
     }
 
-    fn add(usize count) mod -> void {
+    fn add(count: usize) mod -> void {
         this->bytes += count;
         this->chunks += 1;
     }
 }
 
-fn copy_stream(fs::Reader& input, fs::Writer& output)
+fn copy_stream(input: fs::Reader#, output: fs::Writer#)
     -> result::Result<CopyStats, fs::Error> {
-    let CopyStats mod stats = CopyStats();
-    let fs::Buffer mod buffer = fs::Buffer(64 * 1024);
+    let mod stats: CopyStats = CopyStats();
+    let mod buffer: fs::Buffer = fs::Buffer(64 * 1024);
 
     while (true) {
-        let result::Result<usize, fs::Error> mod count =
+        let mod count: result::Result<usize, fs::Error> =
             input->read(buffer.writable_bytes());
 
         if (count.is_error()) {
             return result::Result<CopyStats, fs::Error>::error(
-                count.take_error());
+                count.take_error(),
+            );
         }
 
         if (count.value() == 0) {
             break;
         }
 
-        let result::Result<void, fs::Error> mod written =
+        let mod written: result::Result<void, fs::Error> =
             output->write_all(buffer.bytes(0, count.value()));
 
         if (written.is_error()) {
             return result::Result<CopyStats, fs::Error>::error(
-                written.take_error());
+                written.take_error(),
+            );
         }
 
         stats.add(count.value());
@@ -926,8 +933,8 @@ fn copy_stream(fs::Reader& input, fs::Writer& output)
     return result::Result<CopyStats, fs::Error>::value(stats);
 }
 
-fn run(text::Text source, text::Text destination) -> i32 {
-    let result::Result<fs::Reader&, fs::Error> mod opened_input =
+fn run(source: text::Text, destination: text::Text) -> i32 {
+    let mod opened_input: result::Result<fs::Reader#, fs::Error> =
         fs::open_reader(source);
 
     if (opened_input.is_error()) {
@@ -935,9 +942,9 @@ fn run(text::Text source, text::Text destination) -> i32 {
         return 1;
     }
 
-    let fs::Reader& mod input = opened_input.take_value();
+    let mod input: fs::Reader# = opened_input.take_value();
 
-    let result::Result<fs::Writer&, fs::Error> mod opened_output =
+    let mod opened_output: result::Result<fs::Writer#, fs::Error> =
         fs::create_writer(destination);
 
     if (opened_output.is_error()) {
@@ -945,8 +952,8 @@ fn run(text::Text source, text::Text destination) -> i32 {
         return 1;
     }
 
-    let fs::Writer& mod output = opened_output.take_value();
-    let result::Result<CopyStats, fs::Error> copied =
+    let mod output: fs::Writer# = opened_output.take_value();
+    let copied: result::Result<CopyStats, fs::Error> =
         copy_stream(input, output);
 
     if (copied.is_error()) {
@@ -979,7 +986,7 @@ The standard-library API is not settled, but its ownership behavior is clear:
 ```huc
 module examples.platform_clock;
 
-let2 bool use_monotonic_clock = true;
+let2 use_monotonic_clock: bool = true;
 
 if1 (use_monotonic_clock) {
     fn platform_ticks() -> u64 {
@@ -1010,23 +1017,24 @@ runtime.
 ```huc
 module examples.packet_header;
 
-let2 bool compact_header = true;
+let2 compact_header: bool = true;
 
 struct PacketHeader {
-    let u16 kind;
+    let kind: u16;
 
     if1 (compact_header) {
-        let u16 length;
+        let length: u16;
     } else {
-        let u64 length;
-        let u32 checksum;
+        let length: u64;
+        let checksum: u32;
     }
 
     fn init(
-        u16 kind,
-        if1 (compact_header) u16 else u64 length
+        kind: u16,
+        length: if1 (compact_header) u16 else u64,
     ) : kind(kind),
-        length(length) {
+        length(length),
+    {
         if1 (!compact_header) {
             this->checksum = 0;
         }
@@ -1040,22 +1048,24 @@ two selected constructor declarations:
 
 ```huc
 struct PacketHeader {
-    let u16 kind;
+    let kind: u16;
 
     if1 (compact_header) {
-        let u16 length;
+        let length: u16;
 
-        fn init(u16 kind, u16 length)
+        fn init(kind: u16, length: u16)
             : kind(kind),
-              length(length) {
+              length(length),
+        {
         }
     } else {
-        let u64 length;
-        let u32 mod checksum;
+        let length: u64;
+        let mod checksum: u32;
 
-        fn init(u16 kind, u64 length)
+        fn init(kind: u16, length: u64)
             : kind(kind),
-              length(length) {
+              length(length),
+        {
         }
     }
 }
@@ -1065,12 +1075,13 @@ Compact HUC0:
 
 ```huc
 struct PacketHeader {
-    let u16 kind;
-    let u16 length;
+    let kind: u16;
+    let length: u16;
 
-    fn init(u16 kind, u16 length)
+    fn init(kind: u16, length: u16)
         : kind(kind),
-          length(length) {
+          length(length),
+    {
     }
 }
 ```
@@ -1083,7 +1094,7 @@ fields, and architecture-dependent layouts.
 ```huc
 module examples.opaque_branch;
 
-let2 bool building_linux = true;
+let2 building_linux: bool = true;
 
 if1 (building_linux) {
     fn platform_name() -> c8* {
@@ -1110,7 +1121,7 @@ fails until it is replaced with valid HUC.
 ```huc
 module examples.generated_probes;
 
-let2 usize mod index = 0;
+let2 mod index: usize = 0;
 
 while1 (index < 2) {
     if1 (index == 0) {
@@ -1153,10 +1164,10 @@ accept it.
 ```huc
 module examples.sum_constants;
 
-fn1 sum_constants(i32... Values)() -> i32 {
-    let i32 mod result = 0;
+fn1 sum_constants(Values: i32...)() -> i32 {
+    let mod result: i32 = 0;
 
-    for1 (let2 i32 value : Values) {
+    for1 (let2 value: i32 in Values) {
         result += value;
     }
 
@@ -1172,7 +1183,7 @@ Illustrative HUC0:
 
 ```huc
 fn __huc_sum_constants_10_20_12() -> i32 {
-    let i32 mod result = 0;
+    let mod result: i32 = 0;
     result += 10;
     result += 20;
     result += 12;
@@ -1193,10 +1204,10 @@ Pack syntax is planned but should be implemented after fixed-arity families.
 ```huc
 module examples.storage;
 
-struct1 Storage(auto T) {
-    let T value;
+struct1 Storage(T: auto) {
+    let value: T;
 
-    fn init(T mod value) : value(value) {
+    fn init(mod value: T) : value(value) {
     }
 
     fn get() -> T* {
@@ -1204,10 +1215,10 @@ struct1 Storage(auto T) {
     }
 }
 
-struct1 Storage(auto T)<T*> {
-    let T* value;
+struct1 Storage(T: auto)<T*> {
+    let value: T*;
 
-    fn init(T* value) : value(value) {
+    fn init(value: T*) : value(value) {
     }
 
     fn get() -> T* {
@@ -1216,9 +1227,9 @@ struct1 Storage(auto T)<T*> {
 }
 
 struct1 Storage()<u8> {
-    let u8 value;
+    let value: u8;
 
-    fn init(u8 value) : value(value) {
+    fn init(value: u8) : value(value) {
     }
 
     fn get() -> u8 {
@@ -1237,9 +1248,9 @@ struct1 Storage()<u8> {
 Requests:
 
 ```huc
-let Storage<i32> number = Storage<i32>(42);       // primary
-let Storage<i32*> pointer = Storage<i32*>(null);  // partial
-let Storage<u8> byte = Storage<u8>(15);           // full
+let number: Storage<i32> = Storage<i32>(42); // primary
+let pointer: Storage<i32*> = Storage<i32*>(null); // partial
+let byte: Storage<u8> = Storage<u8>(15); // full
 ```
 
 The full specialization wins over the primary for `u8`; the pointer pattern
@@ -1251,15 +1262,15 @@ This example assumes a probable library `InlineArray<T, N>` family; primitive
 `[N]T` arrays are deferred from HUC 0.1.
 
 ```huc
-struct1 Buffer(auto T, usize N) {
-    let InlineArray<T, N> mod values;
+struct1 Buffer(T: auto, N: usize) {
+    let mod values: InlineArray<T, N>;
 
     fn init() {
     }
 }
 
-struct1 Buffer(auto T, usize N)<T*, N>(N <= 16) {
-    let InlineArray<T*, N> mod values;
+struct1 Buffer(T: auto, N: usize)<T*, N>(N <= 16) {
+    let mod values: InlineArray<T*, N>;
 
     fn init() {
     }
@@ -1275,11 +1286,11 @@ pattern outrank another pattern that is structurally more specific.
 ```huc
 module examples.hash;
 
-fn1 hash_value(auto T)(T value) -> u64 {
+fn1 hash_value(T: auto)(value: T) -> u64 {
     return probable_hash_bytes(addressof(value), size_of<T>());
 }
 
-fn1 hash_value(auto T)<T*>(T* value) -> u64 {
+fn1 hash_value(T: auto)<T*>(value: T*) -> u64 {
     if (!value) {
         return 0;
     }
@@ -1287,9 +1298,9 @@ fn1 hash_value(auto T)<T*>(T* value) -> u64 {
     return probable_hash_bytes(value, size_of<T>());
 }
 
-fn run(i32 value, i32* pointer) -> u64 {
-    let u64 first = hash_value(value);    // T deduced as i32
-    let u64 second = hash_value(pointer); // pointer partial selected
+fn run(value: i32, pointer: i32*) -> u64 {
+    let first: u64 = hash_value(value); // T deduced as i32
+    let second: u64 = hash_value(pointer); // pointer partial selected
     return first ^ second;
 }
 ```
@@ -1305,26 +1316,26 @@ model for `fn1` and `struct1`.
 module examples.specialized_slot;
 
 struct Widget {
-    let i32 id;
-    fn init(i32 id) : id(id) {}
+    let id: i32;
+    fn init(id: i32) : id(id) {}
 }
 
 fn run() -> i32 {
-    let1(auto T) slot {
-        let T slot = T();
+    let1 slot(T: auto) {
+        let slot: T = T();
     }
 
-    let1(auto T)<T*> slot {
-        let T* mod slot = null;
+    let1 slot(T: auto)<T*> {
+        let mod slot: T* = null;
     }
 
-    let1()<Widget> slot {
-        let Widget& mod slot = new Widget(99);
+    let1 slot()<Widget> {
+        let mod slot: Widget# = new Widget(99);
     }
 
-    let i32 first = slot<i32>;
-    let Widget* second = slot<Widget*>;
-    let i32 third = slot<Widget>->id;
+    let first: i32 = slot<i32>;
+    let second: Widget* = slot<Widget*>;
+    let third: i32 = slot<Widget>->id;
 
     if (second) {
         return -1;
@@ -1337,20 +1348,20 @@ fn run() -> i32 {
 Illustrative HUC0 at the family declaration site:
 
 ```huc
-let i32 __huc_slot_i32 = i32();
-let Widget* mod __huc_slot_Widget_ptr = null;
-let Widget& mod __huc_slot_Widget = new Widget(99);
+let __huc_slot_i32: i32 = i32();
+let mod __huc_slot_Widget_ptr: Widget* = null;
+let mod __huc_slot_Widget: Widget# = new Widget(99);
 
-let i32 first = __huc_slot_i32;
-let Widget* second = __huc_slot_Widget_ptr;
-let i32 third = __huc_slot_Widget->id;
+let first: i32 = __huc_slot_i32;
+let second: Widget* = __huc_slot_Widget_ptr;
+let third: i32 = __huc_slot_Widget->id;
 ```
 
 The same family name can produce:
 
 - an inline `i32`;
 - a raw `Widget*`;
-- an owning `Widget&`.
+- an owning `Widget#`.
 
 This is one of HUC’s most unusual direct facilities. C++ variable templates can
 also be explicitly/partially specialized, but HUC integrates the selected
@@ -1360,12 +1371,12 @@ materialization into the same numbered model.
 ### 5.5 `let1` selecting mutability
 
 ```huc
-fn configure(bool writable) -> void {
-    let1(bool Writable) setting {
+fn configure(writable: bool) -> void {
+    let1 setting(Writable: bool) {
         if1 (Writable) {
-            let i32 mod setting;
+            let mod setting: i32;
         } else {
-            let i32 setting = 7;
+            let setting: i32 = 7;
         }
     }
 
@@ -1386,12 +1397,12 @@ phase-2 input in the finalized grammar.
 A correct family form is:
 
 ```huc
-fn1 configure(bool Writable)() -> void {
-    let1(bool Choice) setting {
+fn1 configure(Writable: bool)() -> void {
+    let1 setting(Choice: bool) {
         if1 (Choice) {
-            let i32 mod setting;
+            let mod setting: i32;
         } else {
-            let i32 setting = 7;
+            let setting: i32 = 7;
         }
     }
 
@@ -1413,11 +1424,11 @@ The invalid first version is retained deliberately to show the phase boundary.
 ```huc
 module examples.biased_add;
 
-fn1 biased_add(i32 Bias)(i32 left, i32 right) -> i32 {
+fn1 biased_add(Bias: i32)(left: i32, right: i32) -> i32 {
     return left + right + Bias;
 }
 
-fn runtime_case(i32 left, i32 right) -> i32 {
+fn runtime_case(left: i32, right: i32) -> i32 {
     return biased_add<5>(left, right);
 }
 
@@ -1429,11 +1440,11 @@ fn compile_case() -> i32 {
 HUC0:
 
 ```huc
-fn __huc_biased_add_5(i32 left, i32 right) -> i32 {
+fn __huc_biased_add_5(left: i32, right: i32) -> i32 {
     return left + right + 5;
 }
 
-fn runtime_case(i32 left, i32 right) -> i32 {
+fn runtime_case(left: i32, right: i32) -> i32 {
     return __huc_biased_add_5(left, right);
 }
 
@@ -1454,7 +1465,7 @@ phase-value materialization, not as a HUC 0.1 primitive.
 ```huc
 module examples.phase_helper;
 
-fn2 clamp_build_value(i32 value, i32 low, i32 high) -> i32 {
+fn2 clamp_build_value(value: i32, low: i32, high: i32) -> i32 {
     if (value < low) {
         return low;
     }
@@ -1466,10 +1477,10 @@ fn2 clamp_build_value(i32 value, i32 low, i32 high) -> i32 {
     return value;
 }
 
-let2 i32 selected_capacity = @clamp_build_value(1000, 16, 256);
+let2 selected_capacity: i32 = @clamp_build_value(1000, 16, 256);
 
 struct Cache {
-    let InlineArray<u8, selected_capacity> mod bytes;
+    let mod bytes: InlineArray<u8, selected_capacity>;
 }
 ```
 
@@ -1489,7 +1500,7 @@ module examples.callsite_emit;
 import2 compiler;
 
 fn2 declare_counter() -> void {
-    compiler::emit_huc("let i32 mod generated_counter;");
+    compiler::emit_huc("let mod generated_counter: i32;");
 }
 
 fn run() -> i32 {
@@ -1505,7 +1516,7 @@ Generated HUC0:
 module examples.callsite_emit;
 
 fn run() -> i32 {
-    let i32 mod generated_counter;
+    let mod generated_counter: i32;
     generated_counter = 42;
     return generated_counter;
 }
@@ -1523,7 +1534,8 @@ import2 compiler;
 
 fn2 generate_health_check() -> void {
     compiler::emit_huc_module(
-        "fn health_check() -> i32 { return 200; }");
+        "fn health_check() -> i32 { return 200; }",
+    );
 }
 
 @generate_health_check();
@@ -1546,7 +1558,8 @@ into an already checked foreign module.
 
 ```huc
 @compiler::emit_huc_module(
-    "if1 (true) { fn illegal() -> i32 { return 1; } }");
+    "if1 (true) { fn illegal() -> i32 { return 1; } }",
+);
 ```
 
 The HUC1 translator writes the string without parsing it. The HUC0 translator
@@ -1577,28 +1590,30 @@ module case_studies.small_vector;
 import std.memory as memory;
 import std.io as io;
 
-struct1 HeapArray(auto T) {
-    let mod T* mod values;
-    let usize capacity;
+struct1 HeapArray(T: auto) {
+    let mod values: mod T*;
+    let capacity: usize;
 
-    fn init(usize capacity)
+    fn init(capacity: usize)
         : values(memory::allocate_raw_items<T>(capacity)),
-          capacity(capacity) {
+          capacity(capacity),
+    {
     }
 
     fn drop() mod -> void {
         memory::free_raw_items<T>(
             this->values,
-            this->capacity);
+            this->capacity,
+        );
         this->values = null;
     }
 }
 
-struct1 SmallVector(auto T, usize Inline) {
-    let InlineArray<T, Inline> mod inline_values;
-    let HeapArray<T>& mod heap_values;
-    let usize mod size;
-    let usize mod capacity;
+struct1 SmallVector(T: auto, Inline: usize) {
+    let mod inline_values: InlineArray<T, Inline>;
+    let mod heap_values: HeapArray<T>#;
+    let mod size: usize;
+    let mod capacity: usize;
 
     fn init()
         : capacity(Inline) {
@@ -1624,20 +1639,20 @@ struct1 SmallVector(auto T, usize Inline) {
         return addressof(this->inline_values[0]);
     }
 
-    fn reserve(usize requested) mod -> void {
+    fn reserve(requested: usize) mod -> void {
         if (requested <= this->capacity) {
             return;
         }
 
-        let usize mod next_capacity = this->capacity * 2;
+        let mod next_capacity: usize = this->capacity * 2;
         if (next_capacity < requested) {
             next_capacity = requested;
         }
 
-        let HeapArray<T>& mod replacement =
+        let mod replacement: HeapArray<T># =
             new HeapArray<T>(next_capacity);
 
-        let usize mod index = 0;
+        let mod index: usize = 0;
         while (index < this->size) {
             replacement->values[index] = this->data_mut()[index];
             index += 1;
@@ -1647,47 +1662,47 @@ struct1 SmallVector(auto T, usize Inline) {
         this->capacity = next_capacity;
     }
 
-    fn push(T mod value) mod -> void {
+    fn push(mod value: T) mod -> void {
         this->reserve(this->size + 1);
         this->data_mut()[this->size] = value;
         this->size += 1;
     }
 
-    fn get(usize index) -> T* {
+    fn get(index: usize) -> T* {
         // Bounds remain unchecked in the core language.
         return addressof(this->data()[index]);
     }
 
 }
 
-struct1 SmallVector(auto T, usize Inline)<T*, Inline>(Inline <= 4) {
-    let InlineArray<T*, Inline> mod values;
-    let usize mod size;
+struct1 SmallVector(T: auto, Inline: usize)<T*, Inline>(Inline <= 4) {
+    let mod values: InlineArray<T*, Inline>;
+    let mod size: usize;
 
     fn init() {
     }
 
-    fn push(T* value) mod -> void {
+    fn push(value: T*) mod -> void {
         // This compact specialization deliberately has no spill path.
         // Writing past Inline is undefined in the unchecked profile.
         this->values[this->size] = value;
         this->size += 1;
     }
 
-    fn get(usize index) -> T* {
+    fn get(index: usize) -> T* {
         return this->values[index];
     }
 }
 
 fn run() -> i32 {
-    let SmallVector<i32, 8> mod numbers =
+    let mod numbers: SmallVector<i32, 8> =
         SmallVector<i32, 8>();
 
     numbers.push(10);
     numbers.push(20);
     numbers.push(12);
 
-    let SmallVector<i32*, 4> mod pointers =
+    let mod pointers: SmallVector<i32*, 4> =
         SmallVector<i32*, 4>();
 
     pointers.push(numbers.get(0));
@@ -1720,45 +1735,51 @@ module case_studies.uart_registers;
 import2 compiler;
 
 struct2 RegisterSpec {
-    let2 compiler::Text name;
-    let2 usize offset;
-    let2 bool writable;
+    let2 name: compiler::Text;
+    let2 offset: usize;
+    let2 writable: bool;
 
     fn2 init(
-        compiler::Text name,
-        usize offset,
-        bool writable)
+        name: compiler::Text,
+        offset: usize,
+        writable: bool,
+    )
         : name(name),
           offset(offset),
-          writable(writable) {
+          writable(writable),
+    {
     }
 }
 
-fn2 emit_register(RegisterSpec spec) -> void {
+fn2 emit_register(spec: RegisterSpec) -> void {
     if (spec.writable) {
         compiler::emit_huc_module(
             compiler::format(
-                "fn write_{0}(mod u32* base, u32 value) -> void { "
+                "fn write_{0}(base: mod u32*, value: u32) -> void { "
                 "base[{1}] = value; "
                 "}",
                 spec.name,
-                spec.offset / 4));
+                spec.offset / 4,
+            ),
+        );
     }
 
     compiler::emit_huc_module(
         compiler::format(
-            "fn read_{0}(u32* base) -> u32 { "
+            "fn read_{0}(base: u32*) -> u32 { "
             "return base[{1}]; "
             "}",
             spec.name,
-            spec.offset / 4));
+            spec.offset / 4,
+        ),
+    );
 }
 
 @emit_register(RegisterSpec("status", 0x00, false));
 @emit_register(RegisterSpec("control", 0x04, true));
 @emit_register(RegisterSpec("baud", 0x08, true));
 
-fn initialize_uart(mod u32* base, u32 baud) -> void {
+fn initialize_uart(base: mod u32*, baud: u32) -> void {
     write_control(base, 0);
     write_baud(base, baud);
     write_control(base, 1);
@@ -1768,23 +1789,23 @@ fn initialize_uart(mod u32* base, u32 baud) -> void {
 Expected generated declarations conceptually include:
 
 ```huc
-fn read_status(u32* base) -> u32 {
+fn read_status(base: u32*) -> u32 {
     return base[0];
 }
 
-fn write_control(mod u32* base, u32 value) -> void {
+fn write_control(base: mod u32*, value: u32) -> void {
     base[1] = value;
 }
 
-fn read_control(u32* base) -> u32 {
+fn read_control(base: u32*) -> u32 {
     return base[1];
 }
 
-fn write_baud(mod u32* base, u32 value) -> void {
+fn write_baud(base: mod u32*, value: u32) -> void {
     base[2] = value;
 }
 
-fn read_baud(u32* base) -> u32 {
+fn read_baud(base: u32*) -> u32 {
     return base[2];
 }
 ```
@@ -1814,58 +1835,61 @@ import std.io as io;
 import std.net as net;
 import std.result as result;
 
-let2 bool protocol_has_checksum = true;
+let2 protocol_has_checksum: bool = true;
 
-struct1 WireInteger(usize Bits) {
+struct1 WireInteger(Bits: usize) {
     if1 (Bits == 8) {
-        let u8 value;
-        fn init(u8 value) : value(value) {}
+        let value: u8;
+        fn init(value: u8) : value(value) {}
     } else {
         if1 (Bits == 16) {
-            let u16 value;
-            fn init(u16 value) : value(value) {}
+            let value: u16;
+            fn init(value: u16) : value(value) {}
         } else {
-            let u32 value;
-            fn init(u32 value) : value(value) {}
+            let value: u32;
+            fn init(value: u32) : value(value) {}
         }
     }
 }
 
 struct MessageHeader {
-    let WireInteger<16> kind;
-    let WireInteger<16> payload_size;
+    let kind: WireInteger<16>;
+    let payload_size: WireInteger<16>;
 
     if1 (protocol_has_checksum) {
-        let WireInteger<32> checksum;
+        let checksum: WireInteger<32>;
     }
 
     if1 (protocol_has_checksum) {
-        fn init(u16 kind, u16 payload_size, u32 checksum)
+        fn init(kind: u16, payload_size: u16, checksum: u32)
             : kind(WireInteger<16>(kind)),
               payload_size(WireInteger<16>(payload_size)),
-              checksum(WireInteger<32>(checksum)) {
+              checksum(WireInteger<32>(checksum)),
+        {
         }
     } else {
-        fn init(u16 kind, u16 payload_size)
+        fn init(kind: u16, payload_size: u16)
             : kind(WireInteger<16>(kind)),
-              payload_size(WireInteger<16>(payload_size)) {
+              payload_size(WireInteger<16>(payload_size)),
+        {
         }
     }
 }
 
 struct Packet {
-    let MessageHeader header;
-    let net::ByteBuffer& mod payload;
+    let header: MessageHeader;
+    let mod payload: net::ByteBuffer#;
 
-    fn init(MessageHeader header, net::ByteBuffer& mod payload)
+    fn init(header: MessageHeader, mod payload: net::ByteBuffer#)
         : header(header),
-          payload(payload) {
+          payload(payload),
+    {
     }
 }
 
-fn send_packet(net::Socket* socket, Packet& packet)
+fn send_packet(socket: net::Socket*, packet: Packet#)
     -> result::Result<void, net::Error> {
-    let result::Result<void, net::Error> mod header_result =
+    let mod header_result: result::Result<void, net::Error> =
         socket->write(probable_bytes_of(addressof(packet->header)));
 
     if (header_result.is_error()) {
@@ -1875,20 +1899,22 @@ fn send_packet(net::Socket* socket, Packet& packet)
     return socket->write(
         packet->payload->bytes(
             0,
-            packet->header.payload_size.value));
+            packet->header.payload_size.value,
+        ),
+    );
 }
 
 fn run(
-    net::Socket* socket,
-    net::ByteBuffer& mod payload,
-    usize size
+    socket: net::Socket*,
+    mod payload: net::ByteBuffer#,
+    size: usize,
 ) -> i32 {
-    let u32 checksum = probable_checksum(payload->bytes(0, size));
-    let MessageHeader header =
+    let checksum: u32 = probable_checksum(payload->bytes(0, size));
+    let header: MessageHeader =
         MessageHeader(7, as<u16>(size), checksum);
-    let Packet& mod packet = new Packet(header, payload);
+    let mod packet: Packet# = new Packet(header, payload);
 
-    let result::Result<void, net::Error> sent =
+    let sent: result::Result<void, net::Error> =
         send_packet(socket, packet);
 
     if (sent.is_error()) {
@@ -1917,19 +1943,19 @@ import2 compiler;
 import std.io as io;
 import std.text as text;
 
-fn command_build(text::Text arguments) -> i32 {
+fn command_build(arguments: text::Text) -> i32 {
     io::print("building ");
     io::print_line(arguments);
     return 0;
 }
 
-fn command_clean(text::Text arguments) -> i32 {
+fn command_clean(arguments: text::Text) -> i32 {
     io::print("cleaning ");
     io::print_line(arguments);
     return 0;
 }
 
-fn command_test(text::Text arguments) -> i32 {
+fn command_test(arguments: text::Text) -> i32 {
     io::print("testing ");
     io::print_line(arguments);
     return 0;
@@ -1937,14 +1963,15 @@ fn command_test(text::Text arguments) -> i32 {
 
 fn2 emit_dispatcher() -> void {
     compiler::emit_huc_module(
-        "fn dispatch(text::Text name, "
-        "text::Text arguments) -> i32 {"
+        "fn dispatch(name: text::Text, "
+        "arguments: text::Text) -> i32 {"
         "  if (name == \"build\") { return command_build(arguments); }"
         "  if (name == \"clean\") { return command_clean(arguments); }"
         "  if (name == \"test\") { return command_test(arguments); }"
         "  io::error_line(\"unknown command\");"
         "  return 2;"
-        "}");
+        "}",
+    );
 }
 
 @emit_dispatcher();
@@ -1974,42 +2001,43 @@ import std.collections as collections;
 import std.memory as memory;
 
 struct Position {
-    let f32 mod x;
-    let f32 mod y;
-    fn init(f32 x, f32 y) : x(x), y(y) {}
+    let mod x: f32;
+    let mod y: f32;
+    fn init(x: f32, y: f32) : x(x), y(y) {}
 }
 
 struct Sprite {
-    let u32 texture;
-    let memory::ByteBuffer& mod pixels;
+    let texture: u32;
+    let mod pixels: memory::ByteBuffer#;
 
-    fn init(u32 texture, memory::ByteBuffer& mod pixels)
+    fn init(texture: u32, mod pixels: memory::ByteBuffer#)
         : texture(texture),
-          pixels(pixels) {
+          pixels(pixels),
+    {
     }
 }
 
-struct1 ComponentStore(auto T) {
+struct1 ComponentStore(T: auto) {
     if1 (@compiler::type<T>().is_advanced()) {
-        let collections::Vector<T&> mod values;
+        let mod values: collections::Vector<T#>;
 
-        fn add(T& mod value) mod -> usize {
+        fn add(mod value: T#) mod -> usize {
             this->values.push(value);
             return this->values.size() - 1;
         }
 
-        fn get(usize index) -> T* {
+        fn get(index: usize) -> T* {
             return this->values[index];
         }
     } else {
-        let collections::Vector<T> mod values;
+        let mod values: collections::Vector<T>;
 
-        fn add(T value) mod -> usize {
+        fn add(value: T) mod -> usize {
             this->values.push(value);
             return this->values.size() - 1;
         }
 
-        fn get(usize index) -> T* {
+        fn get(index: usize) -> T* {
             return this->values.pointer_at(index);
         }
     }
@@ -2019,8 +2047,8 @@ struct1 ComponentStore(auto T) {
 }
 
 struct World {
-    let ComponentStore<Position> mod positions;
-    let ComponentStore<Sprite> mod sprites;
+    let mod positions: ComponentStore<Position>;
+    let mod sprites: ComponentStore<Sprite>;
 
     fn init() {
     }
@@ -2047,13 +2075,13 @@ describe the capabilities required from the future `import2 compiler` design.
 import2 compiler;
 
 fn2 report_environment() -> void {
-    let2 compiler::Environment environment =
+    let2 environment: compiler::Environment =
         compiler::current_environment();
 
     compiler::log(environment.target().triple());
     compiler::log(environment.language_revision());
 
-    for1 (let2 compiler::Module module : environment.modules()) {
+    for1 (let2 module: compiler::Module in environment.modules()) {
         compiler::log(module.qualified_name());
     }
 }
@@ -2075,24 +2103,28 @@ Required design properties:
 ```huc
 import2 compiler;
 
-fn2 generate_serializer(compiler::Type type) -> void {
-    let2 compiler::Class record = type.as_class();
-    let2 compiler::Code mod body = compiler::Code();
+fn2 generate_serializer(type: compiler::Type) -> void {
+    let2 record: compiler::Class = type.as_class();
+    let2 mod body: compiler::Code = compiler::Code();
 
-    for1 (let2 compiler::Field field : record.fields()) {
+    for1 (let2 field: compiler::Field in record.fields()) {
         if1 (!field.attributes().contains("skip")) {
             body.append(
                 compiler::statement(
                     "writer.write_field({name}, value.{field})",
                     field.name(),
-                    field.identifier()));
+                    field.identifier(),
+                ),
+            );
         }
     }
 
     compiler::emit_module(
         compiler::function(
             "serialize_" + record.name(),
-            body.commit()));
+            body.commit(),
+        ),
+    );
 }
 ```
 
@@ -2166,7 +2198,7 @@ Possible tools include:
 
 | HUC facility | Typical alternative elsewhere | HUC’s direct contract |
 |---|---|---|
-| `T&` | `unique_ptr`, owned boxes, library wrapper | One-word unique ownership integrated with relocation-by-binding |
+| `T#` | `unique_ptr`, owned boxes, library wrapper | One-word unique ownership integrated with relocation-by-binding |
 | `init` / `clone` / `drop` | C++ special members, RAII wrappers | Custom construction, explicit logical copy, and cleanup |
 | Fixed destructive relocation | C++ move constructors and move assignment | Bitwise non-failing transfer of inline Advanced values that ends the source lifetime, with no user hook or value-category overload |
 | Layered `mod` | const qualifiers, mutable references, capabilities | Slot and pointee permissions remain visually separate |

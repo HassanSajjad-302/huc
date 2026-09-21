@@ -6,12 +6,13 @@ import std.io as io;
 // probable_open_widget and probable_close_widget stand in for a future
 // platform or standard-library resource API.
 struct Widget {
-    let i32 value;
-    let i32 mod native_handle;
+    let value: i32;
+    let mod native_handle: i32;
 
-    fn init(i32 value)
+    fn init(value: i32)
         : value(value),
-          native_handle(probable_open_widget(value)) {
+          native_handle(probable_open_widget(value)),
+    {
     }
 
     // This customizes explicit `copy`. Declaring clone makes Widget Advanced.
@@ -28,27 +29,27 @@ struct Widget {
     }
 }
 
-fn inspect(Widget* widget) -> void {
+fn inspect(widget: Widget*) -> void {
     io::println(widget->value);
 }
 
-fn consume(Widget& widget) -> void {
+fn consume(widget: Widget#) -> void {
     inspect(widget);
 } // widget owns its argument and calls Widget.drop here
 
 fn main() -> i32 {
-    let Widget& mod first = new Widget(42);
+    let mod first: Widget# = new Widget(42);
 
     inspect(first);
     inspect(first);
 
-    let Widget* observer = first;
+    let observer: Widget* = first;
     // Transferring an owner copies one address and sets the source to null.
     // Unlike an inline Advanced source, first stays active and usable as null.
-    let Widget& mod second = first;
+    let mod second: Widget# = first;
 
     // first is now null. observer still points at the Widget owned by second.
-    let Widget& independent = copy second; // allocates a Widget and uses clone
+    let independent: Widget# = copy second; // allocates a Widget and uses clone
 
     consume(second);
     // second is null. Its former Widget was dropped, so observer is dangling.

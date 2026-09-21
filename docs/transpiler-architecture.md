@@ -65,7 +65,7 @@ C++ or native-code output without redoing HUC semantic analysis.
 
 | Concern | First C17 backend | Possible later C++ backend |
 |---|---|---|
-| `T&` representation | One typed pointer with explicit cleanup | Plain pointer or a carefully matched helper |
+| `T#` representation | One typed pointer with explicit cleanup | Plain pointer or a carefully matched helper |
 | Methods and modules | Mangled free functions and explicit receivers | Free functions or native namespace/member syntax |
 | Advanced values | Plain storage plus MIR-controlled relocation and drops | The same model; ordinary C++ moves alone are insufficient |
 | Generic specializations | Concrete functions and structures | Concrete functions and structures; templates are unnecessary |
@@ -287,11 +287,19 @@ This is required for useful staging diagnostics.
 The lexer should:
 
 - recognize numbered keywords as dedicated tokens;
+- recognize `in` as a reserved keyword and `#` as the owner-suffix token;
 - preserve comments and trivia when formatter support is enabled;
 - diagnose unsupported phase spellings such as `fn3`;
-- tokenize `&` as one token;
+- keep `&` for bitwise AND, separate from `#` ownership and `&&` logical AND;
 - retain the raw spelling of numeric and string literals;
+- validate optional numeric `_` separators between digits of the applicable
+  base, then ignore them when computing the value; preserve the spelling for
+  diagnostics and source-preserving tools;
 - never depend on semantic type information.
+
+Whitespace separates tokens but does not determine operator roles. Formatting
+preferences are not lexer errors; a future formatter follows the separate
+[formatting guide](formatting.md).
 
 Representative token kinds:
 
@@ -312,6 +320,7 @@ typedef enum HucTokenKind {
     HUC_TOKEN_KW_IF1,
     HUC_TOKEN_KW_FOR,
     HUC_TOKEN_KW_FOR1,
+    HUC_TOKEN_KW_IN,
     HUC_TOKEN_KW_WHILE,
     HUC_TOKEN_KW_WHILE1,
     HUC_TOKEN_KW_LET,
@@ -321,7 +330,8 @@ typedef enum HucTokenKind {
     HUC_TOKEN_KW_IMPORT2,
 
     HUC_TOKEN_STAR,
-    HUC_TOKEN_AMPERSAND, /* owner suffix in a type; bitwise AND in expressions */
+    HUC_TOKEN_HASH, /* owner suffix in a type */
+    HUC_TOKEN_AMPERSAND, /* bitwise AND in expressions */
     HUC_TOKEN_ARROW,
     HUC_TOKEN_LESS,
     HUC_TOKEN_GREATER,
@@ -330,12 +340,12 @@ typedef enum HucTokenKind {
 } HucTokenKind;
 ```
 
-The parser turns `Ampersand` into an owner-type node only in postfix type
-position and into bitwise AND only in infix expression position. Prefix `&` is
-a syntax error; no address-of or C++-reference AST node exists. HUC0 has
+The parser turns `Hash` into an owner-type node only in postfix type position.
+`Ampersand` is bitwise AND in infix expression position, not a type suffix.
+Prefix `&` is a syntax error; no address-of or C++-reference AST node exists. HUC0 has
 exactly two non-composable pointer-like forms: one terminal `T*` raw-pointer
-suffix or one terminal `T&` owner suffix. The type parser diagnoses `T**`,
-`T*&`, `T&*`, and `T&&` immediately; canonical-type validation catches
+suffix or one terminal `T#` owner suffix. The type parser diagnoses `T**`,
+`T*#`, `T#*`, and `T##` immediately; canonical-type validation catches
 equivalent forms exposed through aliases.
 
 ### 5.3 Parser
@@ -352,6 +362,20 @@ best bootstrap choice:
 
 The parser builds syntax, not types. It should preserve invalid placeholder
 nodes after an error so later diagnostics remain local.
+
+Variable and parameter parsers read an optional binding `mod`, then the name,
+colon, and type. A `mod` inside that type is a separate pointee permission.
+`let` and `let2` precede variable declarations but not parameters. Phase binders
+also use `name: Type` or `name: auto`; they have no binding `mod`. All phase
+families, including `let1`, put their name before their binder list. The
+`for1` parser reads `let2 [mod] name: Type in expression` inside parentheses.
+
+Use a shared list parser that accepts one optional trailing comma, including
+for constructor initializer entries. Do not make acceptance depend on whether
+the list spans several lines. Empty items remain errors. Ordinary control
+flow parses braced bodies, with an `else if` alternative for chained
+conditionals; phase-control bodies still use the deferred-body scanner.
+Do not retain the old declaration order or `T&` as compatibility spellings.
 
 Important recovery points are:
 
@@ -541,7 +565,7 @@ original name.
 
 Member access preserves each layer's permissions. A fixed object prevents
 replacement of a pointer/owner field and mutation of an inline field. It does
-not remove a field's leading `mod` permission to mutate the separate object
+not remove a field type's `mod` permission to mutate the separate object
 that the field points to.
 
 Each concrete type records:
@@ -594,7 +618,7 @@ The resolver implements only the ranking specified by the language:
 3. permission-dropping pointer conversion;
 4. owner-to-observer conversion.
 
-Before ranking, normalize each signature by replacing `T&` with its observing
+Before ranking, normalize each signature by replacing `T#` with its observing
 form. Two otherwise identical normalized signatures form a forbidden
 ownership-only overload set.
 
@@ -646,7 +670,7 @@ from indistinguishable pointer representations.
 Basic and Advanced are type categories; `Copy`, `Clone`, and `Relocate` name
 compiler operations, not categories. Ordinary Basic binding uses `Copy`.
 An inline Advanced transfer uses `Relocate`: the destination becomes active
-and the source becomes inactive without receiving `drop`. A direct `T&`
+and the source becomes inactive without receiving `drop`. A direct `T#`
 transfer instead uses `OwnerRelocate`, leaving an active null source. Explicit
 duplication through `clone()` uses `Clone`.
 
@@ -674,7 +698,7 @@ relocation. A call that returns a structure uses an explicit result place so
 the callee can construct directly there.
 
 HIR records whether a place is named storage or a fresh unnamed Advanced
-result. Transferring from named storage requires trailing `mod`. A fresh
+result. Transferring from named storage requires `mod` before its name. A fresh
 function result, `new T` owner result, explicit `copy`/clone result, or
 unavoidable constructor temporary can be transferred once without a source
 declaration marked `mod`. Direct construction in the destination remains
@@ -688,7 +712,7 @@ temporary, or result. It is rejected from `value.field`, `array[i]`,
 hidden state inside the object to track which parts remain active. Transferring
 a whole root value includes all subobjects without separate field transfers.
 
-Primitive `T&` is the exception because relocation leaves its source as a
+Primitive `T#` is the exception because relocation leaves its source as a
 usable null owner. An owner may relocate from any writable direct or indirect
 owner place. Indirect destinations may also be replaced when their validity and
 activity preconditions hold; the restriction above concerns non-owner
@@ -825,20 +849,20 @@ and one primary family per name and scope for `fn1` in 0.1. Syntax is retained
 in these distinct parts:
 
 ```huc
-struct1 Buffer(auto T, usize N) { ... }              // primary binders
-struct1 Buffer(auto T, usize N)<T*, N>(predicate) { ... }
-struct1 Buffer()<Widget, 8> { ... }                  // full specialization
+struct1 Buffer(T: auto, N: usize) { ... } // primary binders
+struct1 Buffer(T: auto, N: usize)<T*, N>(predicate) { ... }
+struct1 Buffer()<Widget, 8> { ... } // full specialization
 
-fn1 convert(auto T)(T mod value) -> T { ... }
-fn1 convert(auto T)<T*>(predicate)(T* value) -> T* { ... }
-fn1 convert()<Widget>(Widget mod value) -> Widget { ... }
+fn1 convert(T: auto)(mod value: T) -> T { ... }
+fn1 convert(T: auto)<T*>(predicate)(value: T*) -> T* { ... }
+fn1 convert()<Widget>(mod value: Widget) -> Widget { ... }
 
-let1(auto T) selected { let T selected = T(); }
-let1(auto T)<T*>(predicate) selected { let T* mod selected = null; }
-let1()<Widget> selected { let Widget selected = Widget(); }
+let1 selected(T: auto) { let selected: T = T(); }
+let1 selected(T: auto)<T*>(predicate) { let mod selected: T* = null; }
+let1 selected()<Widget> { let selected: Widget = Widget(); }
 
-let Buffer<i32, 16> value = Buffer<i32, 16>();       // request
-let i32 result = convert<i32>(input);
+let value: Buffer<i32, 16> = Buffer<i32, 16>(); // request
+let result: i32 = convert<i32>(input);
 use(selected<Widget>);
 ```
 
@@ -848,7 +872,7 @@ a full specialization. Angle brackets at a use site request a specialization.
 The lexer emits individual `<` and `>` tokens; the parser preserves ambiguous
 angle postfixes until name resolution.
 
-An `auto T` binder's entity kind is inferred from use; a binder used in a type
+A `T: auto` binder's entity kind is inferred from use; a binder used in a type
 position must hold a type, while typed non-type binders use ordinary types.
 Normal `fn1` requests may deduce binders by unifying runtime parameter and
 argument types. Non-deducible binders require explicit angle arguments.
@@ -946,7 +970,7 @@ compiler::emit_huc_module(text);
 A call uses `@` when it enters compiler execution:
 
 ```huc
-@compiler::emit_huc("let i32 mod generated;");
+@compiler::emit_huc("let mod generated: i32;");
 ```
 
 `emit_huc` writes raw HUC0 text at the insertion cursor inherited from its
@@ -992,7 +1016,7 @@ Its printable modules are the exact input consumed by the next translator.
 
 Successful HUC1 output contains no numbered construct, `@`, `import2`,
 compiler-only declaration, family binder, specialization request, or raw
-generation call. Local `let auto` remains legal HUC0; unresolved inferred
+generation call. Local `let name: auto` remains legal HUC0; unresolved inferred
 function parameters or results do not.
 
 The concrete HIR is lowered to a control-flow MIR:
@@ -1048,7 +1072,7 @@ inactive as part of that operation. It never calls source `drop`, performs
 source component cleanup, or requires embedded-owner nulling. In particular,
 it does not expand owner fields into `OwnerRelocate` operations.
 
-`OwnerRelocate` is the complete direct primitive `T&` operation: it transfers
+`OwnerRelocate` is the complete direct primitive `T#` operation: it transfers
 the pointer and leaves the source active and usable as a null owner. This
 includes moving an owner field individually, but not transferring that word
 inside a whole aggregate relocation. Null owner words are valid in both cases.
@@ -1095,7 +1119,7 @@ warn, or a strict lint mode may reject it.
 A conditional flag belongs to one MIR storage place. It is stored separately,
 as a local or guard state, never as a field of the HUC type. It therefore does
 not change `sizeof(T)`, field offsets, foreign-interface layout, or the
-one-word representation of `T&`.
+one-word representation of `T#`.
 
 ### 12.3 Cleanup edges
 
@@ -1133,7 +1157,7 @@ Elaboration handles the operations as follows:
   the copy expression's result place; lacking `clone` is a diagnostic, and
   copy assignment specifically uses a fresh result before destination
   destruction;
-- `copy` of `T&` requires a logically copyable `T` and a non-null source,
+- `copy` of `T#` requires a logically copyable `T` and a non-null source,
   allocates a new `T`, and logically copies the pointee; a null source is
   undefined behavior, with no required runtime null check or null-preserving
   branch. This precondition applies even when copying `T` would not read its
@@ -1141,10 +1165,10 @@ Elaboration handles the operations as follows:
 - binding from an Advanced non-owner becomes one fixed representation-transfer
   `Relocate`, which intrinsically makes the source and all subobjects inactive
   without requiring source-field clearing;
-- `T&` binding becomes `OwnerRelocate`; it transfers the pointer and stores
+- `T#` binding becomes `OwnerRelocate`; it transfers the pointer and stores
   null in the still-active source owner;
 - a fresh unnamed Advanced result can be transferred directly;
-  relocation from named storage requires trailing `mod`;
+  relocation from named storage requires `mod` before its name;
 - relocation assignment first proves distinctness or compares source and
   destination storage addresses at runtime when aliasing is possible; exact
   self-relocation is a no-op, while a distinct active destination is dropped
@@ -1176,7 +1200,7 @@ a HUC customization point. See
 The compiler does not repair self-pointers or other address-dependent
 invariants during bitwise relocation. Such inline values must remain in
 directly constructed fixed storage, use a suitable future stable-address
-container, or normally live behind `T&`. Violating that contract and then
+container, or normally live behind `T#`. Violating that contract and then
 relocating the value is undefined behavior.
 
 Representation transfer is the semantic definition of non-owner relocation,
@@ -1223,7 +1247,7 @@ static void huc_Widget_owner_reset(huc_Widget_owner *slot) {
 ```
 
 These are internal backend operations, not new HUC intrinsics. A pointer to a
-C owner slot is permitted in generated code; it does not add `T&*` or `T**`
+C owner slot is permitted in generated code; it does not add `T#*` or `T**`
 to HUC. Owner and observer distinctions remain in HUC semantic analysis even
 when their C representations coincide. MIR controls whether a reset leaves
 an active null owner or whether final cleanup makes the HUC place inactive.
@@ -1237,7 +1261,7 @@ deallocation without changing the one-pointer owner representation.
 | HUC operation | Generated C17 |
 |---|---|
 | `T*` / `mod T*` | Typed C pointers with HUC access permissions checked before emission |
-| `T&` | One typed C pointer with MIR-controlled ownership |
+| `T#` | One typed C pointer with MIR-controlled ownership |
 | owner observation | Read the pointer without transferring it |
 | `addressof(value)` | Address of the corresponding typed storage place |
 | `std::slot_of(place)` | the slot's data-storage address converted to target `usize` |
@@ -1345,7 +1369,7 @@ inline code for:
 
 MIR emits drop calls only for active HUC places. A destructively relocated raw
 handle may retain its old bits, but the source never receives a HUC drop call.
-No automatic C cleanup must be neutralized. A standalone relocated-from `T&`
+No automatic C cleanup must be neutralized. A standalone relocated-from `T#`
 is different: the transfer writes null, leaving an active usable empty owner.
 
 When static analysis cannot decide whether cleanup is needed, a separate
@@ -1557,7 +1581,13 @@ symbol hashes must be identical across processes for identical inputs.
 
 ### 17.1 Unit tests
 
-- tokenization, including `&`, `<`, `>`, `@`, and numbered keywords;
+- tokenization, including `#`, `&`, `<`, `>`, `@`, `in`, and numbered keywords;
+- valid and invalid numeric separator positions in all supported bases;
+- name-first declarations, independent binding/type `mod`, and `let1` headers;
+- optional trailing commas in nonempty single/multiline lists, and rejection
+  of a comma in an empty list;
+- required control-flow braces, `else if`, and `for1 (... in ...)`;
+- rejection of old `T&`, type-first declarations, and colon-only `for1` headers;
 - Pratt precedence, ambiguous angle postfixes, and recovery;
 - non-composable pointer-suffix and forbidden typed owner-address diagnostics;
 - slot addresses of fixed, inline, raw-pointer, and owner slots;
@@ -1711,7 +1741,7 @@ C17 root translation unit
 Then complete HUC0 with:
 
 ```text
-T*, mod layers, and T&
+T*, mod layers, and T#
 constructors and direct destination construction
 new/adopt/release/reset
 Basic/Advanced classification
@@ -1737,7 +1767,7 @@ The following should be enforced in code review and tests:
    no structural-generation API is implied.
 8. Backend output preserves HUC left-to-right argument evaluation and
    by-value parameter initialization.
-9. `T&` remains one word under the default allocator.
+9. `T#` remains one word under the default allocator.
 10. Diagnostics retain source and expansion chains across both translators.
 11. A future C++ or native-code backend can consume MIR without recreating
     semantic analysis.

@@ -6,23 +6,25 @@ import std.memory as memory;
 
 // Point is Basic: every field is Basic and it declares neither clone nor drop.
 struct Point {
-    let i32 x;
-    let i32 y;
+    let x: i32;
+    let y: i32;
 
-    fn init(i32 x, i32 y)
+    fn init(x: i32, y: i32)
         : x(x),
-          y(y) {
+          y(y),
+    {
     }
 }
 
 // NativeBuffer is Advanced because it declares clone and drop.
 struct NativeBuffer {
-    let mod u8* mod data;
-    let usize size;
+    let mod data: mod u8*;
+    let size: usize;
 
-    fn init(usize size)
+    fn init(size: usize)
         : data(memory::allocate_zeroed_bytes(size)),
-          size(size) {
+          size(size),
+    {
     }
 
     fn first() -> u8 {
@@ -32,13 +34,13 @@ struct NativeBuffer {
         return this->data[0];
     }
 
-    fn fill(u8 value) mod -> void {
+    fn fill(value: u8) mod -> void {
         memory::fill_bytes(this->data, value, this->size);
     }
 
     // Only an explicit copy expression calls this method.
     fn clone() -> NativeBuffer {
-        let NativeBuffer mod result = NativeBuffer(this->size);
+        let mod result: NativeBuffer = NativeBuffer(this->size);
         memory::copy_bytes(result.data, this->data, this->size);
         return result;
     }
@@ -54,12 +56,13 @@ struct NativeBuffer {
 
 // Packet is Advanced because of its owner field, despite having no clone or drop.
 struct Packet {
-    let i32 tag;
-    let NativeBuffer& mod payload;
+    let tag: i32;
+    let mod payload: NativeBuffer#;
 
-    fn init(i32 tag, NativeBuffer& mod payload)
+    fn init(tag: i32, mod payload: NativeBuffer#)
         : tag(tag),
-          payload(payload) {
+          payload(payload),
+    {
     }
 }
 
@@ -67,7 +70,7 @@ struct Packet {
 // Transferring it inline leaves a stale self pointer. This is invalid unless the
 // programmer can prove the pointer will never be used afterward.
 struct AddressDependent {
-    let AddressDependent* mod self;
+    let mod self: AddressDependent*;
 
     fn init() : self(null) {
         this->self = this;
@@ -77,7 +80,7 @@ struct AddressDependent {
     }
 }
 
-fn receive(NativeBuffer* observed, NativeBuffer& owned) -> u8 {
+fn receive(observed: NativeBuffer*, owned: NativeBuffer#) -> u8 {
     // owned keeps the allocation alive for the duration of this call.
     if (!owned) {
         return 0;
@@ -86,27 +89,27 @@ fn receive(NativeBuffer* observed, NativeBuffer& owned) -> u8 {
 } // owned is dropped here
 
 fn demonstrate_copy_values() -> void {
-    let Point first = Point(10, 20);
-    let Point second = first;       // implicit fieldwise copy
-    let Point third = copy second;  // equivalent for a Basic type
+    let first: Point = Point(10, 20);
+    let second: Point = first; // implicit fieldwise copy
+    let third: Point = copy second; // equivalent for a Basic type
 
     io::println(first.x, second.x, third.x);
 }
 
 fn demonstrate_inline_relocation() -> void {
-    let NativeBuffer mod original = NativeBuffer(64);
+    let mod original: NativeBuffer = NativeBuffer(64);
     original.fill(7);
 
-    let NativeBuffer duplicate = copy original; // calls clone
+    let duplicate: NativeBuffer = copy original; // calls clone
     // Bitwise relocation transfers the stored value without calling user code.
     // original becomes inactive: its lifetime ends, and neither its drop nor
     // its field cleanup runs.
-    let NativeBuffer mod relocated = original;
+    let mod relocated: NativeBuffer = original;
 
-    relocated = relocated;         // exact self-relocation is a no-op
-    original = NativeBuffer(32);    // reinitializes inactive storage
+    relocated = relocated; // exact self-relocation is a no-op
+    original = NativeBuffer(32); // reinitializes inactive storage
 
-    let NativeBuffer mod target = NativeBuffer(8);
+    let mod target: NativeBuffer = NativeBuffer(8);
     // Clone a temporary, drop old target, then relocate the replacement.
     target = copy duplicate;
 
@@ -114,45 +117,45 @@ fn demonstrate_inline_relocation() -> void {
 }
 
 fn demonstrate_owner_values() -> void {
-    let mod NativeBuffer& mod buffer = new NativeBuffer(128);
+    let mod buffer: mod NativeBuffer# = new NativeBuffer(128);
     buffer->fill(42);
 
-    let NativeBuffer* observer = buffer;
-    let NativeBuffer& duplicate = copy buffer; // deep owner copy
+    let observer: NativeBuffer* = buffer;
+    let duplicate: NativeBuffer# = copy buffer; // deep owner copy
 
     // Arguments are evaluated left-to-right. The observer is captured first;
     // ownership is then relocated into receive's second parameter.
-    let u8 first_byte = receive(buffer, buffer);
+    let first_byte: u8 = receive(buffer, buffer);
     // buffer is null and observer is dangling after receive returns.
 
     io::println(first_byte, duplicate->first());
 }
 
 fn demonstrate_embedded_owners() -> void {
-    let Packet mod source = Packet(1, new NativeBuffer(16));
-    let Packet mod destination = source;
+    let mod source: Packet = Packet(1, new NativeBuffer(16));
+    let mod destination: Packet = source;
     // source and source.payload are inactive. No source cleanup runs, and the
     // payload need not be set to null. Only destination owns the buffer.
     io::println(destination.tag, destination.payload->first());
 
     // Moving a field individually is different: destination stays active,
     // and its payload slot becomes an active null owner.
-    let NativeBuffer& extracted = destination.payload;
+    let extracted: NativeBuffer# = destination.payload;
     io::println(!destination.payload, extracted->first());
 
     // A null embedded owner does not prevent whole-value relocation.
-    let Packet mod empty = Packet(2, null);
-    let Packet relocated_empty = empty;
+    let mod empty: Packet = Packet(2, null);
+    let relocated_empty: Packet = empty;
     io::println(relocated_empty.tag, !relocated_empty.payload);
 } // extracted destroys the buffer once; neither inactive Packet is cleaned up.
 
 fn demonstrate_address_stability() -> void {
     // Relocating an inline AddressDependent would leave its self pointer aimed
     // at inactive source storage. HUC does not repair it or diagnose the problem.
-    // Store it behind T& so only the owner address is transferred.
-    let AddressDependent& mod first = new AddressDependent();
-    let AddressDependent& second = first;
-    let AddressDependent* observer = second;
+    // Store it behind T# so only the owner address is transferred.
+    let mod first: AddressDependent# = new AddressDependent();
+    let second: AddressDependent# = first;
+    let observer: AddressDependent* = second;
 
     io::println(second->self == observer);
 }

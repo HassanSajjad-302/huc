@@ -121,11 +121,11 @@ HUC0 contains:
 - `let` declarations;
 - `mod` permissions;
 - raw pointers `T*`;
-- unique owners `T&`;
+- unique owners `T#`;
 - `addressof`, `std::slot_of`, and the core type-operand intrinsics;
 - constructors, methods, `clone`, and `drop`;
 - runtime expressions and control flow;
-- local `let auto` inference.
+- local `let name: auto` inference.
 
 HUC0 does not contain:
 
@@ -158,28 +158,36 @@ handled by the HUC1 translator.
 ### 5.1 Declarations and mutability
 
 Every local, field, and global variable begins with `let`. Function parameters
-do not use `let`.
+do not use `let`. Declarations use `name: Type`, with an optional `mod` before
+the name for writable storage. A `mod` inside the type still grants pointee
+mutation. For example, `let mod owner: mod Widget#` has both a writable owner
+slot and a writable pointee. Method `mod` stays after the parameter list.
+
+Local inference uses `let name: auto = expression;`; the colon and `auto` are
+required. Runtime parameters, fields, and globals require explicit types.
+HUC0 does not also accept type-first declarations, omitted type annotations,
+or destructuring.
 
 HUC has no `var` keyword and no `const` keyword. Values are fixed by default,
 and `mod` grants mutation.
 
 ```huc
-let i32 answer = 42;       // fixed scalar
-let i32 mod counter;       // writable scalar, initialized to zero
+let answer: i32 = 42; // fixed scalar
+let mod counter: i32; // writable scalar, initialized to zero
 ```
 
 Each `mod` controls the layer where it appears:
 
 ```huc
-let T* observer;           // fixed pointer field; constructor obligation
-let mod T* observer;       // fixed field; mutable T; constructor obligation
-let T* mod observer;       // reseatable pointer field; defaults to null
-let mod T* mod observer;   // reseatable field; mutable T; defaults to null
+let observer: T*; // fixed pointer field; constructor obligation
+let observer: mod T*; // fixed field; mutable T; constructor obligation
+let mod observer: T*; // reseatable pointer field; defaults to null
+let mod observer: mod T*; // reseatable field; mutable T; defaults to null
 
-let T& owner;              // fixed owner field; constructor obligation
-let mod T& owner;          // fixed field; mutable T; constructor obligation
-let T& mod owner;          // movable/reseatable owner field; defaults to null
-let mod T& mod owner;      // reseatable field; mutable T; defaults to null
+let owner: T#; // fixed owner field; constructor obligation
+let owner: mod T#; // fixed field; mutable T; constructor obligation
+let mod owner: T#; // movable/reseatable owner field; defaults to null
+let mod owner: mod T#; // reseatable field; mutable T; defaults to null
 ```
 
 These uninitialized spellings illustrate structure fields. A fixed local or
@@ -193,7 +201,7 @@ an initializer and become zero or null. Advanced globals, owners, structure
 globals, runtime initialization code, and global destruction are deferred.
 
 A fixed object prevents assignment to its fields and mutation of values
-stored inline in those fields. A `mod T*` or `mod T&` field still allows
+stored inline in those fields. A `mod T*` or `mod T#` field still allows
 mutation of the separate object it points to (the pointee). The field itself
 cannot be replaced, and an inline field cannot be used to call a writable
 method. This keeps each layer's permissions separate; it does not allow
@@ -214,9 +222,9 @@ HUC performs no lifetime tracking between a raw pointer and an owner.
 
 ### 5.3 Unique owners
 
-`T&` is a primitive unique owner, not a C++ reference declarator. General
-aliasing-reference types do not exist, and HUC has no `T&&` type. An owner may
-be null even though the same spelling denotes a reference in C++.
+`T#` is a primitive nullable unique owner. General aliasing-reference types
+do not exist. The former owner spelling `T&` is not accepted, nor are C++
+lvalue or rvalue references.
 
 HUC0 has no unary `&` expression. The non-overloadable
 `addressof(inline_place)` intrinsic produces `T*` for a fixed inline `T` place
@@ -224,7 +232,7 @@ and `mod T*` for a writable inline `T` place. It rejects raw-pointer and owner
 slots because their addresses would require a forbidden composed type.
 
 HUC0 has only the raw-pointer constructor `T*` and the unique-owner constructor
-`T&`. Neither constructor composes: `T**`, `T*&`, `T&*`, `T&&`, and equivalent
+`T#`. Neither constructor composes: `T**`, `T*#`, `T#*`, `T##`, and equivalent
 alias-hidden forms are diagnostics. Writing an owner expression in a `T*`
 observer context accesses the owned pointee; it does not take the owner slot's
 address. Ordinary typed owner-slot reseating therefore uses consume-and-return
@@ -262,15 +270,15 @@ Relocating from a named source requires a writable source slot because
 relocation modifies the source.
 
 ```huc
-let Widget& mod source = new Widget(7);
-let Widget& destination = source; // relocate; source becomes null
+let mod source: Widget# = new Widget(7);
+let destination: Widget# = source; // relocate; source becomes null
 ```
 
 Attempting to relocate from a fixed owner is a compile-time diagnostic.
 
 Fresh unnamed results can be transferred directly. This includes
 function results, `new` owner results, `copy`/`clone` results, and other
-temporary Advanced values. They need no trailing `mod`; only named source
+temporary Advanced values. They need no binding `mod`; only named source
 storage is checked for that permission. Direct `T(arguments)` construction
 in the destination has no temporary result place.
 
@@ -295,7 +303,7 @@ Advanced types include:
 
 Classification is recursive through inline fields. Having `init()` alone does
 not make a structure Advanced. A raw `T*` remains Basic even when its pointee
-is Advanced; `T&` is always Advanced. Explicit `copy` uses the existing
+is Advanced; `T#` is always Advanced. Explicit `copy` uses the existing
 `clone()` method when duplicating an Advanced structure.
 
 `Advanced` is the source-level transfer category. Its operation is **destructive
@@ -321,7 +329,7 @@ part of a whole writable source value.
 
 The bytes of an inactive source need not be cleared or form a valid `T`.
 Assigning a new value begins a new active lifetime there. Direct relocation of
-a primitive owner is the deliberate exception: relocating `T&` transfers its
+a primitive owner is the deliberate exception: relocating `T#` transfers its
 address and leaves the source as a usable null owner. This includes moving an
 owner field individually, but not transferring its bits as part of relocating
 the containing aggregate. Null owner words are valid in either operation.
@@ -358,8 +366,8 @@ An inline value that needs its address to stay unchanged cannot be safely
 relocated bitwise. HUC0 does not repair self-pointers. Such a value must be
 kept in directly constructed fixed read-only storage, redesigned to compute
 internal addresses, placed in a stable-address library container, or allocated
-behind `T&` so relocation transfers only the owner word. Mutable
-address-dependent objects should normally use `T&`; HUC0 has no first-class
+behind `T#` so relocation transfers only the owner word. Mutable
+address-dependent objects should normally use `T#`; HUC0 has no first-class
 pinning qualifier. Relocating a value that violates this contract is undefined
 behavior.
 
@@ -378,7 +386,7 @@ moving a non-owner Advanced value out through `*pointer`, `pointer->field`,
 owner or containing object remains active would make later cleanup invalid
 without extra state to track which parts are still active.
 
-Primitive `T&` subobjects are exempt because relocation writes the source
+Primitive `T#` subobjects are exempt because relocation writes the source
 owner to its active null representation. Copying/cloning an indirectly reached
 value also remains valid. An eligible root source may replace an indirect
 destination; if the two can alias, exact storage identity is checked before
@@ -396,8 +404,8 @@ ordinary relocation-source eligibility.
 HUC0 uses constructors rather than aggregate brace initialization:
 
 ```huc
-let Widget value = Widget(7);
-let Widget& mod owner = new Widget(7);
+let value: Widget = Widget(7);
+let mod owner: Widget# = new Widget(7);
 ```
 
 When `T(arguments)` directly initializes a local, field initializer, by-value
@@ -410,16 +418,16 @@ A constructor is named `init`:
 
 ```huc
 struct Widget {
-    let i32 id;
-    let i32 mod visits;
+    let id: i32;
+    let mod visits: i32;
 
-    fn init(i32 id) : id(id) {
+    fn init(id: i32) : id(id) {
         // visits defaults to zero
     }
 }
 ```
 
-An `init` body has an implicit writable `mod T* this`. All initializer entries
+An `init` body has an implicit writable `this: mod T*`. All initializer entries
 and defaults complete before the body begins. The body may assign mutable
 fields but cannot assign a fixed field in place of its required initializer.
 
@@ -524,6 +532,26 @@ User-defined implicit conversions do not participate. Overloads that differ
 only in observation versus ownership consumption are prohibited because
 ownership must not depend on subtle overload ranking.
 
+### 5.9 Source syntax and formatting
+
+The source syntax follows the same small rules at both source levels:
+
+- Numeric literals allow optional `_` separators between digits, with no
+  required grouping size. Prefixes, decimal points, exponent markers and
+  signs, and type suffixes cannot touch a separator.
+- Comma-separated lists allow one optional final comma, including constructor
+  initializer lists. Empty lists have no comma. Line breaks do not change
+  whether a trailing comma is accepted.
+- Conditions and loop headers retain parentheses. Control-flow bodies require
+  braces, including single-statement bodies; `else if` chains are allowed.
+- Semicolons, explicit `return`, and `//` comments remain. Interpolation,
+  implicit returns, and additional declaration spellings are out of scope.
+- The [formatting guide](formatting.md) defines the default style, not compiler
+  acceptance. Operator spacing, indentation, and line width are not grammar.
+
+A canonical formatter is future tooling, not a new prerequisite for either
+bootstrap milestone.
+
 ## 6. HUC1 phase semantics
 
 ### 6.1 Number meaning
@@ -540,19 +568,22 @@ compiler to run an arbitrary number of passes.
 
 ### 6.2 Phase-1 families
 
+All three family declarations put their name before the binder list. Each
+binder uses `name: Type` or `name: auto`; binders are not writable slots.
+
 The primary forms are:
 
 ```huc
-struct1 Stack(auto T) {
+struct1 Stack(T: auto) {
     ...
 }
 
-fn1 convert(auto T)(T mod value) -> T {
+fn1 convert(T: auto)(mod value: T) -> T {
     ...
 }
 
-let1(auto T) value {
-    let T value = T();
+let1 value(T: auto) {
+    let value: T = T();
 }
 ```
 
@@ -560,12 +591,12 @@ Partial specialization adds an angle-bracket pattern after the binder list,
 followed by an optional parenthesized predicate:
 
 ```huc
-struct1 Stack(auto T)<T*>(predicate) { ... }
+struct1 Stack(T: auto)<T*>(predicate) { ... }
 
-fn1 convert(auto T)<T*>(predicate)(T* value) -> T* { ... }
+fn1 convert(T: auto)<T*>(predicate)(value: T*) -> T* { ... }
 
-let1(auto T)<T*>(predicate) value {
-    let T* mod value = null;
+let1 value(T: auto)<T*>(predicate) {
+    let mod value: T* = null;
 }
 ```
 
@@ -573,15 +604,15 @@ Full specialization uses an empty binder list:
 
 ```huc
 struct1 Stack()<Widget> { ... }
-fn1 convert()<Widget>(Widget mod value) -> Widget { ... }
-let1()<Widget> value { let Widget value = Widget(); }
+fn1 convert()<Widget>(mod value: Widget) -> Widget { ... }
+let1 value()<Widget> { let value: Widget = Widget(); }
 ```
 
 Requests use angle brackets:
 
 ```huc
-let Stack<i32> stack = Stack<i32>();
-let i32 result = convert<i32>(input);
+let stack: Stack<i32> = Stack<i32>();
+let result: i32 = convert<i32>(input);
 use(value<i32>);
 ```
 
@@ -591,12 +622,12 @@ resolution can decide.
 
 ### 6.3 Binders and deduction
 
-`auto T` binds a compile-time entity whose kind is inferred from use. A binder
+`T: auto` binds a compile-time entity whose kind is inferred from use. A binder
 used in a type position must hold a type. Typed non-type parameters use normal
 types:
 
 ```huc
-struct1 Buffer(auto T, usize N) { ... }
+struct1 Buffer(T: auto, N: usize) { ... }
 ```
 
 Primary declarations may provide trailing defaults. Partial and full
@@ -703,6 +734,9 @@ Their operands must be compiler-available and the statements erase. The
 selected-body parser uses the inherited module, type, function, or block
 context; skipped bodies remain opaque.
 
+`for1` spells its header `for1 (let2 item: Type in values)`. The binding may
+use `mod` before its name or `: auto` for inference. The keyword `in` is
+reserved for this role; it adds no runtime range-loop or membership operation.
 `for1` requires a finite compiler iterable. `while1` reevaluates a compiler
 boolean and is bounded by interpreter resource limits. A zero-iteration body
 remains opaque.
@@ -727,7 +761,7 @@ surrounding code is runtime code.
 It is never attached to a type:
 
 ```huc
-let2 compiler::Function function =
+let2 function: compiler::Function =
     @compiler::find_function("render");
 ```
 
@@ -773,7 +807,7 @@ compiler::emit_huc_module(text);
 Calls begin with `@` when they enter compiler execution:
 
 ```huc
-@compiler::emit_huc("let i32 mod generated;");
+@compiler::emit_huc("let mod generated: i32;");
 ```
 
 `emit_huc` writes at the inherited call-site insertion cursor.
@@ -991,17 +1025,18 @@ Implement a hand-written lexer and recursive-descent/Pratt parser.
 Cover:
 
 - module and import declarations;
-- `let`;
+- name-first `let name: Type` declarations and `mod name: Type` parameters;
 - type aliases;
 - fixed-signature `extern "C"` declarations;
 - `struct`;
 - `fn`;
 - `init` and `drop`;
-- pointer/owner and `mod` layering;
-- blocks and runtime control flow;
+- `T*`/`T#` and independent binding/pointee `mod` permissions;
+- required braces for control-flow bodies, including `else if` chains;
+- optional numeric digit separators and consistent optional trailing commas;
 - expressions and precedence;
 - constructor and `new` syntax;
-- local `let auto`;
+- local `let name: auto`;
 - error recovery at declaration and statement boundaries.
 
 The lexer emits individual `<` and `>` tokens and indivisible numbered keyword
@@ -1012,7 +1047,11 @@ Acceptance:
 - every normative HUC0 example parses;
 - AST dumps are deterministic;
 - malformed inputs produce multiple useful diagnostics without crashing;
-- HUC1-only syntax is explicitly rejected as unavailable in HUC0.
+- HUC1-only syntax is explicitly rejected as unavailable in HUC0;
+- old owner/declaration spellings, malformed separators, empty comma items,
+  and unbraced control-flow bodies receive syntax diagnostics;
+- spacing and indentation choices do not change acceptance when tokens remain
+  the same; a formatter is not needed to parse the examples.
 
 ### 10.4 Increment C: names and types
 
@@ -1136,7 +1175,7 @@ Implement:
 
 `adopt<T>(raw)` has an unchecked compatible-allocation and exclusivity
 precondition. `release(owner)` and `reset(owner)` require a named owner slot
-with trailing `mod`.
+with `mod` before their binding names.
 
 Acceptance:
 
@@ -1351,6 +1390,8 @@ process addresses.
 Cover:
 
 - tokens and numeric/string literals;
+- optional digit separators in every supported base and numeric component;
+- name-first declarations, `T#`, list commas, and mandatory control-flow braces;
 - `mod`, pointer, and owner declarators;
 - parser recovery;
 - canonical types;

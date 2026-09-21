@@ -12,7 +12,7 @@ A few terms used throughout:
 
 - **Source** and **destination**: where a value comes from and where it goes.
 - **Slot** or **place**: a storage location, such as a variable or field.
-- **Inline value**: a `T` stored directly, rather than a `T*` or `T&` holding
+- **Inline value**: a `T` stored directly, rather than a `T*` or `T#` holding
   its address.
 - **Pointee**: the object a pointer or owner points to.
 - **Binding**: giving a value to a destination, such as a new local or parameter.
@@ -27,11 +27,11 @@ HUC uses three related type forms:
 |---|---|---|
 | `T` | An inline `T` value | Determined by `T` |
 | `T*` | A nullable, unchecked, non-owning pointer | Copies one address |
-| `T&` | A nullable, unique owner of one allocated `T` | Relocates by default; `copy` duplicates the pointee |
+| `T#` | A nullable, unique owner of one allocated `T` | Relocates by default; `copy` duplicates the pointee |
 
-`T&` is not a C++ reference. HUC has no general reference type that aliases
-another variable, and no `T&&` type. A non-null `T&` owns an allocation,
-automatically destroys its pointee, and then deallocates that storage.
+`T#` is not a C++ reference. HUC has no general reference type that aliases
+another variable. A non-null `T#` owns an allocation, automatically destroys
+its pointee, and then deallocates that storage.
 Directly relocating an owner slot clears that source slot to null. Relocating
 an enclosing inline aggregate instead makes the entire source inactive without
 requiring owner-field nulling.
@@ -40,13 +40,13 @@ HUC has no unary `&` expression. Address-taking uses the core,
 non-overloadable `addressof` intrinsic:
 
 ```huc
-let Widget value = Widget(7);
-let Widget* observer = addressof(value);
-let Widget& owner = new Widget(9);
+let value: Widget = Widget(7);
+let observer: Widget* = addressof(value);
+let owner: Widget# = new Widget(9);
 ```
 
 The pointer-like forms cannot be combined:
-`T**`, `T*&`, `T&*`, and `T&&` are not HUC0 types, including through aliases.
+`T**`, `T*#`, `T#*`, and `T##` are not HUC0 types, including through aliases.
 `addressof` accepts only an inline non-pointer place: it returns `T*` for a
 fixed place and `mod T*` for a writable place. Applying it to a raw-pointer or
 owner slot is a compile-time error. Using `owner` where `T*` is expected gives
@@ -63,7 +63,7 @@ extend a lifetime, or change cleanup state.
 
 An ordinary function may receive this integer and reconstruct a raw pointer
 with `ptr_as<T*>(address)`. This gives low-level access to the stored bytes,
-not a new typed owner reference: `T&*` and the other combined forms remain
+not a new typed owner reference: `T#*` and the other combined forms remain
 forbidden.
 Byte access through `u8*` or `c8*` can inspect or manipulate representation;
 it does not itself perform HUC ownership or lifetime operations. In particular,
@@ -77,18 +77,20 @@ correct cleanup. Writing a fixed slot remains undefined behavior; ordinary
 typed `mod` rules are unchanged. See the language specification's
 pointer-layering and cast sections for the full rules.
 
-Mutability is independent at each layer:
+Declarations use `name: Type`. Mutability is independent at each layer:
+`mod` before the name controls the slot; `mod` inside the pointer or owner
+type controls the pointee. This spelling does not change the transfer rules.
 
 ```huc
-let T* observer;          // fixed raw field; constructor obligation
-let mod T* observer;      // fixed field; writable T; constructor obligation
-let T* mod observer;      // reseatable raw field; defaults to null
-let mod T* mod observer;  // reseatable field; writable T; defaults to null
+let observer: T*; // fixed raw field; constructor obligation
+let observer: mod T*; // fixed field; writable T; constructor obligation
+let mod observer: T*; // reseatable raw field; defaults to null
+let mod observer: mod T*; // reseatable field; writable T; defaults to null
 
-let T& owner;             // fixed owner field; constructor obligation
-let mod T& owner;         // fixed field; writable T; constructor obligation
-let T& mod owner;         // movable/reseatable owner field; defaults to null
-let mod T& mod owner;     // reseatable field; writable T; defaults to null
+let owner: T#; // fixed owner field; constructor obligation
+let owner: mod T#; // fixed field; writable T; constructor obligation
+let mod owner: T#; // movable/reseatable owner field; defaults to null
+let mod owner: mod T#; // reseatable field; writable T; defaults to null
 ```
 
 These declarations are field forms. A fixed local requires an explicit
@@ -98,28 +100,28 @@ constructor default to null. HUC0 globals are separately restricted to
 drop-free Basic scalars and raw pointers, so owners are never global in 0.1.
 
 A fixed structure prevents assignment to its fields and mutation of values
-stored inline in those fields. A pointer or owner field with leading `mod`
-still allows mutation of the separate object it points to.
+stored inline in those fields. A pointer or owner field with `mod` inside its
+type still allows mutation of the separate object it points to.
 For example, a read-only method may mutate the pointee of a `mod T*` field but
 may not replace the pointer stored in that field. Each layer keeps its own
 permissions.
 
-A trailing `mod` is required when source code will relocate from, reset,
-release, or reseat a **named** pointer, owner, or other Advanced slot.
+`mod` before the binding name is required when source code will relocate from,
+reset, release, or reseat a **named** pointer, owner, or other Advanced slot.
 Compiler-inserted destruction at the end of the slot's lifetime does not
 require source-level `mod`.
 
 A fresh unnamed result can be transferred directly. Function results,
 `new T(...)` owner results, evaluated `copy` results, and other temporary
-Advanced values need no trailing `mod`: there is no source declaration on
+Advanced values need no binding `mod`: there is no source declaration on
 which to write it.
 
 ```huc
-let File file = open_file("input.dat");
+let file: File = open_file("input.dat");
 consume(new Widget(7));
 ```
 
-Only relocation from named storage tests its trailing `mod`. Direct
+Only relocation from named storage tests its binding `mod`. Direct
 constructor initialization, described in section 4, creates no intermediate
 source place at all.
 
@@ -158,9 +160,9 @@ Otherwise ordinary binding could silently bypass the custom copy behavior:
 
 ```huc
 struct Ticket {
-    let u64 id;
+    let id: u64;
 
-    fn init(u64 id) : id(id) {
+    fn init(id: u64) : id(id) {
     }
 
     fn clone() -> Ticket {
@@ -168,9 +170,9 @@ struct Ticket {
     }
 }
 
-let Ticket mod original = Ticket(100);
-let Ticket moved = original;       // destructive relocation; clone is not called
-let Ticket copied = copy moved;    // calls Ticket.clone
+let mod original: Ticket = Ticket(100);
+let moved: Ticket = original; // destructive relocation; clone is not called
+let copied: Ticket = copy moved; // calls Ticket.clone
 ```
 
 Basic and Advanced are category names, not keywords or declaration modifiers.
@@ -181,9 +183,9 @@ when its author wants to prevent copying:
 
 ```huc
 struct UniqueTicket {
-    let u64 value;
+    let value: u64;
 
-    fn init(u64 value) : value(value) {
+    fn init(value: u64) : value(value) {
     }
 
     fn drop() mod -> void {
@@ -237,17 +239,18 @@ A constructor is a runtime method named `init`:
 
 ```huc
 struct Point {
-    let i32 x;
-    let i32 y;
+    let x: i32;
+    let y: i32;
 
-    fn init(i32 x, i32 y)
+    fn init(x: i32, y: i32)
         : x(x),
-          y(y) {
+          y(y),
+    {
     }
 }
 
-let Point origin = Point(0, 0);
-let Point& heap_point = new Point(10, 20);
+let origin: Point = Point(0, 0);
+let heap_point: Point# = new Point(10, 20);
 ```
 
 These expressions construct values directly. `Point(0, 0)` constructs
@@ -280,12 +283,13 @@ another `T` is just an explicitly selected constructor:
 
 ```huc
 struct ScaledPoint {
-    let i32 x;
-    let i32 y;
+    let x: i32;
+    let y: i32;
 
-    fn init(Point source, i32 scale)
+    fn init(source: Point, scale: i32)
         : x(source.x * scale),
-          y(source.y * scale) {
+          y(source.y * scale),
+    {
     }
 }
 ```
@@ -297,24 +301,25 @@ copied field by field:
 
 ```huc
 struct Point {
-    let i32 x;
-    let i32 y;
+    let x: i32;
+    let y: i32;
 
-    fn init(i32 x, i32 y)
+    fn init(x: i32, y: i32)
         : x(x),
-          y(y) {
+          y(y),
+    {
     }
 }
 
-fn translate(Point point, i32 dx, i32 dy) -> Point {
+fn translate(point: Point, dx: i32, dy: i32) -> Point {
     return Point(point.x + dx, point.y + dy);
 }
 
 fn copy_values() -> void {
-    let Point first = Point(10, 20);
-    let Point second = first;                 // implicit fieldwise copy
-    let Point third = copy first;             // same fieldwise copy
-    let Point fourth = translate(first, 3, 4); // first copied into parameter
+    let first: Point = Point(10, 20);
+    let second: Point = first; // implicit fieldwise copy
+    let third: Point = copy first; // same fieldwise copy
+    let fourth: Point = translate(first, 3, 4); // first copied into parameter
 }
 ```
 
@@ -350,11 +355,11 @@ The C++ example uses `const` because it is C++ source. HUC source has no
 Writable Basic assignment is also direct:
 
 ```huc
-let Point mod current = Point(1, 2);
-let Point replacement = Point(8, 9);
+let mod current: Point = Point(1, 2);
+let replacement: Point = Point(8, 9);
 
-current = replacement;       // fieldwise copy of a Basic value
-current = copy replacement;  // equivalent for a Basic type
+current = replacement; // fieldwise copy of a Basic value
+current = copy replacement; // equivalent for a Basic type
 ```
 
 ```cpp
@@ -416,8 +421,8 @@ custom copy-construction and copy-assignment hooks. Copy assignment is built
 from `clone`, destruction of the old destination, and destructive relocation:
 
 ```huc
-let Text mod destination = Text("old");
-let Text source = Text("new");
+let mod destination: Text = Text("old");
+let source: Text = Text("new");
 
 destination = copy source;
 ```
@@ -445,12 +450,13 @@ import std.memory as memory;
 import std.text as text;
 
 struct HeapText {
-    let mod u8* mod data;
-    let usize size;
+    let mod data: mod u8*;
+    let size: usize;
 
-    fn init(text::View source)
+    fn init(source: text::View)
         : data(memory::allocate_raw_bytes(source.size())),
-          size(source.size()) {
+          size(source.size()),
+    {
         memory::copy_bytes(this->data, source.data(), this->size);
     }
 
@@ -471,9 +477,9 @@ struct HeapText {
 }
 
 fn demonstrate() -> void {
-    let HeapText mod first = HeapText("alpha");
-    let HeapText second = copy first; // independent allocation
-    let HeapText third = first;       // relocate; first becomes inactive
+    let mod first: HeapText = HeapText("alpha");
+    let second: HeapText = copy first; // independent allocation
+    let third: HeapText = first; // relocate; first becomes inactive
 }
 ```
 
@@ -541,8 +547,8 @@ source owner must be non-null; evaluating `copy` on a null owner is undefined
 behavior. The operation has no implicit null-preserving case:
 
 ```huc
-let HeapText& mod first = new HeapText("hello");
-let HeapText& second = copy first;
+let mod first: HeapText# = new HeapText("hello");
+let second: HeapText# = copy first;
 ```
 
 For a valid source, the operation:
@@ -567,8 +573,8 @@ Copying a raw `HeapText*` never copies the pointee and is valid even when the
 pointer is null:
 
 ```huc
-let HeapText* observer = first;
-let HeapText* another_observer = copy observer; // copies only the address
+let observer: HeapText* = first;
+let another_observer: HeapText* = copy observer; // copies only the address
 ```
 
 ### 6.3 Specialized copy assignment
@@ -581,14 +587,14 @@ uses a clearly named writable method:
 struct ReusableBuffer {
     // fields, init, clone, and drop omitted
 
-    fn assign_from(ReusableBuffer* source) mod -> void {
+    fn assign_from(source: ReusableBuffer*) mod -> void {
         probable_resize_in_place(this, source->size());
         probable_copy_payload(this, source);
     }
 }
 
-let ReusableBuffer mod buffer = ReusableBuffer(...);
-let ReusableBuffer other = ReusableBuffer(...);
+let mod buffer: ReusableBuffer = ReusableBuffer(...);
+let other: ReusableBuffer = ReusableBuffer(...);
 buffer.assign_from(addressof(other));
 ```
 
@@ -609,17 +615,18 @@ neither `clone` nor `drop`:
 
 ```huc
 struct Packet {
-    let i32 tag;
-    let Widget& payload;
+    let tag: i32;
+    let payload: Widget#;
 
-    fn init(i32 tag, Widget& mod payload)
+    fn init(tag: i32, mod payload: Widget#)
         : tag(tag),
-          payload(payload) {
+          payload(payload),
+    {
     }
 }
 
-let Packet mod source = Packet(1, new Widget(7));
-let Packet destination = source; // destructive relocation
+let mod source: Packet = Packet(1, new Widget(7));
+let destination: Packet = source; // destructive relocation
 ```
 
 Before this binding, `source` contains an active `Packet` and `destination`
@@ -646,23 +653,23 @@ duplicates the value and leaves the source active.
 
 A fixed field cannot be assigned to directly, but it can be transferred as
 part of a whole value. The containing source must be writable. For example,
-transferring a writable structure also transfers its fixed `T&` fields.
+transferring a writable structure also transfers its fixed `T#` fields.
 
 The bytes of an inactive source need not be cleared and need not form a valid
 representation of `T`. The compiler tracks whether the *storage place* is
 active. Assigning a new value to an inactive place begins a new lifetime there.
 Using it as a value before reinitialization is undefined behavior.
 
-Direct relocation of a primitive `T&` is the deliberate exception to the
+Direct relocation of a primitive `T#` is the deliberate exception to the
 inactive-source rule. Relocating an owner slot transfers its address and
 writes null to the source. The source is then an active, usable null owner:
 
 ```huc
-let Widget& mod first = new Widget(7);
-let Widget& second = first;
+let mod first: Widget# = new Widget(7);
+let second: Widget# = first;
 
 if (!first) {
-    // defined: first is a null owner, not inactive Widget& storage
+    // defined: first is a null owner, not inactive Widget# storage
 }
 ```
 
@@ -685,7 +692,7 @@ a defined meaning. The backend may copy memory, use loads and stores, keep
 values in registers, or remove the transfer entirely. The program must still
 behave the same: the source becomes inactive, and cleanup stays correct.
 
-For example, `let T a = b;` for an inline Advanced `T` may keep the value in
+For example, `let a: T = b;` for an inline Advanced `T` may keep the value in
 the same registers and need no machine instruction for the transfer. `b`
 still becomes inactive; physical reuse does not make it usable afterward.
 
@@ -732,12 +739,13 @@ example:
 
 ```huc
 struct SelfIndexed {
-    let i32 mod payload;
-    let SelfIndexed* mod self;
+    let mod payload: i32;
+    let mod self: SelfIndexed*;
 
-    fn init(i32 payload)
+    fn init(payload: i32)
         : payload(payload),
-          self(null) {
+          self(null),
+    {
         this->self = this;
     }
 
@@ -750,8 +758,8 @@ struct SelfIndexed {
     }
 }
 
-let SelfIndexed mod first = SelfIndexed(10);
-let SelfIndexed second = first; // bitwise relocation; first becomes inactive
+let mod first: SelfIndexed = SelfIndexed(10);
+let second: SelfIndexed = first; // bitwise relocation; first becomes inactive
 
 // second.self still contains the old inline address. Relying on the broken
 // invariant is undefined behavior.
@@ -760,7 +768,7 @@ let SelfIndexed second = first; // bitwise relocation; first becomes inactive
 HUC0 does not automatically find or repair self-pointers. A value that needs
 such a pointer to stay correct must instead:
 
-- live behind `T&`, so relocation transfers only the owner word and the pointee
+- live behind `T#`, so relocation transfers only the owner word and the pointee
   address stays stable;
 - be redesigned to compute internal addresses when needed rather than storing
   them;
@@ -772,8 +780,8 @@ such a pointer to stay correct must instead:
 The usual solution is ownership:
 
 ```huc
-let mod SelfIndexed& mod stable = new SelfIndexed(10);
-let mod SelfIndexed& elsewhere = stable;
+let mod stable: mod SelfIndexed# = new SelfIndexed(10);
+let elsewhere: mod SelfIndexed# = stable;
 
 // Only the owner word relocated. The SelfIndexed allocation did not move.
 if (elsewhere->has_expected_address()) {
@@ -782,7 +790,7 @@ if (elsewhere->has_expected_address()) {
 ```
 
 `Vector<SelfIndexed>` breaks this requirement when growth relocates
-elements. `Vector<SelfIndexed&>` or a stable node container is appropriate.
+elements. `Vector<SelfIndexed#>` or a stable node container is appropriate.
 The same caveat applies to by-value parameters, returns, aggregate fields, and
 assignment. HUC is unchecked: obvious cases may be warned about, but the
 compiler is not required to prove address independence.
@@ -792,7 +800,7 @@ compiler is not required to prove address independence.
 Transferring a non-owner Advanced value requires a whole value whose active
 state the compiler tracks directly:
 
-- a named local or parameter with the required trailing `mod`;
+- a named local or parameter with the required `mod` before its name;
 - a fresh temporary or function-result place.
 
 Transferring a whole structure or array includes all its fields or elements.
@@ -801,9 +809,9 @@ It does not remove them one at a time while leaving the containing value active.
 HUC0 rejects explicit non-owner move-out from a pointee or subobject:
 
 ```huc
-let File value = *file_owner;          // error: indirect Advanced source
-let Lease lease = session.lease;       // error: Advanced subobject source
-let Packet packet = packets[index];    // error: Advanced element source
+let value: File = *file_owner; // error: indirect Advanced source
+let lease: Lease = session.lease; // error: Advanced subobject source
+let packet: Packet = packets[index]; // error: Advanced element source
 ```
 
 Otherwise the containing object, owner, or array could remain active even
@@ -834,9 +842,9 @@ not extend ordinary relocation-source eligibility.
 module examples.file_value;
 
 struct File {
-    let i32 mod handle;
+    let mod handle: i32;
 
-    fn init(i32 handle)
+    fn init(handle: i32)
         : handle(handle) {
     }
 
@@ -849,8 +857,8 @@ struct File {
 }
 
 fn transfer() -> void {
-    let File mod input = File(probable_os_open("input.dat"));
-    let File output = input; // destructive relocation; input is inactive
+    let mod input: File = File(probable_os_open("input.dat"));
+    let output: File = input; // destructive relocation; input is inactive
 } // output.drop closes the handle exactly once
 ```
 
@@ -908,8 +916,8 @@ A writable destination can be replaced by destructively relocating another
 value:
 
 ```huc
-let File mod current = File(probable_os_open("old.dat"));
-let File mod replacement = File(probable_os_open("new.dat"));
+let mod current: File = File(probable_os_open("old.dat"));
+let mod replacement: File = File(probable_os_open("new.dat"));
 
 current = replacement;
 ```
@@ -938,8 +946,8 @@ Assignment to an already inactive destination skips destination destruction
 and begins a new active lifetime:
 
 ```huc
-let File mod first = File(probable_os_open("a.dat"));
-let File mod second = first; // destructive relocation; first inactive
+let mod first: File = File(probable_os_open("a.dat"));
+let mod second: File = first; // destructive relocation; first inactive
 
 first = File(probable_os_open("b.dat")); // first active again
 ```
@@ -948,8 +956,8 @@ For an owner, the same operation destroys the old pointee before adopting the
 new address:
 
 ```huc
-let Widget& mod destination = new Widget(1);
-let Widget& mod source = new Widget(2);
+let mod destination: Widget# = new Widget(1);
+let mod source: Widget# = new Widget(2);
 
 destination = source; // destroys Widget(1), transfers Widget(2), clears source
 ```
@@ -993,14 +1001,15 @@ After `drop` returns, fields are destroyed in reverse declaration order.
 
 ```huc
 struct Session {
-    let Logger& log;
-    let Socket& socket;
-    let i64 mod native_transaction;
+    let log: Logger#;
+    let socket: Socket#;
+    let mod native_transaction: i64;
 
-    fn init(Logger& mod log, Socket& mod socket, i64 native_transaction)
+    fn init(mod log: Logger#, mod socket: Socket#, native_transaction: i64)
         : log(log),
           socket(socket),
-          native_transaction(native_transaction) {
+          native_transaction(native_transaction),
+    {
     }
 
     fn drop() mod -> void {
@@ -1032,23 +1041,23 @@ pending `drop` operations.
 Parameters are passed by value. Their behavior follows their type:
 
 ```huc
-fn inspect(Document* document) -> void {
+fn inspect(document: Document*) -> void {
     // raw observation; caller retains ownership
 }
 
-fn revise(mod Document* document) -> void {
+fn revise(document: mod Document*) -> void {
     // raw mutable observation; caller retains ownership
 }
 
-fn summarize(Metadata metadata) -> void {
+fn summarize(metadata: Metadata) -> void {
     // copies when Metadata is Basic
 }
 
-fn consume(Document& document) -> void {
+fn consume(document: Document#) -> void {
     // owns document; destroys it on return unless relocated onward
 }
 
-fn relay(Document& mod document) -> void {
+fn relay(mod document: Document#) -> void {
     probable_send(document); // relocates the parameter onward
 }
 ```
@@ -1056,10 +1065,10 @@ fn relay(Document& mod document) -> void {
 At a call:
 
 ```huc
-let mod Document& mod document = new Document(...);
+let mod document: mod Document# = new Document(...);
 
 inspect(document); // owner-to-observer conversion; no relocation
-revise(document);  // mutable owner-to-mutable-observer conversion
+revise(document); // mutable owner-to-mutable-observer conversion
 consume(document); // relocation; caller's owner becomes null
 ```
 
@@ -1073,11 +1082,11 @@ order makes relocations, allocation, I/O, device access, counters, and
 temporary construction follow source reading order.
 
 ```huc
-fn receive(Document* observed, Document& owned) -> void {
+fn receive(observed: Document*, owned: Document#) -> void {
     // observed points to the object held by owned
 }
 
-let Document& mod document = new Document(...);
+let mod document: Document# = new Document(...);
 receive(document, document);
 ```
 
@@ -1088,10 +1097,10 @@ would produce a different result.
 Another important example is:
 
 ```huc
-fn compare_versions(Document left, Document right) -> i32;
+fn compare_versions(left: Document, right: Document) -> i32;
 
-let Document mod document = Document(...);
-let i32 ordering = compare_versions(copy document, document);
+let mod document: Document = Document(...);
+let ordering: i32 = compare_versions(copy document, document);
 ```
 
 HUC clones `document` for `left`, then relocates the original into `right`.
@@ -1123,7 +1132,7 @@ Returning a Basic value follows the normal copy rule:
 
 ```huc
 fn origin() -> Point {
-    let Point point = Point(0, 0);
+    let point: Point = Point(0, 0);
     return point;
 }
 ```
@@ -1131,8 +1140,8 @@ fn origin() -> Point {
 Returning an Advanced value destructively relocates it:
 
 ```huc
-fn open_file(text::View path) -> File {
-    let File mod result = File(probable_os_open(path));
+fn open_file(path: text::View) -> File {
+    let mod result: File = File(probable_os_open(path));
     return result; // relocation; result becomes inactive
 }
 ```
@@ -1140,7 +1149,7 @@ fn open_file(text::View path) -> File {
 Returning an owner relocates the owner:
 
 ```huc
-fn make_widget(i32 id) -> Widget& {
+fn make_widget(id: i32) -> Widget# {
     return new Widget(id);
 }
 ```
@@ -1186,18 +1195,18 @@ import std.collections as collections;
 // Point, HeapText, and Widget refer to the example types defined above.
 
 fn point_values() -> void {
-    let collections::Vector<Point> mod points =
+    let mod points: collections::Vector<Point> =
         collections::Vector<Point>();
-    let Point point = Point(3, 4);
+    let point: Point = Point(3, 4);
 
-    points.push(point);      // Point is Basic: copies into the vector
+    points.push(point); // Point is Basic: copies into the vector
     points.push(copy point); // equivalent, but redundant for Basic Point
 }
 
 fn text_values() -> void {
-    let collections::Vector<HeapText> mod texts =
+    let mod texts: collections::Vector<HeapText> =
         collections::Vector<HeapText>();
-    let HeapText mod text = HeapText("first");
+    let mod text: HeapText = HeapText("first");
 
     texts.push(text); // destructive relocation; text becomes inactive
     text = HeapText("second");
@@ -1205,9 +1214,9 @@ fn text_values() -> void {
 }
 
 fn owner_values() -> void {
-    let collections::Vector<Widget&> mod widgets =
-        collections::Vector<Widget&>();
-    let Widget& mod widget = new Widget(7);
+    let mod widgets: collections::Vector<Widget#> =
+        collections::Vector<Widget#>();
+    let mod widget: Widget# = new Widget(7);
 
     widgets.push(widget); // relocates one owner word; widget becomes null
 }
@@ -1269,32 +1278,33 @@ import std.io as io;
 import std.memory as memory;
 
 struct Image {
-    let mod u8* mod pixels;
-    let usize width;
-    let usize height;
-    let usize stride;
+    let mod pixels: mod u8*;
+    let width: usize;
+    let height: usize;
+    let stride: usize;
 
-    fn init(usize width, usize height)
+    fn init(width: usize, height: usize)
         : pixels(memory::allocate_zeroed_bytes(width * height * 4)),
           width(width),
           height(height),
-          stride(width * 4) {
+          stride(width * 4),
+    {
     }
 
     fn byte_count() -> usize {
         return this->stride * this->height;
     }
 
-    fn fill(u8 value) mod -> void {
+    fn fill(value: u8) mod -> void {
         memory::fill_bytes(this->pixels, value, this->byte_count());
     }
 
     fn clone() -> Image {
-        let Image mod result = Image(this->width, this->height);
+        let mod result: Image = Image(this->width, this->height);
         memory::copy_bytes(
             result.pixels,
             this->pixels,
-            this->byte_count()
+            this->byte_count(),
         );
         return result;
     }
@@ -1307,30 +1317,30 @@ struct Image {
     }
 }
 
-fn print_shape(Image* image) -> void {
+fn print_shape(image: Image*) -> void {
     io::println(image->width, "x", image->height);
 }
 
-fn invert(mod Image* image) -> void {
+fn invert(image: mod Image*) -> void {
     probable_invert_bytes(image->pixels, image->byte_count());
 }
 
-fn upload(Image& image) -> void {
+fn upload(image: Image#) -> void {
     probable_gpu_upload(image->pixels, image->width, image->height);
 } // image is destroyed here
 
 fn main() -> i32 {
-    let mod Image& mod working = new Image(1920, 1080);
+    let mod working: mod Image# = new Image(1920, 1080);
     working->fill(0);
 
-    print_shape(working);           // observe; working still owns
-    invert(working);                // mutate pointee; still owns
+    print_shape(working); // observe; working still owns
+    invert(working); // mutate pointee; still owns
 
-    let Image& snapshot = copy working; // deep copy through Image.clone
+    let snapshot: Image# = copy working; // deep copy through Image.clone
 
-    let mod Image& mod outgoing = working; // relocate; working becomes null
+    let mod outgoing: mod Image# = working; // relocate; working becomes null
     print_shape(outgoing);
-    upload(outgoing);               // relocate; outgoing becomes null
+    upload(outgoing); // relocate; outgoing becomes null
 
     print_shape(snapshot);
     return 0;
@@ -1427,19 +1437,19 @@ relocation behavior, C++ references, or C++ value-category overloads.
 
 | HUC operation | Closest C++20 operation | Important difference |
 |---|---|---|
-| `let T value = T(...)` | `const T value(...)` | HUC is fixed by default |
-| `let T mod value = T(...)` | `T value(...)` | HUC spells writable storage explicitly |
-| `let T b = a` for Basic `T` | `T b = a` | Both copy |
-| `let T b = a` for Advanced `T` | `T b = std::move(a)` | HUC destructively relocates and ends the non-owner source lifetime |
+| `let value: T = T(...)` | `const T value(...)` | HUC is fixed by default |
+| `let mod value: T = T(...)` | `T value(...)` | HUC spells writable storage explicitly |
+| `let b: T = a` for Basic `T` | `T b = a` | Both copy |
+| `let b: T = a` for Advanced `T` | `T b = std::move(a)` | HUC destructively relocates and ends the non-owner source lifetime |
 | `copy a` for Advanced `T` | Copy construction | HUC makes a potentially expensive copy explicit |
 | `destination = copy source` | Copy assignment | HUC composes clone plus replace |
 | `destination = source` for Advanced `T` | Move assignment | HUC drops the destination, then performs non-overridable relocation |
 | `T*` | `const T*` by default | HUC pointer is always raw and unchecked |
 | `mod T*` | `T*` | Writable pointee |
-| `T&` | `std::unique_ptr<T>` | HUC `&` is ownership, not reference |
-| `new T(...)` | `std::make_unique<T>(...)` | Produces `T&` |
+| `T#` | `std::unique_ptr<T>` | HUC `#` is ownership, not reference |
+| `new T(...)` | `std::make_unique<T>(...)` | Produces `T#` |
 | Owner-to-`T*` conversion | `.get()` | HUC conversion is implicit in observer contexts |
-| Owner parameter `T&` | `std::unique_ptr<T>` by value | HUC call relocates the owner automatically |
+| Owner parameter `T#` | `std::unique_ptr<T>` by value | HUC call relocates the owner automatically |
 | `fn clone() -> T` | Copy constructor, often clone function | Invoked only by explicit logical copying |
 | `fn drop() mod -> void` | Destructor body | HUC destroys fields after `drop` |
 | Fixed HUC destructive relocation | Move constructor/assignment | HUC ends the source lifetime and has no user hook |
@@ -1470,7 +1480,7 @@ The compiler must reject:
 - any chained pointer/owner form, including one hidden by an alias;
 - `addressof` applied to a pointer or owner slot;
 - `std::slot_of` applied to a non-place, such as a literal or function symbol;
-- attempts to bind `T&` as though it were a C++ reference alias.
+- attempts to bind `T#` as though it were a C++ reference alias.
 
 Useful warnings include:
 
@@ -1488,7 +1498,7 @@ Warnings do not turn HUC into a memory-safe language and may be disabled.
 The HUC0-to-C17 transpiler must preserve these source semantics rather than
 inheriting C defaults:
 
-1. `T&` lowers to one typed C pointer; ownership is enforced by HUC analysis,
+1. `T#` lowers to one typed C pointer; ownership is enforced by HUC analysis,
    not by the C type system.
 2. Basic/Advanced classification is decided by HUC semantic analysis.
 3. `clone` runs only for an evaluated `copy` that requires it.
@@ -1504,7 +1514,7 @@ inheriting C defaults:
 10. generated initialization, clone, drop, and relocation functions are
     implementation machinery, not extra HUC customization points;
 11. active/inactive state belongs to a storage place and must not add a hidden
-    field to nominal `T` or to pointer-sized `T&`;
+    field to nominal `T` or to pointer-sized `T#`;
 12. explicit cleanup covers every normal exit and active replacement; no drop
     call may be emitted for an inactive raw-handle source merely because its
     physical C storage leaves scope;
