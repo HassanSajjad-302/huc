@@ -127,20 +127,21 @@ Only relocation from named storage tests its binding `mod`. Direct
 constructor initialization, described in section 4, creates no intermediate
 source place at all.
 
-### 1.1 Adopting a raw pointer
+### 1.1 Taking ownership from a raw pointer
 
-`adopt(raw)` explicitly establishes ownership of an existing compatible
-allocation. It infers `T#` from `T*`, or `mod T#` from `mod T*`; the destination
-does not select the pointee type. It evaluates the pointer expression once
-without allocating, constructing, or cloning the object.
+Binding a compatible raw pointer to an owner takes ownership of its existing
+allocation. `T*` can bind to `T#`; `mod T*` can bind to `mod T#` or `T#`.
+The pointee type must match. The conversion never adds pointee permissions.
+It evaluates the pointer expression once without allocating, constructing,
+or cloning the object.
 
 The raw source is left unchanged, not nulled or made inactive. Even a fixed
-raw-pointer binding can be adopted from:
+raw-pointer binding can supply an owner:
 
 ```huc
 let mod original: Widget# = new Widget(7);
 let raw: Widget* = release(original); // original is null; raw is fixed
-let owner: Widget# = adopt(raw); // raw still observes the same Widget
+let owner: Widget# = raw; // raw still observes the same Widget
 ```
 
 Only `owner` now has automatic cleanup responsibility. `raw` and any other raw
@@ -148,15 +149,32 @@ aliases can still observe the live object; they become dangling when it is
 destroyed. They must not separately free it or create another owner for it.
 This differs from owner-to-owner relocation, which still clears its source.
 
+The same rule applies to field initialization, assignment, owner parameters,
+and owner return values. Replacing an existing owner evaluates and retains
+the raw-pointer value before cleaning up the destination's old pointee.
+Only the destination needs binding `mod` for assignment; the raw source does not.
+`let alias: auto = raw;` still infers a raw pointer, not an owner.
+
+For compatible types and distinct source and destination slots:
+
+| Source | Destination | Source afterward |
+|---|---|---|
+| `T*` | `T*` | Unchanged observer |
+| `T#` | `T*` | Unchanged owner |
+| `T#` | `T#` | Active, null owner |
+| `T*` | `T#` | Unchanged observer |
+
 A non-null pointer must designate a live complete object in storage compatible
 with the owner's deallocation rules, with no other owner responsible for it.
-Adopting a local, subobject, incompatible allocation, or already-owned object
-violates these unchecked preconditions. A typed null pointer gives an empty
-owner. Bare `adopt(null)`, owner or integer operands, and explicit type arguments
-are rejected. Use `let owner: T# = null;` when declaring an empty owner.
-Implicit `T*` to `T#` conversion remains forbidden.
+Taking ownership of a local, subobject, incompatible allocation, or already-owned
+object violates these unchecked preconditions. In particular, assigning an
+owner's raw observer back to that owner is not a valid self-relocation.
+A null raw pointer gives an empty owner, as does `let owner: T# = null;`.
+Integers do not implicitly convert to owners. When binding to an owner, an
+owner source always uses relocation; the compiler cannot route it through an
+observer to avoid clearing the source or checking its binding `mod`.
 
-`adopt`, `slot_off`, `release`, and `reset` are compiler-known unqualified
+`slot_off`, `release`, and `reset` are compiler-known unqualified
 intrinsics, not `std::` library functions.
 
 ## 2. Basic and Advanced types
@@ -1106,6 +1124,10 @@ revise(document); // mutable owner-to-mutable-observer conversion
 consume(document); // relocation; caller's owner becomes null
 ```
 
+If an owner parameter receives a compatible raw pointer instead, it takes
+ownership without changing that pointer. The allocation must not already be
+owned. Retained raw observers become dangling if the callee destroys the object.
+
 Argument expressions and their corresponding parameter initializations occur
 strictly left-to-right.
 
@@ -1162,7 +1184,7 @@ Optimizers may reorder pure computation when the program still behaves the same.
 
 ## 11. Return values
 
-Returning a Basic value follows the normal copy rule:
+Returning a Basic value as the same Basic type follows the normal copy rule:
 
 ```huc
 fn origin() -> Point {
@@ -1185,6 +1207,16 @@ Returning an owner relocates the owner:
 ```huc
 fn make_widget(id: i32) -> Widget# {
     return new Widget(id);
+}
+```
+
+A raw pointer returned as `T#` instead gives the result ownership without
+changing the raw source. The usual allocation and unique-ownership preconditions
+apply:
+
+```huc
+fn take_widget(raw: Widget*) -> Widget# {
+    return raw; // result owns; raw is not nulled
 }
 ```
 
@@ -1481,7 +1513,7 @@ relocation behavior, C++ references, or C++ value-category overloads.
 | `T*` | `const T*` by default | HUC pointer is always raw and unchecked |
 | `mod T*` | `T*` | Writable pointee |
 | `&value` | `std::addressof(value)` | HUC permits only eligible inline data places and cannot overload `&` |
-| `adopt(raw)` | Constructing `std::unique_ptr<T>` from a compatible raw pointer | HUC infers the owner type and leaves the raw pointer unchanged |
+| `let owner: T# = raw` | Constructing `std::unique_ptr<T>` from a compatible raw pointer | The HUC destination takes ownership; the raw pointer stays unchanged |
 | `T#` | `std::unique_ptr<T>` | HUC `#` is ownership, not reference |
 | `new T(...)` | `std::make_unique<T>(...)` | Produces `T#` |
 | Owner-to-`T*` conversion | `.get()` | HUC conversion is implicit in observer contexts |
@@ -1516,7 +1548,8 @@ The compiler must reject:
 - any chained pointer/owner form, including one hidden by an alias;
 - unary `&` applied to a pointer/owner slot or non-place result;
 - `slot_off` applied to a non-place, such as a literal or function symbol;
-- `adopt` supplied with a non-raw-pointer operand or explicit type arguments;
+- raw-to-owner binding with an incompatible pointee type or added pointee `mod`;
+- implicit integer-to-owner conversion;
 - attempts to bind `T#` as though it were a C++ reference alias.
 
 Useful warnings include:

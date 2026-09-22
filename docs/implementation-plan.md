@@ -69,7 +69,7 @@ HUC is not a memory-safe Rust alternative. It deliberately permits:
 - dangling and invalid raw pointers;
 - null dereferences;
 - unchecked indexing and pointer arithmetic;
-- invalid adoption of allocations;
+- taking ownership of ineligible or already-owned allocations;
 - use of inactive source storage after relocation;
 - data races;
 - signed overflow and other specified undefined behavior.
@@ -122,7 +122,8 @@ HUC0 contains:
 - `mod` permissions;
 - raw pointers `T*`;
 - unique owners `T#`;
-- unary `&`, `slot_off`, inferred-type `adopt`, and the core type-operand intrinsics;
+- unary `&`, `slot_off`, and the core type-operand intrinsics;
+- direct raw-pointer-to-owner binding;
 - constructors, methods, `clone`, and `drop`;
 - runtime expressions and control flow;
 - local `let name: auto` inference.
@@ -138,7 +139,6 @@ HUC0 does not contain:
 
 The angle operands in `as<T>` and `ptr_as<T*>` are built-in type operands,
 not phase-family requests. They are the only angle forms accepted by HUC0.
-`adopt(raw)` infers its owner type from the raw-pointer operand instead.
 All HUC intrinsics have unqualified names, not `std::` names; they are not
 ordinary standard-library functions.
 
@@ -269,21 +269,28 @@ The default representation is one address-sized word:
 - relocation copies the address and clears the source;
 - owner arithmetic is prohibited;
 - observation as a compatible raw pointer is implicit;
-- conversion from raw pointer to owner is explicit through `adopt(raw)`.
+- binding a compatible raw pointer to an owner takes ownership implicitly.
 
-`adopt(raw)` evaluates one raw-pointer expression and returns `T#` for `T*`,
-or `mod T#` for `mod T*`. It preserves the address and pointee permissions;
-the destination does not determine the inferred type. The source pointer is
-not nulled, deactivated, or otherwise changed, so a fixed raw-pointer binding
-is allowed. Adoption does not allocate, clone, or construct the pointee.
+`let owner: T# = raw;` evaluates the raw-pointer expression once and gives
+the destination ownership without changing the source pointer. A fixed raw
+binding is allowed. The same conversion applies in assignment, field
+initialization, parameter binding, and return-value binding. `T*` can bind to
+`T#`; `mod T*` can bind to `mod T#` or `T#`. The pointee type must match after
+alias resolution; pointee permissions may be dropped but never gained.
+`auto` still infers the raw source's type and does not create an owner.
+The conversion does not allocate, clone, or construct the pointee. Assignment
+retains the raw value before cleaning up the destination's old pointee.
 
-A non-null argument must designate a live complete object in a compatible
+A non-null pointer must designate a live complete object in a compatible
 allocation with no other owner responsible for cleanup. Raw observers may
-remain, but the allocation must not be separately freed or adopted again.
-These are unchecked programmer obligations, not runtime tests. A typed null
-pointer produces an empty owner. Bare `adopt(null)`, owner and integer operands,
-and type arguments such as `adopt<T>(raw)` are rejected. Implicit raw-to-owner
-binding remains forbidden. `release` still clears its source owner.
+remain, but the allocation must not be separately freed or given to another
+owner. These are unchecked programmer obligations, not runtime tests.
+Assigning an owner's own raw observer back to it violates these preconditions;
+it is not exact self-relocation. A null raw pointer or direct `null` binding
+produces an empty owner. Integers do not implicitly convert to owners.
+Owner sources still use relocation and cannot be converted through a raw
+observer to bypass source nulling or binding `mod`. `release` still clears
+its source owner.
 
 Relocating from a named source requires a writable source slot because
 relocation modifies the source.
@@ -545,7 +552,8 @@ Ordinary `fn` overloads are selected by:
 1. exact type match;
 2. lossless built-in numeric promotion;
 3. permission-dropping pointer conversion;
-4. owner-to-observer conversion.
+4. owner-to-observer or raw-to-owner conversion, including permitted pointee
+   permission dropping.
 
 User-defined implicit conversions do not participate. Overloads that differ
 only in observation versus ownership consumption are prohibited because
@@ -1110,7 +1118,7 @@ HIR records:
 - value use: read, observe, copy, relocate, or place;
 - unary `&` of an eligible inline place;
 - untyped `slot_off` and explicit `usize`-to-raw-pointer reconstruction;
-- `adopt(raw)` with an operand-derived owner type and no source-pointer write;
+- raw-to-owner conversion to the expected owner type with no source-pointer write;
 - source origin;
 - explicit conversion selected by HUC.
 
@@ -1123,7 +1131,7 @@ MIR records:
 - cleanup edges;
 - conditional drop flags only where control flow requires them;
 - source nulling for direct owner relocations, not for owner words inside
-  relocated aggregates or raw pointers passed to `adopt`.
+  relocated aggregates or raw pointers bound to owners.
 
 No semantic decision is deferred to the C compiler or its ABI lowering.
 
@@ -1164,8 +1172,9 @@ Acceptance:
 
 ### 10.7 Increment F: ownership and lifecycle
 
-Represent each primitive owner with one typed C pointer. HUC semantic analysis
-rejects implicit owner duplication; the C representation itself is not a
+Represent each primitive owner with one typed C pointer. Direct owner binding
+relocates rather than duplicates ownership; the validity of taking ownership
+from a raw pointer remains unchecked. The C representation itself is not a
 move-only type. Generate concrete per-type helpers or equivalent inline code
 for release, reset, observation, relocation, and pointee destruction followed
 by compatible deallocation. Check the one-word layout with C17 static
@@ -1181,6 +1190,7 @@ Implement:
 
 - `new T(args)`;
 - owner observation;
+- raw-to-owner binding in initialization, assignment, arguments, and returns;
 - owner relocation initialization and assignment;
 - structural Basic/Advanced classification, including `clone` opting into Advanced;
 - exact self-relocation as a no-op;
@@ -1191,11 +1201,11 @@ Implement:
   hook or embedded-owner clearing;
 - user `drop`;
 - reverse field cleanup;
-- `adopt`, `release`, and `reset`.
+- `release` and `reset`.
 
-`adopt(raw)` has an unchecked compatible-allocation and exclusive-ownership
-precondition for non-null arguments. It infers and preserves pointee permissions
-and leaves the raw source unchanged, without requiring binding `mod`.
+Raw-to-owner binding has unchecked compatible-allocation and exclusive-ownership
+preconditions for non-null pointers. It allows only compatible pointee
+permissions and leaves the raw source unchanged, without requiring binding `mod`.
 `release(owner)` and `reset(owner)` require a named owner slot with `mod`
 before its binding name.
 
@@ -1209,9 +1219,12 @@ Acceptance:
 - owner-bearing aggregates lower to whole-value `Relocate` without embedded
   `OwnerRelocate` operations or required field null stores;
 - directly moving an individual owner field still clears that field;
-- adoption from fixed and writable raw-pointer bindings leaves their addresses
-  unchanged, evaluates the operand once, and produces exactly one owner;
-- typed null adoption returns an empty owner with the correct pointee permissions;
+- taking ownership from fixed and writable raw-pointer bindings leaves their
+  addresses unchanged, evaluates the operand once, and establishes one owner;
+- raw-to-owner initialization, assignment, parameter binding, and return binding
+  work without an intrinsic; assignment cleans up the old destination once;
+- null raw pointers and direct `null` bind to empty owners;
+- `auto` from a raw pointer stays raw, with no ownership or cleanup;
 - indirect non-owner move-out is rejected without adding owner liveness state;
 - ordinary binding never invokes `clone`;
 - sanitizers find no backend double destruction;
@@ -1450,8 +1463,9 @@ Include:
 - non-owner relocation from a pointee, field, or array element;
 - unary `&` applied to a pointer/owner slot, non-place result, or function symbol;
 - `slot_off` applied to a literal, temporary value, or function symbol;
-- `adopt` with an owner, integer, bare `null`, wrong arity, or type arguments;
-- attempted implicit raw-pointer-to-owner conversion or gain of pointee `mod`;
+- raw-to-owner binding with an incompatible pointee type or added pointee `mod`;
+- implicit integer-to-owner conversion;
+- implicit conversion chains that bypass owner relocation's source-`mod` check;
 - attempts to use former address-taking or `std::` intrinsic spellings;
 - `ptr_as` with an invalid source type or a composed pointer target;
 - mutation without `mod`;
@@ -1473,8 +1487,8 @@ Compile generated C17 and test:
 
 - typed address-taking and untyped `slot_off` addresses with side-effecting
   place expressions evaluated once;
-- adoption leaving all raw-pointer aliases unchanged and a single owner
-  responsible for cleanup; ordinary owner relocation still nulls its source;
+- raw-to-owner binding leaving all raw-pointer aliases unchanged and a single
+  owner responsible for cleanup; ordinary owner relocation still nulls its source;
 - scalar computation;
 - argument side-effect ordering;
 - constructors and field initialization order;

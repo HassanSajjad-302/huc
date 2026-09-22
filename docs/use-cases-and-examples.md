@@ -26,7 +26,7 @@ The following syntax and behavior describe language rules, not library proposals
 - `T*` and `T#`;
 - unary `&` for inline-place observation;
 - `slot_off` for unchecked, untyped slot addresses;
-- `adopt(raw)` for explicit ownership adoption without clearing the raw pointer;
+- raw-to-owner binding without clearing the raw pointer;
 - `fn`, `fn1`, and `fn2`;
 - `struct`, `struct1`, and `struct2`;
 - `if1`, `for1`, and `while1`;
@@ -268,24 +268,26 @@ without compiler permission tracking through the integer and cast. The caller
 is responsible for storage lifetime, alignment, representation, and ownership
 rules. This does not make `Counter#*` a valid type.
 
-Explicit adoption leaves a raw-pointer source unchanged:
+Taking ownership through ordinary binding leaves a raw-pointer source unchanged:
 
 ```huc
-fn adoption_example() -> i32 {
+fn raw_to_owner_example() -> i32 {
     let mod original: mod Counter# = new Counter();
     let raw: mod Counter* = release(original); // original becomes null
-    let owner: mod Counter# = adopt(raw); // inferred from raw, which stays unchanged
+    let owner: mod Counter# = raw; // takes ownership; raw stays unchanged
 
     raw->increment(); // raw still observes the live Counter
     return owner->read();
 } // only owner destroys the Counter
 ```
 
-The raw binding needs no `mod` because adoption does not write to it. The
-`mod` inside its type permits mutation of the Counter. `adopt` requires a
-compatible allocation that no other owner still owns; it is not an implicit
-conversion from any observer to an owner. The `release` above makes this
-example's transfer of cleanup responsibility explicit.
+The raw binding needs no `mod` because taking ownership does not write to it.
+The `mod` inside its type permits mutation of the Counter. The conversion
+requires a compatible allocation that no other owner still owns. This is an
+unchecked precondition, not an automatic allocation or ownership check. The
+`release` above hands cleanup responsibility out of the original owner first.
+The same conversion works in owner assignment, arguments, and returns; an
+`auto` declaration initialized from `raw` still creates only a raw observer.
 
 ### 3.3 Observation and consumption
 

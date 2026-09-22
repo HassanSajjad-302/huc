@@ -264,13 +264,13 @@ uses them; line breaks do not replace them.
 ### 3.4 Core intrinsic names
 
 HUC intrinsics use unqualified compiler-known names, not `std::` names.
-`slot_off(place)`, `adopt(raw)`, `release(owner)`, and `reset(owner)` use
+`slot_off(place)`, `release(owner)`, and `reset(owner)` use
 ordinary call syntax but cannot be overloaded or used as first-class function
 values. Semantic analysis checks their operands and argument counts. `as<T>`
 and `ptr_as<T*>` retain their explicit type operands.
 
 Address-taking uses unary `&`, not a named intrinsic call. The former
-`addressof`, `std::slot_of`, and `adopt<T>(raw)` spellings are not aliases for
+`addressof` and `std::slot_of` spellings are not aliases for
 the new operations. The planned `construct_at` and `destruct_at` also have
 unqualified names; their interfaces and lifetime rules remain deferred.
 
@@ -379,8 +379,9 @@ When a non-null owner is destroyed, HUC:
 Destroying a null owner does nothing.
 
 An owner cannot participate in pointer arithmetic. It converts implicitly to
-a permission-compatible `T*` only in an observing context. The reverse
-conversion is never implicit.
+a permission-compatible `T*` only in an observing context. Conversely, binding
+a compatible raw pointer to `T#` takes ownership without changing the raw
+pointer. The allocation and ownership preconditions are defined in section 6.8.
 
 ### 4.4 Pointer layering
 
@@ -691,8 +692,9 @@ For:
 let destination: T# = source;
 ```
 
-`source` must be a writable owner slot, such as a parameter or local with
-`mod` before its name. The abstract operation is:
+When `source` is an owner in named storage, its slot must be writable, such as
+a parameter or local with `mod` before its name. Fresh owner results need no
+source binding permission. For an owner slot, the abstract operation is:
 
 ```text
 destination.address = source.address
@@ -702,6 +704,9 @@ source.address = null
 No user function is called by the transfer. Unlike a relocated non-owner
 value, the source owner remains active and may immediately be tested, assigned,
 destroyed, or relocated again. It simply owns nothing.
+
+A raw-pointer source instead uses section 6.8's raw-to-owner binding rule and
+is left unchanged.
 
 ### 6.3 Owner destructive-relocation assignment
 
@@ -899,56 +904,59 @@ Custom allocation policies use ordinary library owner types. Stateful custom
 deleters are deliberately not stored in primitive `T#`, preserving its
 one-word representation.
 
-### 6.8 Adoption, release, and reset
+### 6.8 Taking ownership from raw pointers, release, and reset
 
-Low-level ownership transitions are explicit:
+Binding a raw pointer to an owner takes ownership directly:
 
 ```huc
 let mod first: Widget# = new Widget(7);
 let raw: Widget* = release(first); // first becomes null
-let mod owner: Widget# = adopt(raw); // raw is unchanged; owner now owns
+let mod owner: Widget# = raw; // raw is unchanged; owner now owns
 reset(owner); // destroy pointee and set owner to null; raw is now dangling
 ```
 
-`adopt(raw)` is a compiler-known, non-overloadable intrinsic taking exactly
-one raw-pointer expression. It infers its result from that expression's type:
+This built-in conversion applies wherever an owner destination is expected:
+local or field initialization, assignment, parameter binding, and return-value
+binding. No intrinsic call or cast is needed. The permitted conversions are:
 
-- `T*` produces `T#`;
-- `mod T*` produces `mod T#`.
+- `T*` to `T#`;
+- `mod T*` to `mod T#` or `T#`.
 
-Type aliases are resolved first. `T` must be a complete type that can be owned.
-The destination does not determine the adopted type or grant extra pointee
-permissions. `adopt` does not reinterpret the pointer. Any necessary pointer
-cast must be explicit and does not prove that adoption is valid. There are no
-type arguments: `adopt<T>(raw)` is rejected in both HUC0 and HUC1.
+Type aliases are resolved first. The pointee type must match and be a complete
+type that can be owned. The conversion may drop pointee `mod` but cannot add
+it or reinterpret the pointer. Any necessary pointer cast must be explicit
+and does not prove that taking ownership is valid. `let alias: auto = raw;`
+still infers a raw pointer and creates no owner.
 
-The pointer expression is evaluated once. Adoption creates an owner holding
+The pointer expression is evaluated once. The destination owner holds
 that address without allocating, constructing, cloning, or destroying the
-pointee. It does not null, deactivate, or otherwise write to a source pointer
+pointee. The conversion does not null, deactivate, or write to a source pointer
 slot, and it does not require that slot to have binding `mod`. Existing raw
 aliases remain observers; they do not gain ownership or a longer lifetime.
-The adopted allocation has one owner and receives cleanup through that owner.
-Normal owner assignment still cleans up the destination's old pointee when
-replacing it with the adoption result.
+The allocation receives cleanup through the new owner. For assignment to an
+existing owner, evaluate the destination place and then the raw-pointer value,
+retain that value, clean up the destination's old pointee if non-null, and
+store the retained pointer. The destination must be writable as usual.
 
 A non-null pointer must designate a live, complete `T` in an allocation
 compatible with the primitive owner's cleanup and deallocation rules. No
 other owner may still be responsible for that allocation. A pointer to a
 local, subobject, incompatible allocation, or already-owned object cannot be
-validly adopted. Violating these unchecked preconditions is undefined behavior;
-the compiler does not insert allocation or uniqueness checks. Keeping raw
-observers is permitted, but separately freeing or adopting the allocation
-again is not.
+validly bound to an owner. Violating these unchecked preconditions is undefined
+behavior; the compiler does not insert allocation or uniqueness checks.
+Keeping raw observers is permitted, but separately freeing the allocation or
+giving it to another owner is not. This also rules out assigning an owner's
+own raw observer back to it; raw-to-owner assignment is not self-relocation.
 
-A typed null pointer produces an empty owner of the inferred type, without
-changing the pointer. Bare `adopt(null)` is rejected because `null` supplies no
-pointee type; use `let owner: T# = null;` for an empty owner. An owner operand
-or integer operand is also rejected; `adopt` does not apply an implicit
-owner-to-observer conversion. Ordinary implicit `T*` to `T#` binding remains
-forbidden.
+A null raw pointer produces an empty owner without changing the pointer.
+Direct binding of `null`, such as `let owner: T# = null;`, remains valid.
+Integers do not implicitly convert to owners. An owner source still uses
+owner-to-owner relocation and becomes null; the compiler must not convert it
+through a raw observer to bypass relocation or its source-`mod` requirement.
 
 `release` transfers the cleanup obligation to the programmer and clears the
-source owner. It is different from adoption, which leaves its raw source alone.
+source owner. Taking ownership from a raw pointer instead leaves that source
+alone.
 `release(owner)` and `reset(owner)` require a named owner slot declared with
 `mod` before its name. A primitive owner `swap` operation is deferred from 0.1;
 a library can express it using `release`, `reset`, and destructive relocation.
@@ -965,6 +973,9 @@ fn consume(widget: Widget#) -> void; // consume
 
 Supplying an owner to a raw-pointer parameter is an implicit observation.
 Supplying it to an owner parameter destructively relocates it.
+Supplying a compatible raw pointer to an owner parameter gives that parameter
+ownership under section 6.8's preconditions, leaving the raw argument unchanged.
+If the callee destroys the object, retained raw observers become dangling.
 
 HUC 0.1 does not have an ownership-slot reference that lets a callee reseat the
 caller's owner without consuming it. Consume-and-return is the normal form:
@@ -980,6 +991,9 @@ location. A returned non-owner local becomes inactive. A returned local owner
 becomes null, unless the implementation elides the transfer entirely.
 
 Returning `T*` never transfers or extends ownership.
+Returning a compatible raw pointer from a function whose result type is `T#`
+takes ownership for the result under section 6.8's rules. The raw source is
+unchanged; it is not treated as a relocated owner.
 
 ### 6.11 Ownership and overload resolution
 
@@ -1073,7 +1087,8 @@ have a built-in explicit contextual conversion to `bool`; integers do not.
 1. exact type matches;
 2. built-in lossless numeric promotions;
 3. permission-dropping pointer conversion;
-4. owner-to-observer conversion.
+4. owner-to-observer or raw-to-owner conversion, including permitted pointee
+   permission dropping.
 
 No user-defined implicit conversion participates. A tie is a diagnostic.
 Section 6.11's ownership-only restriction applies before ranking.
@@ -1179,9 +1194,8 @@ translator writes one HUC0 module for every residual runtime module before the
 HUC0-to-C17 translator begins.
 
 The built-in HUC0 forms `as<T>` and `ptr_as<T*>` use an angle-delimited type
-operand but are not phase-family requests. `adopt(raw)` instead infers its type
-from the raw pointer and takes no type arguments. No nominal
-type or ordinary function application with phase arguments survives into HUC0.
+operand but are not phase-family requests. No nominal type or ordinary function
+application with phase arguments survives into HUC0.
 
 ### 9.2 Uniform phase-1 families
 
@@ -1889,8 +1903,10 @@ An `extern "C"` function may use:
 
 It must not expose `T#`, HUC Advanced values with `drop`, phase-1/2 types, or
 compiler metadata. Ownership across C boundaries is expressed by documented
-functions returning or accepting raw pointers and explicit `adopt`/`release`
-at the HUC side.
+functions returning or accepting raw pointers. On the HUC side, binding a
+returned raw pointer to `T#` takes ownership when its allocation is compatible;
+`release` hands cleanup responsibility out of an owner. Mere observation of an
+owner as `T*` does not release ownership.
 
 C-layout structure attributes, opaque foreign handle declarations, pointer
 chains, and C variadics are deferred from 0.1. A small C shim can flatten such
@@ -1910,7 +1926,7 @@ The following list is representative rather than exhaustive:
 - dereferencing a null owner after its ownership was relocated;
 - evaluating `copy` on a null owner;
 - use of inactive Advanced storage;
-- double adoption or adoption of an incompatible allocation;
+- taking ownership of an already-owned object or an incompatible allocation;
 - violation of an external function's contract;
 - out-of-range unchecked indexing;
 - signed overflow, invalid shifts, and integer division by zero;
@@ -1960,7 +1976,7 @@ The closest C++ equivalents are:
 | `T#` | `std::unique_ptr<T>` |
 | `&value` | `std::addressof(value)` or `&value` |
 | `slot_off(place)` | a data-slot address converted to `std::uintptr_t` |
-| `adopt(raw)` | constructing `std::unique_ptr<T>` from a compatible raw pointer |
+| `let owner: T# = raw` | constructing `std::unique_ptr<T>` from a compatible raw pointer |
 | owner relocation, `let b: T# = a` | `auto b = std::move(a)` |
 | `inspect(a)` where parameter is `T*` | `inspect(a.get())` |
 | `consume(a)` where parameter is `T#` | `consume(std::move(a))` |

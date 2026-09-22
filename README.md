@@ -21,10 +21,11 @@ non-owning pointer to an inline value. It cannot be overloaded. The unchecked
 `slot_off(place)` intrinsic instead returns the address of the storage slot as
 a `usize` integer. It also accepts raw-pointer and owner slots.
 
-`adopt(raw)` explicitly turns a compatible raw pointer into an owner. Its type
-comes from the pointer operand, and the raw pointer is left unchanged. HUC
-intrinsics use unqualified names, not `std::` names; ordinary library APIs
-remain separate.
+Binding a compatible raw pointer to `T#` takes ownership directly:
+`let owner: Widget# = raw;`. The raw pointer is left unchanged; only an
+owner-to-owner transfer clears its source. The programmer must ensure the
+allocation can be owned and is not already owned. HUC intrinsics use
+unqualified names, not `std::` names; ordinary library APIs remain separate.
 
 **Basic values are copied; Advanced values are transferred.** Numbers, raw
 pointers, and structures containing only Basic fields with neither `clone()`

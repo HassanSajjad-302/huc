@@ -379,12 +379,13 @@ flow parses braced bodies, with an `else if` alternative for chained
 conditionals; phase-control bodies still use the deferred-body scanner.
 Do not retain the old declaration order or `T&` as compatibility spellings.
 
-`adopt(raw)`, `slot_off(place)`, `release(owner)`, and `reset(owner)` use
+`slot_off(place)`, `release(owner)`, and `reset(owner)` use
 ordinary call syntax with compiler-known, non-overloadable, unqualified names.
-Resolve them as intrinsics, not `std::` library calls. `adopt` takes no type
-arguments and is not a phase-1 family; reject its old angle-argument spelling
-in HUC1 as well as HUC0. Only `as` and `ptr_as` use the HUC0 type-operand call
-production. The old named address-taking intrinsic is replaced by unary `&`.
+Resolve them as intrinsics, not `std::` library calls. Taking ownership from
+a raw pointer uses ordinary binding syntax; semantic analysis selects a
+built-in conversion, not a special call. Only `as` and `ptr_as` use the HUC0
+type-operand call production. The old named address-taking intrinsic is
+replaced by unary `&`.
 
 Important recovery points are:
 
@@ -575,14 +576,20 @@ liveness tracking for them. Escape and alias analysis must account for the
 exposed address: code can now access the owner slot through more than its
 original name.
 
-For `adopt(raw)`, check exactly one operand and resolve its actual type before
-considering the destination. It must be a one-level raw pointer to an eligible
-complete owned-object type. Map `RawPointer<T>` to `Owner<T>`, preserving
-pointee `mod`. Do not apply owner-to-observer conversion, infer from the
-destination, or accept a bare `null` or integer as the type source. A typed
-null pointer is valid and produces an empty owner. Existing implicit
-permission-dropping conversions may apply to the resulting owner as usual;
-adoption itself never adds permissions.
+When an owner destination expects `Owner<T>` and the source has type
+`RawPointer<T>`, select raw-to-owner conversion. Check the pointee type after
+alias resolution and require a complete owned-object type. Permit dropping
+pointee `mod`, but never gaining it or implicitly reinterpreting the pointer.
+Apply this rule to initialization, assignment, arguments, and returns.
+An `auto` destination still infers the raw-pointer type; it does not request
+ownership. Null raw pointers and direct `null` bindings produce empty owners;
+integers do not implicitly convert to owners.
+
+An owner source must still use direct owner relocation, not an
+owner-to-observer-to-owner conversion sequence. Fixed owner sources therefore
+remain invalid relocation sources. Raw sources require no binding `mod` and
+are not nulled or made inactive. Record the conversion explicitly in HIR so
+the emitter cannot confuse it with relocation.
 
 Member access preserves each layer's permissions. A fixed object prevents
 replacement of a pointer/owner field and mutation of an inline field. It does
@@ -637,7 +644,8 @@ The resolver implements only the ranking specified by the language:
 1. exact match;
 2. lossless built-in numeric promotion;
 3. permission-dropping pointer conversion;
-4. owner-to-observer conversion.
+4. owner-to-observer or raw-to-owner conversion, including permitted pointee
+   permission dropping.
 
 Before ranking, normalize each signature by replacing `T#` with its observing
 form. Two otherwise identical normalized signatures form a forbidden
@@ -689,11 +697,12 @@ This distinction prevents the C emitter from rediscovering ownership intent
 from indistinguishable pointer representations.
 
 Basic and Advanced are type categories; `Copy`, `Clone`, and `Relocate` name
-compiler operations, not categories. Ordinary Basic binding uses `Copy`.
+compiler operations, not categories. Same-type Basic binding uses `Copy`.
 An inline Advanced transfer uses `Relocate`: the destination becomes active
 and the source becomes inactive without receiving `drop`. A direct `T#`
-transfer instead uses `OwnerRelocate`, leaving an active null source. Explicit
-duplication through `clone()` uses `Clone`.
+transfer instead uses `OwnerRelocate`, leaving an active null source.
+Raw-to-owner binding uses `OwnerFromRaw` without changing the raw source.
+Explicit duplication through `clone()` uses `Clone`.
 
 Representative HIR operations:
 
@@ -705,6 +714,7 @@ SlotAddress(place)
 PointerFromAddress(address, raw_pointer_type)
 OwnerObserve(place)
 OwnerRelocate(place)
+OwnerFromRaw(value, owner_type)
 Clone(value)
 ConstructInPlace(destination, constructor, arguments)
 Call(function, arguments)
@@ -1067,7 +1077,7 @@ OwnerObserve destination_raw, source_owner
 ConstructInPlace destination, constructor, parameter_places
 Drop place
 OwnerDrop place
-Adopt destination_owner, source_raw
+OwnerFromRaw destination_owner, source_raw
 Release destination_raw, source_owner
 Reset source_owner
 Call result_destination_or_none, callee, parameter_places
@@ -1098,15 +1108,19 @@ the pointer and leaves the source active and usable as a null owner. This
 includes moving an owner field individually, but not transferring that word
 inside a whole aggregate relocation. Null owner words are valid in both cases.
 
-`Adopt` reads an already evaluated raw-pointer value and establishes an active
-owner with that address and the inferred pointee permissions. It does not
-store null to the raw source, mark it inactive, allocate, or invoke pointee
-construction or copying. No binding `mod` is required on the raw source.
-Existing raw aliases remain unchanged. A typed null pointer simply produces
+`OwnerFromRaw` is an internal conversion operation, not a source intrinsic.
+It reads an already evaluated raw-pointer value and establishes an active
+owner with that address and the checked destination pointee permissions. It
+does not store null to the raw source, mark it inactive, allocate, or invoke
+pointee construction or copying. No binding `mod` is required on the raw source.
+Existing raw aliases remain unchanged. A null raw pointer simply produces
 an empty owner. Compatible allocation and exclusive ownership of a non-null
 pointee are unchecked preconditions, not inserted runtime checks.
 `Release` still nulls the owner it releases; it must not be confused with
-`Adopt` or raw-pointer copying.
+`OwnerFromRaw` or raw-pointer copying. When replacing an active owner, retain
+the raw-pointer value before dropping the old destination and applying
+`OwnerFromRaw`. Assigning the destination's own raw observer back to it
+violates the unique-ownership precondition; it is not self-relocation.
 
 The two-place MIR operations require different source and destination storage.
 Relocation assignment emits a static no-op or a runtime address-equality branch before
@@ -1183,7 +1197,7 @@ structure Advanced.
 
 Elaboration handles the operations as follows:
 
-- ordinary Basic binding becomes fieldwise `Copy`;
+- same-type Basic binding becomes fieldwise `Copy`;
 - `copy` of an Advanced structure with the required protocol becomes `Clone` into
   the copy expression's result place; lacking `clone` is a diagnostic, and
   copy assignment specifically uses a fresh result before destination
@@ -1196,9 +1210,9 @@ Elaboration handles the operations as follows:
 - binding from an Advanced non-owner becomes one fixed representation-transfer
   `Relocate`, which intrinsically makes the source and all subobjects inactive
   without requiring source-field clearing;
-- `T#` binding becomes `OwnerRelocate`; it transfers the pointer and stores
-  null in the still-active source owner;
-- explicit `adopt(raw)` becomes `Adopt`, not `OwnerRelocate`; it evaluates
+- owner-to-owner binding becomes `OwnerRelocate`; it transfers the pointer and
+  stores null in the still-active source owner;
+- raw-to-owner binding becomes `OwnerFromRaw`, not `OwnerRelocate`; it evaluates
   the raw-pointer expression once and never changes a source pointer slot;
 - a fresh unnamed Advanced result can be transferred directly;
   relocation from named storage requires `mod` before its name;
@@ -1304,7 +1318,7 @@ deallocation without changing the one-pointer owner representation.
 | `T(values)` initializing a final place | Generated initializer with an explicit final-destination pointer |
 | `new T(values)` | Aligned allocation, terminate-on-failure check, then initialization in that allocation |
 | `copy owner` | Assume a non-null source; allocate, then fieldwise-copy or clone the pointee |
-| `adopt(raw)` | Store the pointer in the inferred owner representation and establish cleanup; leave the raw source unchanged |
+| raw-to-owner binding | Store the pointer in the destination owner and establish cleanup; leave the raw source unchanged |
 | `release(owner)` | Return the pointer and null the owner slot |
 | `reset(owner)` | Drop/deallocate the pointee if non-null, then leave a null owner |
 
@@ -1629,10 +1643,12 @@ symbol hashes must be identical across processes for identical inputs.
 - slot addresses of fixed, inline, raw-pointer, and owner slots;
 - invalid non-place slot operands and integer-to-pointer type checking;
 - canonical type interning;
-- `adopt` inference from the raw operand, preserving pointee permissions and
-  accepting fixed raw slots without granting permissions from the destination;
-- `adopt` rejection of non-raw operands, bare `null`, wrong arity, and type
-  arguments at both source levels;
+- raw-to-owner conversion in initialization, assignment, arguments, and returns,
+  accepting fixed raw sources and checking compatible pointee types/permissions;
+- empty owners from null raw pointers or direct `null` binding, and raw-pointer
+  inference for `auto` without introducing ownership;
+- rejection of implicit integer-to-owner conversion, incompatible pointee types,
+  added pointee `mod`, and implicit conversion chains that bypass owner relocation;
 - unqualified intrinsic resolution, with no former-spelling compatibility aliases;
 - overload ranking;
 - C-linkage signature acceptance and rejection;
@@ -1662,10 +1678,11 @@ Relocation goldens must distinguish whole-aggregate `Relocate` from direct
 recursive owner-null stores; an owner field moved individually must still
 lower to `OwnerRelocate` and leave that field active-null.
 
-Adoption goldens must use `Adopt`, not `OwnerRelocate`: there is no null store
-or inactive-state update for the raw source. Address-taking goldens must
-distinguish `&inline_place` from `slot_off(place)`; only the latter returns an
-integer and can address a primitive pointer or owner slot.
+Raw-to-owner goldens must use `OwnerFromRaw`, not `OwnerRelocate`: there is no
+null store or inactive-state update for the raw source. Replacement goldens
+must retain the source value before cleaning up the destination. Address-taking
+goldens must distinguish `&inline_place` from `slot_off(place)`; only the latter
+returns an integer and can address a primitive pointer or owner slot.
 
 ### 17.3 Execute tests
 
@@ -1676,8 +1693,10 @@ Compile and run small programs that record:
   allocations;
 - destructive-relocation and clone counts;
 - source nulling after direct owner relocation, including an individual field;
-- unchanged raw sources and aliases after adoption, including fixed bindings
-  and typed null pointers, with exactly one owning cleanup obligation;
+- unchanged raw sources and aliases after raw-to-owner binding, including
+  fixed bindings and null pointers, with exactly one owning cleanup obligation;
+- raw-to-owner assignment dropping the old destination once, and raw arguments
+  and return expressions establishing cleanup in their owner destinations;
 - relocation of aggregates with nested non-null and null owner fields, with
   cleanup only through the active destination;
 - exact self-relocation behavior;
@@ -1791,7 +1810,7 @@ Then complete HUC0 with:
 ```text
 T*, mod layers, and T#
 constructors and direct destination construction
-new/adopt/release/reset
+new/release/reset and raw-to-owner binding
 Basic/Advanced classification
 destructive relocation, clone, and drop
 left-to-right typed parameter binding

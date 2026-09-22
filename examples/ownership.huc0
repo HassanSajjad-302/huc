@@ -54,12 +54,22 @@ fn main() -> i32 {
     consume(second);
     // second is null. Its former Widget was dropped, so observer is dangling.
 
-    // A fixed raw-pointer binding can be adopted without clearing its address.
+    // Taking ownership from a fixed raw pointer does not clear its address.
     let mod original: Widget# = new Widget(11);
     let raw: Widget* = release(original); // original becomes null
-    let adopted: Widget# = adopt(raw); // type inferred; raw is unchanged
-    inspect(raw); // observes the Widget now owned by adopted
+    let mod restored: Widget# = raw; // takes ownership; raw is unchanged
+    inspect(raw); // observes the Widget now owned by restored
+
+    // Assignment uses the same rule and first cleans up the old destination.
+    let mod replacement: Widget# = new Widget(12);
+    let replacement_raw: Widget* = release(replacement);
+    restored = replacement_raw; // drops Widget(11); raw is now dangling
+    inspect(replacement_raw); // unchanged observer of Widget(12)
+
+    // An owner parameter can also take ownership from a raw pointer.
+    let argument: Widget* = release(restored);
+    consume(argument); // argument stays unchanged, but is now dangling
 
     inspect(independent);
     return 0;
-} // adopted and independent each destroy their separately owned Widget
+} // restored is null; independent destroys its separately cloned Widget

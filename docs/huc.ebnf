@@ -438,13 +438,14 @@ binary-op         = "||" | "&&"
    associativity are those specified by the Pratt-parser table in the
    implementation and language specification. Unary & takes an eligible
    inline place's typed address; binary & remains bitwise AND.
-   slot_off(place), adopt(raw), release(owner), and reset(owner) are
+   slot_off(place), release(owner), and reset(owner) are
    compiler-known, non-overloadable ordinary call forms with unqualified
-   names. Semantic analysis checks their arity and operands. adopt takes
-   exactly one raw-pointer expression, infers the owner type from that
-   operand, and leaves the source pointer unchanged. It accepts no type
-   arguments, including in HUC1. slot_off returns usize without transferring
-   a value. ptr_as sources must be raw pointers or usize values. *)
+   names. Semantic analysis checks their arity and operands. Binding a
+   compatible raw pointer to an owner uses ordinary initialization,
+   assignment, argument, or return syntax and leaves the raw source unchanged.
+   This is a built-in conversion, not an intrinsic call. slot_off returns
+   usize without transferring a value. ptr_as sources must be raw pointers
+   or usize values. *)
 
 literal           = integer-literal
                   | float-literal
