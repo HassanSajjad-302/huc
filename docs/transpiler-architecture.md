@@ -290,7 +290,8 @@ The lexer should:
 - recognize `in` as a reserved keyword and `#` as the owner-suffix token;
 - preserve comments and trivia when formatter support is enabled;
 - diagnose unsupported phase spellings such as `fn3`;
-- keep `&` for bitwise AND, separate from `#` ownership and `&&` logical AND;
+- use `&` for prefix address-taking and binary bitwise AND, separate from `#`
+  ownership and `&&` logical AND;
 - retain the raw spelling of numeric and string literals;
 - validate optional numeric `_` separators between digits of the applicable
   base, then ignore them when computing the value; preserve the spelling for
@@ -331,7 +332,7 @@ typedef enum HucTokenKind {
 
     HUC_TOKEN_STAR,
     HUC_TOKEN_HASH, /* owner suffix in a type */
-    HUC_TOKEN_AMPERSAND, /* bitwise AND in expressions */
+    HUC_TOKEN_AMPERSAND, /* prefix address-taking or binary bitwise AND */
     HUC_TOKEN_ARROW,
     HUC_TOKEN_LESS,
     HUC_TOKEN_GREATER,
@@ -341,8 +342,9 @@ typedef enum HucTokenKind {
 ```
 
 The parser turns `Hash` into an owner-type node only in postfix type position.
-`Ampersand` is bitwise AND in infix expression position, not a type suffix.
-Prefix `&` is a syntax error; no address-of or C++-reference AST node exists. HUC0 has
+`Ampersand` produces an address-of node in prefix expression position and
+bitwise AND in infix position; it is not a type suffix. Operator roles do not
+depend on whitespace. No C++-reference AST node exists. HUC0 has
 exactly two non-composable pointer-like forms: one terminal `T*` raw-pointer
 suffix or one terminal `T#` owner suffix. The type parser diagnoses `T**`,
 `T*#`, `T#*`, and `T##` immediately; canonical-type validation catches
@@ -376,6 +378,13 @@ the list spans several lines. Empty items remain errors. Ordinary control
 flow parses braced bodies, with an `else if` alternative for chained
 conditionals; phase-control bodies still use the deferred-body scanner.
 Do not retain the old declaration order or `T&` as compatibility spellings.
+
+`adopt(raw)`, `slot_off(place)`, `release(owner)`, and `reset(owner)` use
+ordinary call syntax with compiler-known, non-overloadable, unqualified names.
+Resolve them as intrinsics, not `std::` library calls. `adopt` takes no type
+arguments and is not a phase-1 family; reject its old angle-argument spelling
+in HUC1 as well as HUC0. Only `as` and `ptr_as` use the HUC0 type-operand call
+production. The old named address-taking intrinsic is replaced by unary `&`.
 
 Important recovery points are:
 
@@ -545,13 +554,16 @@ correct value, pointer-slot, owner-slot, and pointee layers, never inferred
 from emitted C declarator strings.
 
 Canonicalization rejects any raw-pointer or owner node whose pointee is itself
-raw-pointer- or owner-typed. `addressof` accepts only an inline non-pointer
-place, preserves that place's pointee permission, and lowers to an address
-calculation with no call. When an owner expression is required as `T*`, the
+raw-pointer- or owner-typed. Unary `&` accepts only an addressable inline
+non-pointer place, preserves its mutation permissions, and lowers to an address
+calculation with no call. Evaluate the place once; do not materialize a
+temporary, transfer its value, extend its lifetime, or update cleanup state.
+Reject pointer/owner slots and non-place operands, including function symbols.
+When an owner expression is required as `T*`, the
 resolved operation is observation of the owned `T`, not taking the storage
 address of the owner word.
 
-`std::slot_of` accepts any addressable data place, including a raw-pointer or
+`slot_off` accepts any addressable data place, including a raw-pointer or
 owner slot, and lowers to that slot's address converted to `usize`. It does
 not load the value or invoke relocation, observation, or cleanup. Reject
 non-place operands rather than materializing temporaries. An explicit `ptr_as`
@@ -562,6 +574,15 @@ preconditions remain the caller's responsibility; the compiler does not add
 liveness tracking for them. Escape and alias analysis must account for the
 exposed address: code can now access the owner slot through more than its
 original name.
+
+For `adopt(raw)`, check exactly one operand and resolve its actual type before
+considering the destination. It must be a one-level raw pointer to an eligible
+complete owned-object type. Map `RawPointer<T>` to `Owner<T>`, preserving
+pointee `mod`. Do not apply owner-to-observer conversion, infer from the
+destination, or accept a bare `null` or integer as the type source. A typed
+null pointer is valid and produces an empty owner. Existing implicit
+permission-dropping conversions may apply to the resulting owner as usual;
+adoption itself never adds permissions.
 
 Member access preserves each layer's permissions. A fixed object prevents
 replacement of a pointer/owner field and mutation of an inline field. It does
@@ -718,7 +739,7 @@ owner place. Indirect destinations may also be replaced when their validity and
 activity preconditions hold; the restriction above concerns non-owner
 sources. Containers manage their backing storage and initialized element
 ranges explicitly. The only additional raw-storage lifetime intrinsics planned
-are `std::construct_at` and `std::destruct_at`; their interfaces and lowering
+are `construct_at` and `destruct_at`; their interfaces and lowering
 will be designed later, without adding user-overloadable relocation hooks.
 
 ## 8. Compile-time evaluator
@@ -1077,6 +1098,16 @@ the pointer and leaves the source active and usable as a null owner. This
 includes moving an owner field individually, but not transferring that word
 inside a whole aggregate relocation. Null owner words are valid in both cases.
 
+`Adopt` reads an already evaluated raw-pointer value and establishes an active
+owner with that address and the inferred pointee permissions. It does not
+store null to the raw source, mark it inactive, allocate, or invoke pointee
+construction or copying. No binding `mod` is required on the raw source.
+Existing raw aliases remain unchanged. A typed null pointer simply produces
+an empty owner. Compatible allocation and exclusive ownership of a non-null
+pointee are unchecked preconditions, not inserted runtime checks.
+`Release` still nulls the owner it releases; it must not be confused with
+`Adopt` or raw-pointer copying.
+
 The two-place MIR operations require different source and destination storage.
 Relocation assignment emits a static no-op or a runtime address-equality branch before
 reaching `Relocate`/`OwnerRelocate` when source and destination might alias.
@@ -1167,6 +1198,8 @@ Elaboration handles the operations as follows:
   without requiring source-field clearing;
 - `T#` binding becomes `OwnerRelocate`; it transfers the pointer and stores
   null in the still-active source owner;
+- explicit `adopt(raw)` becomes `Adopt`, not `OwnerRelocate`; it evaluates
+  the raw-pointer expression once and never changes a source pointer slot;
 - a fresh unnamed Advanced result can be transferred directly;
   relocation from named storage requires `mod` before its name;
 - relocation assignment first proves distinctness or compares source and
@@ -1263,15 +1296,15 @@ deallocation without changing the one-pointer owner representation.
 | `T*` / `mod T*` | Typed C pointers with HUC access permissions checked before emission |
 | `T#` | One typed C pointer with MIR-controlled ownership |
 | owner observation | Read the pointer without transferring it |
-| `addressof(value)` | Address of the corresponding typed storage place |
-| `std::slot_of(place)` | the slot's data-storage address converted to target `usize` |
+| `&value` | Address of the corresponding typed storage place |
+| `slot_off(place)` | the slot's data-storage address converted to target `usize` |
 | `ptr_as<T*>(address)` for `usize` | target-supported integer-to-data-pointer reconstruction |
 | owner destructive relocation | Transfer the pointer, then null the source slot |
 | non-owner Advanced relocation | Transfer the whole representation; deactivate the source and all subobjects without requiring embedded-owner nulling |
 | `T(values)` initializing a final place | Generated initializer with an explicit final-destination pointer |
 | `new T(values)` | Aligned allocation, terminate-on-failure check, then initialization in that allocation |
 | `copy owner` | Assume a non-null source; allocate, then fieldwise-copy or clone the pointee |
-| `adopt<T>(raw)` | Store a compatible allocation's pointer and establish the HUC cleanup obligation |
+| `adopt(raw)` | Store the pointer in the inferred owner representation and establish cleanup; leave the raw source unchanged |
 | `release(owner)` | Return the pointer and null the owner slot |
 | `reset(owner)` | Drop/deallocate the pointee if non-null, then leave a null owner |
 
@@ -1589,10 +1622,18 @@ symbol hashes must be identical across processes for identical inputs.
 - required control-flow braces, `else if`, and `for1 (... in ...)`;
 - rejection of old `T&`, type-first declarations, and colon-only `for1` headers;
 - Pratt precedence, ambiguous angle postfixes, and recovery;
+- prefix `&` versus binary `&` and `&&`, including postfix field/index binding;
 - non-composable pointer-suffix and forbidden typed owner-address diagnostics;
+- typed `&` addresses and `slot_off` integer addresses, each evaluating its
+  place once with no implicit owner-to-observer conversion;
 - slot addresses of fixed, inline, raw-pointer, and owner slots;
 - invalid non-place slot operands and integer-to-pointer type checking;
 - canonical type interning;
+- `adopt` inference from the raw operand, preserving pointee permissions and
+  accepting fixed raw slots without granting permissions from the destination;
+- `adopt` rejection of non-raw operands, bare `null`, wrong arity, and type
+  arguments at both source levels;
+- unqualified intrinsic resolution, with no former-spelling compatibility aliases;
 - overload ranking;
 - C-linkage signature acceptance and rejection;
 - phase availability;
@@ -1621,6 +1662,11 @@ Relocation goldens must distinguish whole-aggregate `Relocate` from direct
 recursive owner-null stores; an owner field moved individually must still
 lower to `OwnerRelocate` and leave that field active-null.
 
+Adoption goldens must use `Adopt`, not `OwnerRelocate`: there is no null store
+or inactive-state update for the raw source. Address-taking goldens must
+distinguish `&inline_place` from `slot_off(place)`; only the latter returns an
+integer and can address a primitive pointer or owner slot.
+
 ### 17.3 Execute tests
 
 Compile and run small programs that record:
@@ -1630,6 +1676,8 @@ Compile and run small programs that record:
   allocations;
 - destructive-relocation and clone counts;
 - source nulling after direct owner relocation, including an individual field;
+- unchanged raw sources and aliases after adoption, including fixed bindings
+  and typed null pointers, with exactly one owning cleanup obligation;
 - relocation of aggregates with nested non-null and null owner fields, with
   cleanup only through the active destination;
 - exact self-relocation behavior;

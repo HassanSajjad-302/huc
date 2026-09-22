@@ -257,9 +257,22 @@ let second: i32 = add(1, 2,);
 
 An empty list has no comma: use `()`, not `(,)`. A trailing comma does not
 create another argument or an omitted item. Conditions, grouped expressions,
-subscripts, and the single type operand in `as<T>`, `ptr_as<T*>`, and `adopt<T>`
+subscripts, and the single type operand in `as<T>` and `ptr_as<T*>`
 are not comma-separated lists. Semicolons remain required where the grammar
 uses them; line breaks do not replace them.
+
+### 3.4 Core intrinsic names
+
+HUC intrinsics use unqualified compiler-known names, not `std::` names.
+`slot_off(place)`, `adopt(raw)`, `release(owner)`, and `reset(owner)` use
+ordinary call syntax but cannot be overloaded or used as first-class function
+values. Semantic analysis checks their operands and argument counts. `as<T>`
+and `ptr_as<T*>` retain their explicit type operands.
+
+Address-taking uses unary `&`, not a named intrinsic call. The former
+`addressof`, `std::slot_of`, and `adopt<T>(raw)` spellings are not aliases for
+the new operations. The planned `construct_at` and `destruct_at` also have
+unqualified names; their interfaces and lifetime rules remain deferred.
 
 ## 4. Type system
 
@@ -380,17 +393,32 @@ T#      Owner<T>
 
 HUC0 accepts at most one pointer-like suffix on a non-pointer base type.
 `T**`, `T*#`, `T#*`, and `T##` are rejected, including equivalent types hidden
-by aliases. HUC has no unary `&` expression.
+by aliases.
 
-The non-overloadable `addressof(inline_place)` intrinsic returns `T*` for a
-fixed inline `T` place and `mod T*` for a writable inline `T` place. It rejects
-raw-pointer and owner slots because their addresses would require a forbidden
-composed type. Writing an owner expression where `T*` is expected instead
-performs pointee observation; it never produces an address to the owner word.
-Binary `&` remains bitwise AND.
+The non-overloadable unary operator `&place` returns `T*` for a fixed inline
+`T` place and `mod T*` for a writable inline `T` place. Its operand must be an
+addressable, non-pointer data place. It evaluates the place once without
+copying, relocating, destroying, or extending the lifetime of its value. It
+does not allocate or create a temporary, or change activation or cleanup state.
+Literals, non-place results, types, and function symbols are not valid operands.
+
+`&` rejects raw-pointer and owner slots because their typed addresses would
+require a forbidden composed type. `&owner` does not implicitly observe the
+pointee. Writing an owner expression where `T*` is expected instead performs
+pointee observation; it never produces an address to the owner word. Forming
+a place through an invalid pointer is not made valid by taking its address.
+Binary `&` remains bitwise AND; `&&` remains logical AND. The parser distinguishes
+prefix and binary `&` by expression position, not by whitespace.
+
+```huc
+let value: Widget = Widget(7);
+let observer: Widget* = &value;
+let mod writable: Widget = Widget(9);
+let writable_observer: mod Widget* = &writable;
+```
 
 The separate compiler-known, non-overloadable intrinsic
-`std::slot_of(place) -> usize` returns the untyped address of the storage slot
+`slot_off(place) -> usize` returns the untyped address of the storage slot
 designated by `place`. It accepts addressable locals, parameters, fields,
 elements, and dereferenced data storage, including raw-pointer and owner slots.
 An owner operand designates its owner word, not its pointee: a null owner value
@@ -415,7 +443,7 @@ not automatically destroy a replaced owner, null another owner, or update
 compiler-maintained cleanup state. It does not make inactive storage readable
 or permit two owners of one allocation.
 
-`std::slot_of` is an untyped escape hatch, not a typed owner-slot alias. It does
+`slot_off` is an untyped escape hatch, not a typed owner-slot alias. It does
 not add composed pointer types or change ordinary typed `mod` checks.
 
 Each `mod` keeps its own meaning inside a structure. A fixed structure
@@ -541,10 +569,12 @@ From lowest to highest precedence:
 | Shift | `<<`, `>>` | Left |
 | Additive | `+`, `-` | Left |
 | Multiplicative | `*`, `/`, `%` | Left |
-| Unary | unary `+`, `-`, `!`, `~`, dereference `*`, `copy`, `new`, and HUC1 `@` | Right |
+| Unary | unary `+`, `-`, `!`, `~`, dereference `*`, address-taking `&`, `copy`, `new`, and HUC1 `@` | Right |
 | Postfix | call, index, `.`, `->`, `++`, `--`, and HUC1 family request | Left |
 
-There is no unary `&`. Binary `&` retains the bitwise precedence shown above.
+Unary `&` has the same precedence as dereference `*`. Postfix operations bind
+more tightly: `&value.field` means `&(value.field)`. Binary `&` retains the
+bitwise precedence shown above. Address-taking never creates a reference type.
 
 ### 5.1 Left-to-right evaluation
 
@@ -601,7 +631,7 @@ ptr_as<T*>(pointer_or_address) // raw pointer or usize address reinterpretation
 `ptr_as` accepts a raw pointer or a `usize` data address and produces the
 specified one-level raw pointer type, including a leading `mod` where spelled.
 It does not produce an owner or a composed pointer type. A `usize` obtained
-from `std::slot_of(place)` can be converted back to a pointer addressing that
+from `slot_off(place)` can be converted back to a pointer addressing that
 same storage while the storage remains valid. Targets must support this
 data-address round trip. Arbitrary integer values do not establish valid
 storage or access rights.
@@ -762,8 +792,8 @@ Relocating the whole owner remains valid, including when null. An eligible
 root source may replace a valid indirect destination; if it may alias that
 destination, exact storage identity is checked before destruction. Containers
 manage backing storage and initialized element ranges explicitly. The deferred
-raw-storage lifetime intrinsics are limited to `std::construct_at` and
-`std::destruct_at`, with interfaces and detailed semantics to be designed
+raw-storage lifetime intrinsics are limited to `construct_at` and
+`destruct_at`, with interfaces and detailed semantics to be designed
 later; they do not broaden ordinary relocation-source eligibility.
 
 Inline values whose correctness depends on a stable address are an unchecked
@@ -874,13 +904,51 @@ one-word representation.
 Low-level ownership transitions are explicit:
 
 ```huc
-let mod owner: T# = adopt<T>(raw); // raw must designate one compatible allocation
-let raw: T* = release(owner); // owner becomes null
-reset(owner); // destroy pointee and set null
+let mod first: Widget# = new Widget(7);
+let raw: Widget* = release(first); // first becomes null
+let mod owner: Widget# = adopt(raw); // raw is unchanged; owner now owns
+reset(owner); // destroy pointee and set owner to null; raw is now dangling
 ```
 
-Violating `adopt`'s allocation, type, or exclusivity preconditions is undefined
-behavior. `release` transfers the cleanup obligation to the programmer.
+`adopt(raw)` is a compiler-known, non-overloadable intrinsic taking exactly
+one raw-pointer expression. It infers its result from that expression's type:
+
+- `T*` produces `T#`;
+- `mod T*` produces `mod T#`.
+
+Type aliases are resolved first. `T` must be a complete type that can be owned.
+The destination does not determine the adopted type or grant extra pointee
+permissions. `adopt` does not reinterpret the pointer. Any necessary pointer
+cast must be explicit and does not prove that adoption is valid. There are no
+type arguments: `adopt<T>(raw)` is rejected in both HUC0 and HUC1.
+
+The pointer expression is evaluated once. Adoption creates an owner holding
+that address without allocating, constructing, cloning, or destroying the
+pointee. It does not null, deactivate, or otherwise write to a source pointer
+slot, and it does not require that slot to have binding `mod`. Existing raw
+aliases remain observers; they do not gain ownership or a longer lifetime.
+The adopted allocation has one owner and receives cleanup through that owner.
+Normal owner assignment still cleans up the destination's old pointee when
+replacing it with the adoption result.
+
+A non-null pointer must designate a live, complete `T` in an allocation
+compatible with the primitive owner's cleanup and deallocation rules. No
+other owner may still be responsible for that allocation. A pointer to a
+local, subobject, incompatible allocation, or already-owned object cannot be
+validly adopted. Violating these unchecked preconditions is undefined behavior;
+the compiler does not insert allocation or uniqueness checks. Keeping raw
+observers is permitted, but separately freeing or adopting the allocation
+again is not.
+
+A typed null pointer produces an empty owner of the inferred type, without
+changing the pointer. Bare `adopt(null)` is rejected because `null` supplies no
+pointee type; use `let owner: T# = null;` for an empty owner. An owner operand
+or integer operand is also rejected; `adopt` does not apply an implicit
+owner-to-observer conversion. Ordinary implicit `T*` to `T#` binding remains
+forbidden.
+
+`release` transfers the cleanup obligation to the programmer and clears the
+source owner. It is different from adoption, which leaves its raw source alone.
 `release(owner)` and `reset(owner)` require a named owner slot declared with
 `mod` before its name. A primitive owner `swap` operation is deferred from 0.1;
 a library can express it using `release`, `reset`, and destructive relocation.
@@ -1110,8 +1178,9 @@ compiler metadata handle. Ordinary `import` declarations remain. The HUC1
 translator writes one HUC0 module for every residual runtime module before the
 HUC0-to-C17 translator begins.
 
-The built-in HUC0 forms `as<T>`, `ptr_as<T*>`, and `adopt<T>` use
-an angle-delimited type operand but are not phase-family requests. No nominal
+The built-in HUC0 forms `as<T>` and `ptr_as<T*>` use an angle-delimited type
+operand but are not phase-family requests. `adopt(raw)` instead infers its type
+from the raw pointer and takes no type arguments. No nominal
 type or ordinary function application with phase arguments survives into HUC0.
 
 ### 9.2 Uniform phase-1 families
@@ -1889,8 +1958,9 @@ The closest C++ equivalents are:
 |---|---|
 | `T*` | `T*` |
 | `T#` | `std::unique_ptr<T>` |
-| `addressof(value)` | `std::addressof(value)` or `&value` |
-| `std::slot_of(place)` | a data-slot address converted to `std::uintptr_t` |
+| `&value` | `std::addressof(value)` or `&value` |
+| `slot_off(place)` | a data-slot address converted to `std::uintptr_t` |
+| `adopt(raw)` | constructing `std::unique_ptr<T>` from a compatible raw pointer |
 | owner relocation, `let b: T# = a` | `auto b = std::move(a)` |
 | `inspect(a)` where parameter is `T*` | `inspect(a.get())` |
 | `consume(a)` where parameter is `T#` | `consume(std::move(a))` |

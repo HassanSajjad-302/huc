@@ -122,7 +122,7 @@ HUC0 contains:
 - `mod` permissions;
 - raw pointers `T*`;
 - unique owners `T#`;
-- `addressof`, `std::slot_of`, and the core type-operand intrinsics;
+- unary `&`, `slot_off`, inferred-type `adopt`, and the core type-operand intrinsics;
 - constructors, methods, `clone`, and `drop`;
 - runtime expressions and control flow;
 - local `let name: auto` inference.
@@ -136,9 +136,11 @@ HUC0 does not contain:
 - raw generation operations;
 - unresolved `auto` parameters or inferred function results.
 
-The angle operands in `as<T>`, `ptr_as<T*>`, and `adopt<T>` are
-built-in type operands, not phase-family requests. They are the only angle
-forms accepted by HUC0.
+The angle operands in `as<T>` and `ptr_as<T*>` are built-in type operands,
+not phase-family requests. They are the only angle forms accepted by HUC0.
+`adopt(raw)` infers its owner type from the raw-pointer operand instead.
+All HUC intrinsics have unqualified names, not `std::` names; they are not
+ordinary standard-library functions.
 
 Primitive fixed arrays, `bit_as`, and primitive owner `swap` are deferred from
 0.1. Containers and swapping can initially be supplied by libraries.
@@ -226,10 +228,13 @@ HUC performs no lifetime tracking between a raw pointer and an owner.
 do not exist. The former owner spelling `T&` is not accepted, nor are C++
 lvalue or rvalue references.
 
-HUC0 has no unary `&` expression. The non-overloadable
-`addressof(inline_place)` intrinsic produces `T*` for a fixed inline `T` place
-and `mod T*` for a writable inline `T` place. It rejects raw-pointer and owner
-slots because their addresses would require a forbidden composed type.
+The non-overloadable unary operator `&place` produces `T*` for a fixed inline
+`T` place and `mod T*` for a writable inline `T` place. It evaluates its
+addressable non-pointer operand once, without creating a temporary, transferring
+a value, extending a lifetime, or changing cleanup state. It rejects raw-pointer
+and owner slots because their typed addresses would require a forbidden
+composed type. It also rejects non-place results, literals, types, and function
+symbols. `&owner` does not mean observation of the owner's pointee.
 
 HUC0 has only the raw-pointer constructor `T*` and the unique-owner constructor
 `T#`. Neither constructor composes: `T**`, `T*#`, `T#*`, `T##`, and equivalent
@@ -238,7 +243,7 @@ observer context accesses the owned pointee; it does not take the owner slot's
 address. Ordinary typed owner-slot reseating therefore uses consume-and-return
 rather than an aliasing owner reference. Binary `&` remains bitwise AND.
 
-The non-overloadable `std::slot_of(place) -> usize` intrinsic separately exposes
+The non-overloadable `slot_off(place) -> usize` intrinsic separately exposes
 the untyped address of any addressable data slot, including raw-pointer and
 owner slots. It evaluates the place once without loading its value, performs
 no ownership operation, and does not extend storage lifetime or update cleanup
@@ -264,7 +269,21 @@ The default representation is one address-sized word:
 - relocation copies the address and clears the source;
 - owner arithmetic is prohibited;
 - observation as a compatible raw pointer is implicit;
-- conversion from raw pointer to owner is explicit.
+- conversion from raw pointer to owner is explicit through `adopt(raw)`.
+
+`adopt(raw)` evaluates one raw-pointer expression and returns `T#` for `T*`,
+or `mod T#` for `mod T*`. It preserves the address and pointee permissions;
+the destination does not determine the inferred type. The source pointer is
+not nulled, deactivated, or otherwise changed, so a fixed raw-pointer binding
+is allowed. Adoption does not allocate, clone, or construct the pointee.
+
+A non-null argument must designate a live complete object in a compatible
+allocation with no other owner responsible for cleanup. Raw observers may
+remain, but the allocation must not be separately freed or adopted again.
+These are unchecked programmer obligations, not runtime tests. A typed null
+pointer produces an empty owner. Bare `adopt(null)`, owner and integer operands,
+and type arguments such as `adopt<T>(raw)` are rejected. Implicit raw-to-owner
+binding remains forbidden. `release` still clears its source owner.
 
 Relocating from a named source requires a writable source slot because
 relocation modifies the source.
@@ -395,7 +414,7 @@ HUC0.
 
 Container implementations are responsible for backing storage and initialized
 element ranges. The only additional raw-storage lifetime intrinsics planned
-are `std::construct_at` and `std::destruct_at`; their interfaces and detailed
+are `construct_at` and `destruct_at`; their interfaces and detailed
 semantics are deferred to later standard-library design. This does not change
 ordinary relocation-source eligibility.
 
@@ -1089,8 +1108,9 @@ HIR records:
 - canonical type;
 - resolved symbol;
 - value use: read, observe, copy, relocate, or place;
-- explicit `addressof` of an eligible inline place;
-- untyped `std::slot_of` and explicit `usize`-to-raw-pointer reconstruction;
+- unary `&` of an eligible inline place;
+- untyped `slot_off` and explicit `usize`-to-raw-pointer reconstruction;
+- `adopt(raw)` with an operand-derived owner type and no source-pointer write;
 - source origin;
 - explicit conversion selected by HUC.
 
@@ -1103,7 +1123,7 @@ MIR records:
 - cleanup edges;
 - conditional drop flags only where control flow requires them;
 - source nulling for direct owner relocations, not for owner words inside
-  relocated aggregates.
+  relocated aggregates or raw pointers passed to `adopt`.
 
 No semantic decision is deferred to the C compiler or its ABI lowering.
 
@@ -1173,9 +1193,11 @@ Implement:
 - reverse field cleanup;
 - `adopt`, `release`, and `reset`.
 
-`adopt<T>(raw)` has an unchecked compatible-allocation and exclusivity
-precondition. `release(owner)` and `reset(owner)` require a named owner slot
-with `mod` before their binding names.
+`adopt(raw)` has an unchecked compatible-allocation and exclusive-ownership
+precondition for non-null arguments. It infers and preserves pointee permissions
+and leaves the raw source unchanged, without requiring binding `mod`.
+`release(owner)` and `reset(owner)` require a named owner slot with `mod`
+before its binding name.
 
 Acceptance:
 
@@ -1187,6 +1209,9 @@ Acceptance:
 - owner-bearing aggregates lower to whole-value `Relocate` without embedded
   `OwnerRelocate` operations or required field null stores;
 - directly moving an individual owner field still clears that field;
+- adoption from fixed and writable raw-pointer bindings leaves their addresses
+  unchanged, evaluates the operand once, and produces exactly one owner;
+- typed null adoption returns an empty owner with the correct pointee permissions;
 - indirect non-owner move-out is rejected without adding owner liveness state;
 - ordinary binding never invokes `clone`;
 - sanitizers find no backend double destruction;
@@ -1423,8 +1448,11 @@ Include:
 - phase leaks;
 - relocation from fixed storage;
 - non-owner relocation from a pointee, field, or array element;
-- `addressof` applied to a pointer or owner slot;
-- `std::slot_of` applied to a literal, temporary value, or function symbol;
+- unary `&` applied to a pointer/owner slot, non-place result, or function symbol;
+- `slot_off` applied to a literal, temporary value, or function symbol;
+- `adopt` with an owner, integer, bare `null`, wrong arity, or type arguments;
+- attempted implicit raw-pointer-to-owner conversion or gain of pointee `mod`;
+- attempts to use former address-taking or `std::` intrinsic spellings;
 - `ptr_as` with an invalid source type or a composed pointer target;
 - mutation without `mod`;
 - copying an Advanced type without `clone`;
@@ -1443,6 +1471,10 @@ Include:
 
 Compile generated C17 and test:
 
+- typed address-taking and untyped `slot_off` addresses with side-effecting
+  place expressions evaluated once;
+- adoption leaving all raw-pointer aliases unchanged and a single owner
+  responsible for cleanup; ordinary owner relocation still nulls its source;
 - scalar computation;
 - argument side-effect ordering;
 - constructors and field initialization order;

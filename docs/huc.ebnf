@@ -10,7 +10,7 @@
    using the grammar for its enclosing module, type, function, or block.
 
    Semantic restrictions such as phase availability, fixed-global
-   initialization, family partial ordering, and addressof permissions are
+   initialization, family partial ordering, and address-taking permissions are
    defined by the language specification, not by this grammar alone. *)
 
 huc0-compilation-unit
@@ -287,7 +287,7 @@ parameter-1       = [ "mod" ], identifier, ":", type-1 ;
    only where the language specification permits it, not an omitted type.
    Comma-separated lists allow one optional final comma after an item.
    An empty list has no comma. Conditions, grouped expressions, subscripts,
-   and the single type operand of as/ptr_as/adopt are not such lists. *)
+   and the single type operand of as/ptr_as are not such lists. *)
 
 block-0           = "{", { statement-0 }, "}" ;
 statement-0       = block-0
@@ -355,7 +355,7 @@ binary-expression-0
                     { binary-op, unary-expression-0 } ;
 unary-expression-0
                   = postfix-expression-0
-                  | ( "+" | "-" | "!" | "~" | "*" ),
+                  | ( "+" | "-" | "!" | "~" | "*" | "&" ),
                     unary-expression-0
                   | "copy", unary-expression-0
                   | "new", type-0, argument-list-0 ;
@@ -379,7 +379,7 @@ primary-expression-0
                   | type-intrinsic-call-0 ;
 
 type-intrinsic-call-0
-                  = ( "as" | "ptr_as" | "adopt" ),
+                  = ( "as" | "ptr_as" ),
                     "<", type-0, ">", argument-list-0 ;
 
 expression-1      = assignment-expression-1 ;
@@ -394,7 +394,7 @@ binary-expression-1
                     { binary-op, unary-expression-1 } ;
 unary-expression-1
                   = postfix-expression-1
-                  | ( "+" | "-" | "!" | "~" | "*" | "@" ),
+                  | ( "+" | "-" | "!" | "~" | "*" | "&" | "@" ),
                     unary-expression-1
                   | "copy", unary-expression-1
                   | "new", type-1, argument-list-1 ;
@@ -420,7 +420,7 @@ primary-expression-1
                   | type-intrinsic-call-1 ;
 
 type-intrinsic-call-1
-                  = ( "as" | "ptr_as" | "adopt" ),
+                  = ( "as" | "ptr_as" ),
                     "<", type-1, ">", argument-list-1 ;
 
 assignment-op     = "=" | "+=" | "-=" | "*=" | "/=" | "%="
@@ -436,11 +436,15 @@ binary-op         = "||" | "&&"
 
 (* binary-op is written compactly here. The binding powers and left/right
    associativity are those specified by the Pratt-parser table in the
-   implementation and language specification. There is no unary "&".
-   addressof(place) and std::slot_of(place) are compiler-known,
-   non-overloadable ordinary call forms. Semantic analysis checks which
-   operands they accept and requires ptr_as sources to be raw pointers or
-   usize values. *)
+   implementation and language specification. Unary & takes an eligible
+   inline place's typed address; binary & remains bitwise AND.
+   slot_off(place), adopt(raw), release(owner), and reset(owner) are
+   compiler-known, non-overloadable ordinary call forms with unqualified
+   names. Semantic analysis checks their arity and operands. adopt takes
+   exactly one raw-pointer expression, infers the owner type from that
+   operand, and leaves the source pointer unchanged. It accepts no type
+   arguments, including in HUC1. slot_off returns usize without transferring
+   a value. ptr_as sources must be raw pointers or usize values. *)
 
 literal           = integer-literal
                   | float-literal

@@ -40,7 +40,8 @@ the others.
 
 - Use one space after a comma and after a declaration colon, none before them.
 - Use spaces around binary operators, assignment, and `->` in a return type.
-- Keep prefix operators next to their operands, such as `!ready` and `*pointer`.
+- Keep prefix operators next to their operands, such as `!ready`, `*pointer`,
+  and `&value`. Binary `&` still gets surrounding spaces: `left & right`.
 - Keep calls tight: `run(value)`, not `run ( value )`.
 - Put a space after a control-flow keyword: `if (ready)`.
 - Keep type suffixes attached: `Widget*` and `Widget#`.

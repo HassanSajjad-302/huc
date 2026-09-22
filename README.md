@@ -16,11 +16,15 @@ Its two central ideas are:
 
 HUC `T#` is an owning handle, not a C++ reference. HUC has no general reference
 type. `T*` and `T#` are the only pointer-like forms and cannot be combined,
-so `T**`, `T*#`, `T#*`, and `T##` are invalid. HUC also has no unary `&`.
-Use the built-in `addressof(value)` operation to get a non-owning pointer to
-an inline value. It cannot be overloaded. The unchecked `std::slot_of(place)`
-intrinsic instead returns the address of the storage slot as a `usize` integer.
-It also accepts raw-pointer and owner slots.
+so `T**`, `T*#`, `T#*`, and `T##` are invalid. Use unary `&value` to get a
+non-owning pointer to an inline value. It cannot be overloaded. The unchecked
+`slot_off(place)` intrinsic instead returns the address of the storage slot as
+a `usize` integer. It also accepts raw-pointer and owner slots.
+
+`adopt(raw)` explicitly turns a compatible raw pointer into an owner. Its type
+comes from the pointer operand, and the raw pointer is left unchanged. HUC
+intrinsics use unqualified names, not `std::` names; ordinary library APIs
+remain separate.
 
 **Basic values are copied; Advanced values are transferred.** Numbers, raw
 pointers, and structures containing only Basic fields with neither `clone()`

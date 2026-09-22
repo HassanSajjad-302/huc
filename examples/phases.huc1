@@ -117,7 +117,7 @@ fn main() -> i32 {
     integer_cell.value = greater;
 
     let mod pointer_cell: Cell<i32*>;
-    pointer_cell.value = addressof(integer_cell.value);
+    pointer_cell.value = &integer_cell.value;
     io::println(describe<i32*>(pointer_cell.value));
 
     let mod bool_cell: Cell<bool>;

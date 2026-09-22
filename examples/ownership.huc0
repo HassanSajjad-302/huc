@@ -54,6 +54,12 @@ fn main() -> i32 {
     consume(second);
     // second is null. Its former Widget was dropped, so observer is dangling.
 
+    // A fixed raw-pointer binding can be adopted without clearing its address.
+    let mod original: Widget# = new Widget(11);
+    let raw: Widget* = release(original); // original becomes null
+    let adopted: Widget# = adopt(raw); // type inferred; raw is unchanged
+    inspect(raw); // observes the Widget now owned by adopted
+
     inspect(independent);
     return 0;
-} // independent calls drop on its separately cloned Widget
+} // adopted and independent each destroy their separately owned Widget

@@ -36,25 +36,27 @@ Directly relocating an owner slot clears that source slot to null. Relocating
 an enclosing inline aggregate instead makes the entire source inactive without
 requiring owner-field nulling.
 
-HUC has no unary `&` expression. Address-taking uses the core,
-non-overloadable `addressof` intrinsic:
+Address-taking uses the non-overloadable unary `&` operator:
 
 ```huc
 let value: Widget = Widget(7);
-let observer: Widget* = addressof(value);
+let observer: Widget* = &value;
 let owner: Widget# = new Widget(9);
 ```
 
 The pointer-like forms cannot be combined:
 `T**`, `T*#`, `T#*`, and `T##` are not HUC0 types, including through aliases.
-`addressof` accepts only an inline non-pointer place: it returns `T*` for a
-fixed place and `mod T*` for a writable place. Applying it to a raw-pointer or
-owner slot is a compile-time error. Using `owner` where `T*` is expected gives
-access to the pointee, not to the owner slot itself. To replace a caller's
-owner through an ordinary typed function, pass ownership in and return the
-replacement (consume-and-return). Binary `&` remains bitwise AND.
+Unary `&` accepts only an addressable inline non-pointer place: it returns
+`T*` for a fixed place and `mod T*` for a writable place. Applying it to a
+raw-pointer or owner slot is a compile-time error, not implicit pointee
+observation. The operand is evaluated once without transferring a value,
+creating a temporary, extending storage lifetime, or changing cleanup state.
+Using `owner` where `T*` is expected gives access to the pointee, not to the
+owner slot itself. To replace a caller's owner through an ordinary typed
+function, pass ownership in and return the replacement (consume-and-return).
+Binary `&` remains bitwise AND.
 
-The separate non-overloadable intrinsic `std::slot_of(place) -> usize` exposes
+The separate non-overloadable intrinsic `slot_off(place) -> usize` exposes
 the address of an addressable storage slot, including a raw-pointer or owner
 slot. For an owner, this is the address of the owner word, not its pointee.
 `usize` is target-pointer-sized. The operation evaluates the place once without
@@ -124,6 +126,38 @@ consume(new Widget(7));
 Only relocation from named storage tests its binding `mod`. Direct
 constructor initialization, described in section 4, creates no intermediate
 source place at all.
+
+### 1.1 Adopting a raw pointer
+
+`adopt(raw)` explicitly establishes ownership of an existing compatible
+allocation. It infers `T#` from `T*`, or `mod T#` from `mod T*`; the destination
+does not select the pointee type. It evaluates the pointer expression once
+without allocating, constructing, or cloning the object.
+
+The raw source is left unchanged, not nulled or made inactive. Even a fixed
+raw-pointer binding can be adopted from:
+
+```huc
+let mod original: Widget# = new Widget(7);
+let raw: Widget* = release(original); // original is null; raw is fixed
+let owner: Widget# = adopt(raw); // raw still observes the same Widget
+```
+
+Only `owner` now has automatic cleanup responsibility. `raw` and any other raw
+aliases can still observe the live object; they become dangling when it is
+destroyed. They must not separately free it or create another owner for it.
+This differs from owner-to-owner relocation, which still clears its source.
+
+A non-null pointer must designate a live complete object in storage compatible
+with the owner's deallocation rules, with no other owner responsible for it.
+Adopting a local, subobject, incompatible allocation, or already-owned object
+violates these unchecked preconditions. A typed null pointer gives an empty
+owner. Bare `adopt(null)`, owner or integer operands, and explicit type arguments
+are rejected. Use `let owner: T# = null;` when declaring an empty owner.
+Implicit `T*` to `T#` conversion remains forbidden.
+
+`adopt`, `slot_off`, `release`, and `reset` are compiler-known unqualified
+intrinsics, not `std::` library functions.
 
 ## 2. Basic and Advanced types
 
@@ -595,7 +629,7 @@ struct ReusableBuffer {
 
 let mod buffer: ReusableBuffer = ReusableBuffer(...);
 let other: ReusableBuffer = ReusableBuffer(...);
-buffer.assign_from(addressof(other));
+buffer.assign_from(&other);
 ```
 
 `assign_from` is not an implicit copy-assignment hook. The call site explicitly
@@ -1234,7 +1268,7 @@ A reallocation of `Vector<T>`:
 The container is responsible for its backing storage and initialized element
 range. It must ensure that old slots whose values were transferred receive
 no element cleanup. The only additional raw-storage lifetime intrinsics
-planned are `std::construct_at` and `std::destruct_at`; their interfaces and detailed
+planned are `construct_at` and `destruct_at`; their interfaces and detailed
 semantics will be designed later. Ordinary relocation-source restrictions and
 the absence of user-defined relocation hooks remain unchanged.
 
@@ -1446,6 +1480,8 @@ relocation behavior, C++ references, or C++ value-category overloads.
 | `destination = source` for Advanced `T` | Move assignment | HUC drops the destination, then performs non-overridable relocation |
 | `T*` | `const T*` by default | HUC pointer is always raw and unchecked |
 | `mod T*` | `T*` | Writable pointee |
+| `&value` | `std::addressof(value)` | HUC permits only eligible inline data places and cannot overload `&` |
+| `adopt(raw)` | Constructing `std::unique_ptr<T>` from a compatible raw pointer | HUC infers the owner type and leaves the raw pointer unchanged |
 | `T#` | `std::unique_ptr<T>` | HUC `#` is ownership, not reference |
 | `new T(...)` | `std::make_unique<T>(...)` | Produces `T#` |
 | Owner-to-`T*` conversion | `.get()` | HUC conversion is implicit in observer contexts |
@@ -1478,8 +1514,9 @@ The compiler must reject:
   move-assignment hook;
 - ordinary use of inactive storage when detected;
 - any chained pointer/owner form, including one hidden by an alias;
-- `addressof` applied to a pointer or owner slot;
-- `std::slot_of` applied to a non-place, such as a literal or function symbol;
+- unary `&` applied to a pointer/owner slot or non-place result;
+- `slot_off` applied to a non-place, such as a literal or function symbol;
+- `adopt` supplied with a non-raw-pointer operand or explicit type arguments;
 - attempts to bind `T#` as though it were a C++ reference alias.
 
 Useful warnings include:

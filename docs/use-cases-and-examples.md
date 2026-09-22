@@ -24,8 +24,9 @@ The following syntax and behavior describe language rules, not library proposals
 - `let`, `let1`, and `let2`;
 - `mod`;
 - `T*` and `T#`;
-- `addressof` for inline-place observation;
-- `std::slot_of` for unchecked, untyped slot addresses;
+- unary `&` for inline-place observation;
+- `slot_off` for unchecked, untyped slot addresses;
+- `adopt(raw)` for explicit ownership adoption without clearing the raw pointer;
 - `fn`, `fn1`, and `fn2`;
 - `struct`, `struct1`, and `struct2`;
 - `if1`, `for1`, and `while1`;
@@ -103,7 +104,7 @@ The examples below cover these use cases:
 | Runtime | Fixed-by-default local and field storage |
 | Runtime | Mutable scalar, pointer slot, pointee, and owner permissions |
 | Runtime | Non-owning observation without lifetime tracking |
-| Runtime | Explicit inline address-taking with `addressof` |
+| Runtime | Explicit inline address-taking with unary `&` |
 | Runtime | Automatic unique ownership and deterministic cleanup |
 | Runtime | Explicit consumption through an owner parameter |
 | Runtime | Owner-containing structures and destructive relocation |
@@ -236,24 +237,24 @@ Address-taking for inline storage is explicit and never overloadable:
 ```huc
 fn inline_address_example() -> i32 {
     let mod counter: Counter = Counter();
-    let observer: mod Counter* = addressof(counter);
+    let observer: mod Counter* = &counter;
     observer->increment();
     return counter.read();
 }
 ```
 
-`addressof` preserves pointee permission, so a fixed `Counter` would produce
+Unary `&` preserves pointee permission, so a fixed `Counter` would produce
 `Counter*` and the writable `counter` above produces `mod Counter*`.
-`addressof` rejects pointer and owner slots because their addresses would
-require one of the forbidden composed pointer types. Unary `&` is not HUC
-syntax.
+Unary `&` rejects pointer and owner slots because their typed addresses would
+require one of the forbidden composed pointer types. Prefix `&` takes an
+address; binary `&` remains bitwise AND. Neither operation depends on spacing.
 
 Untyped slot addresses are a separate, unchecked facility:
 
 ```huc
 fn owner_slot_address_example() -> void {
     let mod owner: Counter# = new Counter();
-    let address: usize = std::slot_of(owner);
+    let address: usize = slot_off(owner);
     let bytes: mod u8* = ptr_as<mod u8*>(address);
     // bytes addresses the owner word's representation, not the Counter.
     // Taking these addresses does not transfer ownership.
@@ -266,6 +267,25 @@ also permitted; writing actually fixed storage remains undefined behavior,
 without compiler permission tracking through the integer and cast. The caller
 is responsible for storage lifetime, alignment, representation, and ownership
 rules. This does not make `Counter#*` a valid type.
+
+Explicit adoption leaves a raw-pointer source unchanged:
+
+```huc
+fn adoption_example() -> i32 {
+    let mod original: mod Counter# = new Counter();
+    let raw: mod Counter* = release(original); // original becomes null
+    let owner: mod Counter# = adopt(raw); // inferred from raw, which stays unchanged
+
+    raw->increment(); // raw still observes the live Counter
+    return owner->read();
+} // only owner destroys the Counter
+```
+
+The raw binding needs no `mod` because adoption does not write to it. The
+`mod` inside its type permits mutation of the Counter. `adopt` requires a
+compatible allocation that no other owner still owns; it is not an implicit
+conversion from any observer to an owner. The `release` above makes this
+example's transfer of cleanup responsibility explicit.
 
 ### 3.3 Observation and consumption
 
@@ -756,7 +776,7 @@ Relocating non-owner Advanced elements through raw storage is not an ordinary HU
 source operation. Contiguous containers manage backing storage and initialized
 element ranges explicitly, including preventing cleanup of retired source
 slots. The only additional raw-storage lifetime intrinsics planned are
-`std::construct_at` and `std::destruct_at`, whose interfaces and detailed
+`construct_at` and `destruct_at`, whose interfaces and detailed
 semantics will be designed later.
 
 A fixed inline slot can be used only when the value is constructed directly in
@@ -1211,7 +1231,7 @@ struct1 Storage(T: auto) {
     }
 
     fn get() -> T* {
-        return addressof(this->value);
+        return &this->value;
     }
 }
 
@@ -1287,7 +1307,7 @@ pattern outrank another pattern that is structurally more specific.
 module examples.hash;
 
 fn1 hash_value(T: auto)(value: T) -> u64 {
-    return probable_hash_bytes(addressof(value), size_of<T>());
+    return probable_hash_bytes(&value, size_of<T>());
 }
 
 fn1 hash_value(T: auto)<T*>(value: T*) -> u64 {
@@ -1628,7 +1648,7 @@ struct1 SmallVector(T: auto, Inline: usize) {
             return this->heap_values->values;
         }
 
-        return addressof(this->inline_values[0]);
+        return &this->inline_values[0];
     }
 
     fn data_mut() mod -> mod T* {
@@ -1636,7 +1656,7 @@ struct1 SmallVector(T: auto, Inline: usize) {
             return this->heap_values->values;
         }
 
-        return addressof(this->inline_values[0]);
+        return &this->inline_values[0];
     }
 
     fn reserve(requested: usize) mod -> void {
@@ -1670,7 +1690,7 @@ struct1 SmallVector(T: auto, Inline: usize) {
 
     fn get(index: usize) -> T* {
         // Bounds remain unchecked in the core language.
-        return addressof(this->data()[index]);
+        return &this->data()[index];
     }
 
 }
@@ -1890,7 +1910,7 @@ struct Packet {
 fn send_packet(socket: net::Socket*, packet: Packet#)
     -> result::Result<void, net::Error> {
     let mod header_result: result::Result<void, net::Error> =
-        socket->write(probable_bytes_of(addressof(packet->header)));
+        socket->write(probable_bytes_of(&packet->header));
 
     if (header_result.is_error()) {
         return header_result;
