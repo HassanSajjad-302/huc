@@ -81,6 +81,66 @@ pointer arithmetic, use of inactive storage after relocation, data races, and
 other forms of undefined behavior. Its goal is lower language complexity and
 low runtime cost, not static memory safety.
 
+## Value, pointer, and owner assignment
+
+The table uses **destination type = source type**. `T` means an inline,
+non-pointer value; `T*` observes a `T`; `T#` owns an allocated `T`. These are
+ordinary bindings, without an explicit `copy`. The same conversions apply to
+initialization, assignment, arguments, and returns.
+
+Assume the underlying `T` matches, mutation permissions are compatible, and
+source and destination are distinct slots:
+
+| Combination | Meaning | Source afterward |
+|---|---|---|
+| `T = T` | Basic `T`: copy the value. Advanced `T`: relocate the value from an eligible source. | Basic: unchanged and usable. Advanced: inactive until reinitialized; no source cleanup. |
+| `T = T*` | Rejected: a pointer is not its pointed-to value. Dereference explicitly; see below. | No operation. |
+| `T = T#` | Rejected: an owner is not its owned value. Dereference explicitly; see below. | No operation. |
+| `T* = T` | Rejected: an inline value does not implicitly become a pointer. Use `&value` to observe addressable inline storage. | Taking its address leaves the value unchanged. |
+| `T* = T*` | Copy the pointer address; no ownership is created or transferred. | Unchanged observer. |
+| `T* = T#` | Observe the owned object by copying its address. | Owner unchanged; no ownership transfer. |
+| `T# = T` | Rejected: an inline value does not implicitly become a heap allocation or an owner. Use `new T(arguments)` to construct an owned object. | No operation. |
+| `T# = T*` | Take ownership of an existing compatible allocation. No allocation or pointee copy occurs. | Raw pointer unchanged; it remains an observer. |
+| `T# = T#` | Transfer ownership; no allocation or pointee copy occurs. | Active, null owner. |
+
+### Explicit access and copying
+
+`&value` returns a raw pointer, not an owner, and does not extend the value's
+lifetime. To read a pointee into an inline `T`, use `*pointer` or `*owner` when
+`T` is Basic. For an Advanced `T`, ordinary move-out through dereferencing is
+rejected; use `copy *pointer` or `copy *owner` if `T` supports cloning. The
+pointee must be live and accessible. Explicit copying leaves it unchanged.
+
+`copy owner` instead produces another `T#` with a separately allocated logical
+copy of the pointee. The source owner must be non-null, and its pointee must
+support copying.
+
+### Permissions, ownership, and cleanup
+
+- Relocating a named Advanced value or owner requires a writable source slot
+  (`mod` before its name). Inline Advanced sources must be whole locals,
+  parameters, or fresh results, not individual fields, elements, or pointees.
+  Individual owner fields and elements can transfer because they become null.
+- Copying or observing a raw pointer does not clear it. Binding it to an owner
+  does not clear it either, so even a fixed raw-pointer source is allowed.
+  Pointee `mod` may be dropped but never gained by these conversions.
+- For `T# = T*`, a non-null pointer must designate a live complete object in
+  a compatible allocation that no other owner owns. Taking ownership of a
+  local, a subobject, or an already-owned allocation is undefined behavior,
+  not a checked ownership conversion. A null raw pointer gives an empty owner.
+- Replacing an existing value requires a writable destination. An Advanced
+  inline destination is cleaned up before replacement; an owner destination
+  destroys and deallocates its old pointee if non-null. Replacing a raw pointer
+  never destroys its old pointee. Initialization has no old value to clean up.
+- Exact self-relocation of an Advanced value or owner is a no-op. Assigning an
+  owner's raw observer back to that owner is not self-relocation and violates
+  the raw-to-owner ownership precondition.
+- Raw observers do not keep objects alive. They become dangling when the
+  object is destroyed and may be invalidated when inline storage relocates.
+
+See [value semantics](docs/value-semantics.md) for the full lifetime rules and
+[the ownership example](examples/ownership.huc0) for working through transfers.
+
 ## Why HUC
 
 > Keep the metal. Lose the maze.
