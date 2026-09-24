@@ -12,170 +12,93 @@ A few terms used throughout:
 
 - **Source** and **destination**: where a value comes from and where it goes.
 - **Slot** or **place**: a storage location, such as a variable or field.
-- **Inline value**: a `T` stored directly, rather than a `T*` or `T#` holding
+- **Inline value**: a `T` stored directly, rather than a `T*` holding
   its address.
-- **Pointee**: the object a pointer or owner points to.
+- **Pointee**: the object a pointer points to.
 - **Binding**: giving a value to a destination, such as a new local or parameter.
 - **Active**: the slot contains a live value. An **inactive** slot must be
   reinitialized before it can be used as a value again; it receives no cleanup.
 
-## 1. The three basic storage relationships
+## 1. Values and raw pointers
 
-HUC uses three related type forms:
+HUC uses two related type forms:
 
-| HUC type | Meaning | Transfer behavior |
+| HUC type | Meaning | Binding behavior |
 |---|---|---|
-| `T` | An inline `T` value | Determined by `T` |
+| `T` | An inline `T` value | Basic values copy; Advanced values transfer |
 | `T*` | A nullable, unchecked, non-owning pointer | Copies one address |
-| `T#` | A nullable, unique owner of one allocated `T` | Relocates by default; `copy` duplicates the pointee |
 
-`T#` is not a C++ reference. HUC has no general reference type that aliases
-another variable. A non-null `T#` owns an allocation, automatically destroys
-its pointee, and then deallocates that storage.
-Directly relocating an owner slot clears that source slot to null. Relocating
-an enclosing inline aggregate instead makes the entire source inactive without
-requiring owner-field nulling.
+HUC has no general reference type that aliases another variable. Raw pointers
+never destroy or deallocate their pointees. Resource-managing structures use
+the same `clone`, `drop`, and relocation rules as other Advanced values.
 
 Address-taking uses the non-overloadable unary `&` operator:
 
 ```huc
 let value: Widget = Widget(7);
 let observer: Widget* = &value;
-let owner: Widget# = new Widget(9);
 ```
 
-The pointer-like forms cannot be combined:
-`T**`, `T*#`, `T#*`, and `T##` are not HUC0 types, including through aliases.
-Unary `&` accepts only an addressable inline non-pointer place: it returns
+Pointer chains such as `T**` are not HUC0 types, including through aliases.
+Unary `&` accepts an addressable inline non-pointer place: it returns
 `T*` for a fixed place and `mod T*` for a writable place. Applying it to a
-raw-pointer or owner slot is a compile-time error, not implicit pointee
-observation. The operand is evaluated once without transferring a value,
-creating a temporary, extending storage lifetime, or changing cleanup state.
-Using `owner` where `T*` is expected gives access to the pointee, not to the
-owner slot itself. To replace a caller's owner through an ordinary typed
-function, pass ownership in and return the replacement (consume-and-return).
-Binary `&` remains bitwise AND.
+raw-pointer slot is a compile-time error. Its operand is evaluated once
+without transferring a value, creating a temporary, extending storage
+lifetime, or changing cleanup state. Binary `&` remains bitwise AND.
 
 The separate non-overloadable intrinsic `slot_off(place) -> usize` exposes
-the address of an addressable storage slot, including a raw-pointer or owner
-slot. For an owner, this is the address of the owner word, not its pointee.
-`usize` is target-pointer-sized. The operation evaluates the place once without
-loading or transferring its value. It does not clone, destroy, allocate,
-extend a lifetime, or change cleanup state.
+the address of an addressable storage slot, including a raw-pointer slot.
+For a pointer, this is the address of its slot, not its pointee.
+`usize` is target-pointer-sized. The operation evaluates the place once
+without loading or transferring its value. It does not clone, destroy,
+allocate, extend a lifetime, or change cleanup state.
 
 An ordinary function may receive this integer and reconstruct a raw pointer
 with `ptr_as<T*>(address)`. This gives low-level access to the stored bytes,
-not a new typed owner reference: `T#*` and the other combined forms remain
-forbidden.
-Byte access through `u8*` or `c8*` can inspect or manipulate representation;
-it does not itself perform HUC ownership or lifetime operations. In particular,
-duplicating an owner word does not create a second valid owner.
+not a new reference type or permission to use inactive storage. Byte access
+through `u8*` or `c8*` does not itself perform lifetime operations or
+establish another valid cleanup obligation for a resource.
 
 Taking a fixed slot's address is allowed. The compiler does not track mutation
 permissions through these integers and casts or insert permission checks.
-The programmer must ensure that access respects the storage's permissions,
-lifetime, and alignment, and leaves valid values with unique ownership and
-correct cleanup. Writing a fixed slot remains undefined behavior; ordinary
-typed `mod` rules are unchanged. See the language specification's
-pointer-layering and cast sections for the full rules.
+The programmer must respect storage permissions, lifetime, alignment, access
+type, valid representation, and cleanup. Writing fixed storage remains
+undefined behavior; ordinary typed `mod` rules are unchanged.
 
-Declarations use `name: Type`. Mutability is independent at each layer:
-`mod` before the name controls the slot; `mod` inside the pointer or owner
-type controls the pointee. This spelling does not change the transfer rules.
+Declarations use `name: Type`. `mod` before the name controls the slot;
+`mod` inside a pointer type controls the pointee:
 
 ```huc
-let observer: T*; // fixed raw field; constructor obligation
+let observer: T*; // fixed field; constructor obligation
 let observer: mod T*; // fixed field; writable T; constructor obligation
-let mod observer: T*; // reseatable raw field; defaults to null
+let mod observer: T*; // reseatable field; defaults to null
 let mod observer: mod T*; // reseatable field; writable T; defaults to null
-
-let owner: T#; // fixed owner field; constructor obligation
-let owner: mod T#; // fixed field; writable T; constructor obligation
-let mod owner: T#; // movable/reseatable owner field; defaults to null
-let mod owner: mod T#; // reseatable field; writable T; defaults to null
 ```
 
-These declarations are field forms. A fixed local requires an explicit
-initializer. Every constructor must initialize each fixed field that lacks a
-declaration initializer; mutable pointer and owner fields omitted by a
-constructor default to null. HUC0 globals are separately restricted to
-drop-free Basic scalars and raw pointers, so owners are never global in 0.1.
+These are field forms. A fixed local requires an explicit initializer. Each
+constructor must initialize fixed fields that lack declaration initializers.
+Omitted mutable pointer fields default to null. HUC0 globals are restricted
+to drop-free Basic scalars and raw pointers.
 
-A fixed structure prevents assignment to its fields and mutation of values
-stored inline in those fields. A pointer or owner field with `mod` inside its
-type still allows mutation of the separate object it points to.
-For example, a read-only method may mutate the pointee of a `mod T*` field but
-may not replace the pointer stored in that field. Each layer keeps its own
-permissions.
+A fixed structure prevents assignment to its inline fields. A `mod T*`
+field still allows mutation of the separate pointee, but not replacement of
+the pointer stored in that field. Each layer keeps its own permissions.
 
-`mod` before the binding name is required when source code will relocate from,
-reset, release, or reseat a **named** pointer, owner, or other Advanced slot.
-Compiler-inserted destruction at the end of the slot's lifetime does not
-require source-level `mod`.
-
-A fresh unnamed result can be transferred directly. Function results,
-`new T(...)` owner results, evaluated `copy` results, and other temporary
-Advanced values need no binding `mod`: there is no source declaration on
-which to write it.
+Relocating a named Advanced value or assigning to a named slot requires
+binding `mod`. Compiler-inserted destruction does not. Fresh unnamed results
+need no binding `mod`: there is no source declaration on which to write it.
 
 ```huc
 let file: File = open_file("input.dat");
-consume(new Widget(7));
+consume(make_widget(7));
 ```
 
-Only relocation from named storage tests its binding `mod`. Direct
-constructor initialization, described in section 4, creates no intermediate
-source place at all.
+Direct constructor initialization, described in section 4, creates no
+intermediate source place. Copying a raw pointer leaves it unchanged, even
+when null, and never transfers or extends the pointee's lifetime.
 
-### 1.1 Taking ownership from a raw pointer
-
-Binding a compatible raw pointer to an owner takes ownership of its existing
-allocation. `T*` can bind to `T#`; `mod T*` can bind to `mod T#` or `T#`.
-The pointee type must match. The conversion never adds pointee permissions.
-It evaluates the pointer expression once without allocating, constructing,
-or cloning the object.
-
-The raw source is left unchanged, not nulled or made inactive. Even a fixed
-raw-pointer binding can supply an owner:
-
-```huc
-let mod original: Widget# = new Widget(7);
-let raw: Widget* = release(original); // original is null; raw is fixed
-let owner: Widget# = raw; // raw still observes the same Widget
-```
-
-Only `owner` now has automatic cleanup responsibility. `raw` and any other raw
-aliases can still observe the live object; they become dangling when it is
-destroyed. They must not separately free it or create another owner for it.
-This differs from owner-to-owner relocation, which still clears its source.
-
-The same rule applies to field initialization, assignment, owner parameters,
-and owner return values. Replacing an existing owner evaluates and retains
-the raw-pointer value before cleaning up the destination's old pointee.
-Only the destination needs binding `mod` for assignment; the raw source does not.
-`let alias: auto = raw;` still infers a raw pointer, not an owner.
-
-For compatible types and distinct source and destination slots:
-
-| Source | Destination | Source afterward |
-|---|---|---|
-| `T*` | `T*` | Unchanged observer |
-| `T#` | `T*` | Unchanged owner |
-| `T#` | `T#` | Active, null owner |
-| `T*` | `T#` | Unchanged observer |
-
-A non-null pointer must designate a live complete object in storage compatible
-with the owner's deallocation rules, with no other owner responsible for it.
-Taking ownership of a local, subobject, incompatible allocation, or already-owned
-object violates these unchecked preconditions. In particular, assigning an
-owner's raw observer back to that owner is not a valid self-relocation.
-A null raw pointer gives an empty owner, as does `let owner: T# = null;`.
-Integers do not implicitly convert to owners. When binding to an owner, an
-owner source always uses relocation; the compiler cannot route it through an
-observer to avoid clearing the source or checking its binding `mod`.
-
-`slot_off`, `release`, and `reset` are compiler-known unqualified
-intrinsics, not `std::` library functions.
+`slot_off` is a compiler-known unqualified intrinsic, not a `std::`
+library function.
 
 ## 2. Basic and Advanced types
 
@@ -183,8 +106,7 @@ Every complete runtime type is either **Basic** or **Advanced**.
 
 The short rule is: **Basic values are copied; Advanced values are transferred.**
 Ordinary binding leaves a Basic source usable. Transferring an inline Advanced
-value makes its source inactive; directly transferring an owner leaves its
-source active and null. Explicit `copy` requests a separate logical value
+value makes its source inactive. Explicit `copy` requests a separate logical value
 when the type supports it.
 
 Basic types are:
@@ -197,7 +119,6 @@ Basic types are:
 
 Advanced types are:
 
-- unique owners;
 - arrays whose element type is Advanced;
 - structures containing at least one Advanced field;
 - structures declaring `clone`;
@@ -272,7 +193,7 @@ Their roles are:
 
 | Operation | User customization | Invocation |
 |---|---|---|
-| Construction | `fn init(...)` | `T(...)` or `new T(...)` |
+| Construction | `fn init(...)` | `T(...)` |
 | Fieldwise copy of a Basic type | None | Ordinary binding or `copy` |
 | Logical copy of an Advanced structure | `fn clone() -> T` | Only requested by `copy` |
 | Logical copy of an Advanced array | None | `copy` applies logical copy to each element |
@@ -302,12 +223,9 @@ struct Point {
 }
 
 let origin: Point = Point(0, 0);
-let heap_point: Point# = new Point(10, 20);
 ```
 
-These expressions construct values directly. `Point(0, 0)` constructs
-`origin` in its own storage, and `new Point(10, 20)` constructs in the final
-allocation.
+The expression `Point(0, 0)` constructs `origin` directly in its own storage.
 No temporary `Point` is created and no relocation occurs. The same guarantee
 applies when a constructor expression directly initializes:
 
@@ -327,7 +245,7 @@ Constructor initializer entries:
 3. initialize each field before the constructor body executes.
 
 Every fixed field requires a declaration initializer or a constructor entry.
-An omitted mutable scalar becomes zero, an omitted mutable pointer or owner
+An omitted mutable scalar becomes zero, an omitted mutable pointer
 becomes null, and an omitted mutable structure is default-constructed.
 
 `init` does not double as a copy or relocation hook. An overload accepting
@@ -592,42 +510,20 @@ The user writes five C++ special members here. The HUC user writes `clone` and
 describe the emitted backend code: the first backend emits C17 with explicit
 lifetime operations, not C++ special members.
 
-### 6.2 Unique-owner copying
+### 6.2 Copying through a raw pointer
 
-`copy` on an owner performs an explicit deep copy of the owned object. The
-source owner must be non-null; evaluating `copy` on a null owner is undefined
-behavior. The operation has no implicit null-preserving case:
+Copying a raw pointer never copies its pointee and is valid even when null:
 
 ```huc
-let mod first: HeapText# = new HeapText("hello");
-let second: HeapText# = copy first;
-```
-
-For a valid source, the operation:
-
-1. evaluates `first`;
-2. allocates uninitialized storage for one `HeapText`;
-3. logically copies `*first` into that storage, using fieldwise copying for a
-   Basic pointee or `clone` for an Advanced structure;
-4. returns a new independent owner.
-
-The pointee type must support logical copying at compile time. A null value
-does not bypass this type requirement, and no runtime null check is required.
-The non-null precondition applies even if the pointee's copy operation would
-not otherwise read its storage.
-
-Code that needs null-preserving duplication must test the source explicitly
-and produce a null result itself. This includes `clone` methods for structures
-with optional owner fields. Null owners remain valid values for observation,
-relocation, and destruction; only copying their nonexistent pointee is invalid.
-
-Copying a raw `HeapText*` never copies the pointee and is valid even when the
-pointer is null:
-
-```huc
-let observer: HeapText* = first;
+let text: HeapText = HeapText("hello");
+let observer: HeapText* = &text;
 let another_observer: HeapText* = copy observer; // copies only the address
+let duplicate: HeapText = copy *observer; // calls HeapText.clone
 ```
+
+The dereferenced form requires a live, accessible pointee that supports
+logical copying. It creates an independent value and leaves the pointee
+unchanged; it does not allocate storage for a separate wrapper object.
 
 ### 6.3 Specialized copy assignment
 
@@ -660,24 +556,24 @@ for moving an Advanced value to a destination. The precise term is
 **destructive relocation**: the value continues in the destination, and the
 inline source becomes inactive. This differs from C++ move construction, which
 leaves the source alive. The compiler specification uses “relocation” when
-that distinction matters. Direct owner transfer has a separate rule below.
+that distinction matters.
 
-Here `Packet` is Advanced because it contains an owner, even though it declares
-neither `clone` nor `drop`:
+Here `Packet` is Advanced because it contains an Advanced `HeapText`, even
+though it declares neither `clone` nor `drop`:
 
 ```huc
 struct Packet {
     let tag: i32;
-    let payload: Widget#;
+    let payload: HeapText;
 
-    fn init(tag: i32, mod payload: Widget#)
+    fn init(tag: i32, mod payload: HeapText)
         : tag(tag),
           payload(payload),
     {
     }
 }
 
-let mod source: Packet = Packet(1, new Widget(7));
+let mod source: Packet = Packet(1, HeapText("payload"));
 let destination: Packet = source; // destructive relocation
 ```
 
@@ -686,15 +582,14 @@ does not. Relocation continues the value in `destination` and ends the active
 `Packet` lifetime in `source`. It does not create a second live object and it
 does not leave a moved-from `Packet`.
 
-For a non-owner Advanced value, relocation transfers its stored representation:
+For an Advanced value, relocation transfers its stored representation:
 
 1. Transfer the whole value's representation to the destination.
 2. Make the entire source, including every field subobject, inactive.
 3. Leave the destination responsible for the value's eventual cleanup.
 
-Owner words inside the aggregate transfer unchanged. In particular, the
-operation need not write null to `source.payload`; that field is inactive,
-not a second live owner. Neither it nor `source` may be used as a value before
+The operation need not clear `source.payload`; that field is inactive,
+not a second live value. Neither it nor `source` may be used as a value before
 the whole source is reinitialized. No source `drop` body or source-field
 cleanup runs. Arrays in the Advanced category use the same whole-value rule.
 The operation invokes no user code and cannot fail in the HUC type system.
@@ -705,36 +600,17 @@ duplicates the value and leaves the source active.
 
 A fixed field cannot be assigned to directly, but it can be transferred as
 part of a whole value. The containing source must be writable. For example,
-transferring a writable structure also transfers its fixed `T#` fields.
+transferring a writable structure also transfers its fixed Advanced fields.
 
 The bytes of an inactive source need not be cleared and need not form a valid
 representation of `T`. The compiler tracks whether the *storage place* is
 active. Assigning a new value to an inactive place begins a new lifetime there.
 Using it as a value before reinitialization is undefined behavior.
 
-Direct relocation of a primitive `T#` is the deliberate exception to the
-inactive-source rule. Relocating an owner slot transfers its address and
-writes null to the source. The source is then an active, usable null owner:
-
-```huc
-let mod first: Widget# = new Widget(7);
-let second: Widget# = first;
-
-if (!first) {
-    // defined: first is a null owner, not inactive Widget# storage
-}
-```
-
-This exception also applies when an owner field or element is moved
-individually while its containing object stays active. It does not apply to
-owner words transferred as part of a whole aggregate relocation: the source
-aggregate and all its fields become inactive, with no required null stores.
-Null owners remain valid to relocate directly or inside an aggregate.
-
 C++ move construction has a different lifetime model: it constructs a
 destination object while the source object remains alive and is destroyed
 later. A C++ move constructor must therefore establish a destructible source
-state. HUC destructive relocation ends the non-owner source lifetime
+state. HUC destructive relocation ends the source lifetime
 immediately, so it needs neither a moved-from-state contract nor a source
 destructor call.
 
@@ -820,8 +696,6 @@ let second: SelfIndexed = first; // bitwise relocation; first becomes inactive
 HUC0 does not automatically find or repair self-pointers. A value that needs
 such a pointer to stay correct must instead:
 
-- live behind `T#`, so relocation transfers only the owner word and the pointee
-  address stays stable;
 - be redesigned to compute internal addresses when needed rather than storing
   them;
 - remain in directly constructed, fixed read-only storage and never be passed,
@@ -829,27 +703,28 @@ such a pointer to stay correct must instead:
 - use a purpose-built stable-address library container or low-level storage
   API whose contract avoids inline relocation.
 
-The usual solution is ownership:
+For a local value, one option is to construct it in fixed storage and pass
+only observers:
 
 ```huc
-let mod stable: mod SelfIndexed# = new SelfIndexed(10);
-let elsewhere: mod SelfIndexed# = stable;
+let stable: SelfIndexed = SelfIndexed(10);
+let elsewhere: SelfIndexed* = &stable;
 
-// Only the owner word relocated. The SelfIndexed allocation did not move.
 if (elsewhere->has_expected_address()) {
     probable_use(elsewhere);
 }
 ```
 
-`Vector<SelfIndexed>` breaks this requirement when growth relocates
-elements. `Vector<SelfIndexed#>` or a stable node container is appropriate.
+`Vector<SelfIndexed>` breaks this requirement when growth relocates elements.
+Stable-address storage or a different representation is necessary.
+
 The same caveat applies to by-value parameters, returns, aggregate fields, and
 assignment. HUC is unchecked: obvious cases may be warned about, but the
 compiler is not required to prove address independence.
 
 ### 7.3 Where a transfer may take its value from
 
-Transferring a non-owner Advanced value requires a whole value whose active
+Transferring an Advanced value requires a whole value whose active
 state the compiler tracks directly:
 
 - a named local or parameter with the required `mod` before its name;
@@ -858,27 +733,23 @@ state the compiler tracks directly:
 Transferring a whole structure or array includes all its fields or elements.
 It does not remove them one at a time while leaving the containing value active.
 
-HUC0 rejects explicit non-owner move-out from a pointee or subobject:
+HUC0 rejects explicit Advanced move-out from a pointee or subobject:
 
 ```huc
-let value: File = *file_owner; // error: indirect Advanced source
+let value: File = *file_pointer; // error: indirect Advanced source
 let lease: Lease = session.lease; // error: Advanced subobject source
 let packet: Packet = packets[index]; // error: Advanced element source
 ```
 
-Otherwise the containing object, owner, or array could remain active even
-though one of the values it must later destroy is already inactive. In the
-first example, `file_owner` would still be non-null and would later try to
-drop an inactive `File`. Tracking that extra state would break the one-word
-owner model.
+Otherwise a containing object or array could remain active even though a
+value it must later destroy is already inactive. A raw pointer also carries
+no information about the pointee's cleanup scope. HUC0 does not track such
+partial lifetimes for ordinary relocation.
 
 This restriction does not affect:
 
 - Basic values, which are copied rather than consumed;
-- `copy *file_owner`, which clones while leaving the pointee active;
-- relocation of the whole `file_owner`, which leaves its source owner null;
-- relocation of a primitive owner field, because that source subobject remains
-  an active null owner;
+- `copy *file_pointer`, which clones while leaving the pointee active;
 - replacement of a valid indirect destination from an otherwise eligible
   source.
 
@@ -982,9 +853,8 @@ For distinct active objects, relocation assignment:
 4. destroys the old active destination;
 5. relocates the source into the now-inactive destination.
 
-The source is then inactive, except that a primitive owner source is usable
-null. Exact self-relocation assignment is a no-op and does not destroy the
-value:
+The source is then inactive. Exact self-relocation assignment is a no-op
+and does not destroy the value:
 
 ```huc
 current = current;
@@ -1002,25 +872,6 @@ let mod first: File = File(probable_os_open("a.dat"));
 let mod second: File = first; // destructive relocation; first inactive
 
 first = File(probable_os_open("b.dat")); // first active again
-```
-
-For an owner, the same operation destroys the old pointee before adopting the
-new address:
-
-```huc
-let mod destination: Widget# = new Widget(1);
-let mod source: Widget# = new Widget(2);
-
-destination = source; // destroys Widget(1), transfers Widget(2), clears source
-```
-
-The C++ counterpart is:
-
-```cpp
-std::unique_ptr<Widget> destination = std::make_unique<Widget>(1);
-std::unique_ptr<Widget> source = std::make_unique<Widget>(2);
-
-destination = std::move(source);
 ```
 
 ## 9. Destruction with `drop`
@@ -1053,11 +904,11 @@ After `drop` returns, fields are destroyed in reverse declaration order.
 
 ```huc
 struct Session {
-    let log: Logger#;
-    let socket: Socket#;
+    let log: Logger;
+    let socket: Socket;
     let mod native_transaction: i64;
 
-    fn init(mod log: Logger#, mod socket: Socket#, native_transaction: i64)
+    fn init(mod log: Logger, mod socket: Socket, native_transaction: i64)
         : log(log),
           socket(socket),
           native_transaction(native_transaction),
@@ -1076,14 +927,12 @@ struct Session {
 Destruction order is:
 
 1. `Session.drop`;
-2. `socket` pointee destruction and deallocation;
-3. `log` pointee destruction and deallocation.
+2. destruction of the inline `socket` field;
+3. destruction of the inline `log` field.
 
-`drop` must not manually destroy owner or Advanced fields that normal field cleanup
-will destroy. It may relocate a primitive owner field elsewhere, after which
-field cleanup observes a null owner. HUC0's source-place rule forbids
-relocating a non-owner Advanced field out of the still-addressable object, even
-from `drop`.
+`drop` must not manually destroy Advanced fields that normal field cleanup
+will destroy. HUC0's source-place rule forbids relocating an Advanced field
+out of the still-addressable object, even from `drop`.
 
 There is no exception unwinding in HUC0. A terminating panic need not execute
 pending `drop` operations.
@@ -1094,63 +943,40 @@ Parameters are passed by value. Their behavior follows their type:
 
 ```huc
 fn inspect(document: Document*) -> void {
-    // raw observation; caller retains ownership
+    // raw observation; caller retains the value
 }
 
 fn revise(document: mod Document*) -> void {
-    // raw mutable observation; caller retains ownership
+    // writable observation; caller retains the value
 }
 
 fn summarize(metadata: Metadata) -> void {
     // copies when Metadata is Basic
 }
 
-fn consume(document: Document#) -> void {
-    // owns document; destroys it on return unless relocated onward
+fn consume(document: Document) -> void {
+    // consumes when Document is Advanced; destroys it on return
 }
 
-fn relay(mod document: Document#) -> void {
-    probable_send(document); // relocates the parameter onward
+fn relay(mod document: Document) -> void {
+    probable_send(document); // transfers the Advanced parameter onward
 }
 ```
 
-At a call:
+For an Advanced `Document`:
 
 ```huc
-let mod document: mod Document# = new Document(...);
+let mod document: Document = Document(...);
 
-inspect(document); // owner-to-observer conversion; no relocation
-revise(document); // mutable owner-to-mutable-observer conversion
-consume(document); // relocation; caller's owner becomes null
+inspect(&document); // observation; no relocation
+revise(&document); // writable observation
+consume(document); // relocation; caller's document becomes inactive
 ```
-
-If an owner parameter receives a compatible raw pointer instead, it takes
-ownership without changing that pointer. The allocation must not already be
-owned. Retained raw observers become dangling if the callee destroys the object.
 
 Argument expressions and their corresponding parameter initializations occur
-strictly left-to-right.
-
-This guarantee is not a memory-safety mechanism. HUC could leave the order
-unspecified and remain unchecked, but then the same ownership expression could
-mean different things across backends or optimization choices. The defined
-order makes relocations, allocation, I/O, device access, counters, and
-temporary construction follow source reading order.
-
-```huc
-fn receive(observed: Document*, owned: Document#) -> void {
-    // observed points to the object held by owned
-}
-
-let mod document: Document# = new Document(...);
-receive(document, document);
-```
-
-The first argument captures the address. The second argument then relocates
-the owner. Reversing that order would clear `document` before observation and
-would produce a different result.
-
-Another important example is:
+strictly left-to-right. This is not a memory-safety mechanism. It makes
+relocations, allocation, I/O, device access, counters, and temporary
+construction follow source reading order.
 
 ```huc
 fn compare_versions(left: Document, right: Document) -> i32;
@@ -1160,27 +986,15 @@ let ordering: i32 = compare_versions(copy document, document);
 ```
 
 HUC clones `document` for `left`, then relocates the original into `right`.
+Reversing the arguments would try to clone an already inactive source.
+Likewise, passing `document` by value twice does not create two active values.
 
-C17 does not provide the same left-to-right argument guarantee. The backend
-must therefore initialize each argument's **parameter value** before it begins
-the next argument. For the owner example, generated code is conceptually:
-
-```c
-const Document *huc_param_0 = document;
-Document *huc_param_1 = document;
-document = NULL;
-receive_impl(huc_param_0, &huc_param_1);
-```
-
-The first declaration completes the owner-to-observer conversion. Binding the
-second parameter then transfers the pointer and clears `document`. Merely
-saving pointers to source places and postponing both conversions until the
-final C call would be incorrect. The pointer to `huc_param_1` transports an
-already initialized parameter slot, and the called function's generated code
-is responsible for its cleanup. This internal C pointer-to-pointer does not
-add a combined pointer type to HUC. The emitter uses typed storage for each
-parameter, either separately or in a call frame, and preserves cleanup order.
-Optimizers may reorder pure computation when the program still behaves the same.
+C17 does not provide this argument-order guarantee. The backend must finish
+initializing each argument's **parameter value** before starting the next
+argument. Saving pointers to source places and deferring their transfers
+until the final C call is insufficient. Typed parameter slots, separately
+or in a call frame, preserve sequencing and exactly-once cleanup. Optimizers
+may reorder pure computation when the program still behaves the same.
 
 ## 11. Return values
 
@@ -1202,24 +1016,6 @@ fn open_file(path: text::View) -> File {
 }
 ```
 
-Returning an owner relocates the owner:
-
-```huc
-fn make_widget(id: i32) -> Widget# {
-    return new Widget(id);
-}
-```
-
-A raw pointer returned as `T#` instead gives the result ownership without
-changing the raw source. The usual allocation and unique-ownership preconditions
-apply:
-
-```huc
-fn take_widget(raw: Widget*) -> Widget# {
-    return raw; // result owns; raw is not nulled
-}
-```
-
 The implementation may construct directly in caller-provided result storage.
 Copy elision may remove transfers, but it must not introduce or remove
 observable `clone` calls. `clone` runs exactly when required by an evaluated
@@ -1236,10 +1032,6 @@ Point origin() {
 File open_file(std::string_view path) {
     File result(probable_os_open(path));
     return result;
-}
-
-std::unique_ptr<Widget> make_widget(std::int32_t id) {
-    return std::make_unique<Widget>(id);
 }
 ```
 
@@ -1279,13 +1071,6 @@ fn text_values() -> void {
     texts.push(copy text); // clone, then relocate the clone into the vector
 }
 
-fn owner_values() -> void {
-    let mod widgets: collections::Vector<Widget#> =
-        collections::Vector<Widget#>();
-    let mod widget: Widget# = new Widget(7);
-
-    widgets.push(widget); // relocates one owner word; widget becomes null
-}
 ```
 
 A reallocation of `Vector<T>`:
@@ -1321,20 +1106,16 @@ texts.push_back(std::move(text)); // move must be requested at the C++ call
 
 text = HeapText("second");
 texts.push_back(text); // C++ copy; HUC spells this `copy text`
-
-std::vector<std::unique_ptr<Widget>> widgets;
-auto widget = std::make_unique<Widget>(7);
-widgets.push_back(std::move(widget));
 ```
 
 This is the same container-level value model as C++ RAII, with two policy
 changes: HUC makes expensive logical copying explicit and makes relocation of
 an Advanced type automatic and non-overridable.
 
-## 13. A complete owner-valued example
+## 13. A complete resource-managing value example
 
 The following HUC program combines construction, observation, mutation,
-explicit copying, destructive relocation, owner assignment, parameter
+explicit copying, destructive relocation, value assignment, parameter
 transfer, and destruction:
 
 ```huc
@@ -1391,30 +1172,29 @@ fn invert(image: mod Image*) -> void {
     probable_invert_bytes(image->pixels, image->byte_count());
 }
 
-fn upload(image: Image#) -> void {
-    probable_gpu_upload(image->pixels, image->width, image->height);
+fn upload(image: Image) -> void {
+    probable_gpu_upload(image.pixels, image.width, image.height);
 } // image is destroyed here
 
 fn main() -> i32 {
-    let mod working: mod Image# = new Image(1920, 1080);
-    working->fill(0);
+    let mod working: Image = Image(1920, 1080);
+    working.fill(0);
 
-    print_shape(working); // observe; working still owns
-    invert(working); // mutate pointee; still owns
+    print_shape(&working); // observe
+    invert(&working); // writable observation
 
-    let snapshot: Image# = copy working; // deep copy through Image.clone
+    let snapshot: Image = copy working; // logical copy through Image.clone
 
-    let mod outgoing: mod Image# = working; // relocate; working becomes null
-    print_shape(outgoing);
-    upload(outgoing); // relocate; outgoing becomes null
+    let mod outgoing: Image = working; // working becomes inactive
+    print_shape(&outgoing);
+    upload(outgoing); // outgoing becomes inactive
 
-    print_shape(snapshot);
+    print_shape(&snapshot);
     return 0;
-} // snapshot destroys its cloned Image
+} // snapshot destroys its independently copied pixel buffer
 ```
 
-An idiomatic C++20 program with the same ownership behavior would use a
-move-aware RAII `Image` type and `std::unique_ptr<Image>`:
+An analogous C++20 program uses a move-aware RAII `Image` value:
 
 ```cpp
 class Image {
@@ -1461,30 +1241,29 @@ private:
 
 void print_shape(const Image* image);
 void invert(Image* image);
-void upload(std::unique_ptr<Image> image);
+void upload(Image image);
 
 int main() {
-    auto working = std::make_unique<Image>(1920, 1080);
-    working->fill(0);
+    Image working(1920, 1080);
+    working.fill(0);
 
-    print_shape(working.get());
-    invert(working.get());
+    print_shape(&working);
+    invert(&working);
 
-    const auto snapshot = std::make_unique<Image>(*working);
+    const Image snapshot = working;
 
     auto outgoing = std::move(working);
-    print_shape(outgoing.get());
+    print_shape(&outgoing);
     upload(std::move(outgoing));
 
-    print_shape(snapshot.get());
+    print_shape(&snapshot);
     return 0;
 }
 ```
 
 Both programs provide:
 
-- inline values with Basic or Advanced classification;
-- explicit unique heap ownership;
+- inline values that manage resource storage;
 - non-owning observation;
 - mutable observation;
 - deterministic RAII cleanup;
@@ -1495,7 +1274,7 @@ Both programs provide:
 
 HUC removes the need to spell `std::move`, delete copy members, or implement
 move members. Its transfer operation is destructive relocation rather than a
-customizable C++ move, so the source does not remain a live non-owner object.
+customizable C++ move, so the source does not remain a live object.
 In exchange, HUC does not offer custom implicit copy assignment, custom
 relocation behavior, C++ references, or C++ value-category overloads.
 
@@ -1506,22 +1285,17 @@ relocation behavior, C++ references, or C++ value-category overloads.
 | `let value: T = T(...)` | `const T value(...)` | HUC is fixed by default |
 | `let mod value: T = T(...)` | `T value(...)` | HUC spells writable storage explicitly |
 | `let b: T = a` for Basic `T` | `T b = a` | Both copy |
-| `let b: T = a` for Advanced `T` | `T b = std::move(a)` | HUC destructively relocates and ends the non-owner source lifetime |
+| `let b: T = a` for Advanced `T` | `T b = std::move(a)` | HUC destructively relocates and ends the source lifetime |
 | `copy a` for Advanced `T` | Copy construction | HUC makes a potentially expensive copy explicit |
 | `destination = copy source` | Copy assignment | HUC composes clone plus replace |
 | `destination = source` for Advanced `T` | Move assignment | HUC drops the destination, then performs non-overridable relocation |
 | `T*` | `const T*` by default | HUC pointer is always raw and unchecked |
 | `mod T*` | `T*` | Writable pointee |
 | `&value` | `std::addressof(value)` | HUC permits only eligible inline data places and cannot overload `&` |
-| `let owner: T# = raw` | Constructing `std::unique_ptr<T>` from a compatible raw pointer | The HUC destination takes ownership; the raw pointer stays unchanged |
-| `T#` | `std::unique_ptr<T>` | HUC `#` is ownership, not reference |
-| `new T(...)` | `std::make_unique<T>(...)` | Produces `T#` |
-| Owner-to-`T*` conversion | `.get()` | HUC conversion is implicit in observer contexts |
-| Owner parameter `T#` | `std::unique_ptr<T>` by value | HUC call relocates the owner automatically |
 | `fn clone() -> T` | Copy constructor, often clone function | Invoked only by explicit logical copying |
 | `fn drop() mod -> void` | Destructor body | HUC destroys fields after `drop` |
 | Fixed HUC destructive relocation | Move constructor/assignment | HUC ends the source lifetime and has no user hook |
-| Inactive source storage after relocation | Valid-but-unspecified moved-from object | HUC source contains no live non-owner object until reinitialized |
+| Inactive source storage after relocation | Valid-but-unspecified moved-from object | HUC source contains no live object until reinitialized |
 
 “Comparable with C++” therefore means that ordinary C++ RAII and value-oriented
 designs have direct HUC representations. It does not mean every C++ special
@@ -1532,7 +1306,7 @@ member, reference category, allocator hook, or overload pattern exists in HUC.
 The compiler must reject:
 
 - relocating from a fixed source slot;
-- explicit relocation of a non-owner Advanced value from a pointee, field
+- explicit relocation of an Advanced value from a pointee, field
   subobject, or array element;
 - copying an Advanced structure that has no valid `clone`;
 - a `clone` with parameters, a writable receiver, or the wrong return type;
@@ -1545,20 +1319,16 @@ The compiler must reject:
 - attempts to declare a special move, relocation-constructor, or
   move-assignment hook;
 - ordinary use of inactive storage when detected;
-- any chained pointer/owner form, including one hidden by an alias;
-- unary `&` applied to a pointer/owner slot or non-place result;
-- `slot_off` applied to a non-place, such as a literal or function symbol;
-- raw-to-owner binding with an incompatible pointee type or added pointee `mod`;
-- implicit integer-to-owner conversion;
-- attempts to bind `T#` as though it were a C++ reference alias.
+- any chained pointer form, including one hidden by an alias;
+- unary `&` applied to a pointer slot or non-place result;
+- `slot_off` applied to a non-place, such as a literal or function symbol.
 
 Useful warnings include:
 
 - a `clone` that returns or embeds a raw resource address from the source;
 - a `drop` that manually destroys an automatically destroyed field;
 - obvious non-identical overlapping relocation assignment;
-- copying an owner inside a loop where allocation is likely unintended;
-- retaining a raw observer across owner relocation or destruction;
+- retaining a raw observer across value relocation or destruction;
 - placing a known self-addressing inline type in a relocating container.
 
 Warnings do not turn HUC into a memory-safe language and may be disabled.
@@ -1568,35 +1338,31 @@ Warnings do not turn HUC into a memory-safe language and may be disabled.
 The HUC0-to-C17 transpiler must preserve these source semantics rather than
 inheriting C defaults:
 
-1. `T#` lowers to one typed C pointer; ownership is enforced by HUC analysis,
-   not by the C type system.
-2. Basic/Advanced classification is decided by HUC semantic analysis.
-3. `clone` runs only for an evaluated `copy` that requires it.
-4. non-owner relocation transfers the representation, makes the whole source
-   inactive, and requires no clearing of embedded owner words; it is
-   non-failing and independent of user overloads;
-5. direct owner relocation clears the source to a usable null owner, including
-   an owner field moved individually;
-6. inactive structure values are not dropped;
-7. exact self-relocation assignment is a no-op;
-8. `drop` runs before reverse field cleanup;
-9. arguments and parameter initialization are left-to-right;
-10. generated initialization, clone, drop, and relocation functions are
-    implementation machinery, not extra HUC customization points;
-11. active/inactive state belongs to a storage place and must not add a hidden
-    field to nominal `T` or to pointer-sized `T#`;
-12. explicit cleanup covers every normal exit and active replacement; no drop
-    call may be emitted for an inactive raw-handle source merely because its
-    physical C storage leaves scope;
-13. non-owner relocation sources must satisfy the root-place restriction, and
-    a possibly aliasing indirect destination must be checked before replacement.
+1. Basic/Advanced classification is decided by HUC semantic analysis.
+2. `clone` runs only for an evaluated `copy` that requires it.
+3. Relocation transfers the representation, makes the whole source inactive,
+   and requires no clearing of source bytes; it is non-failing and independent
+   of user overloads.
+4. Inactive values are not dropped.
+5. Exact self-relocation assignment is a no-op.
+6. `drop` runs before reverse field cleanup.
+7. Arguments and parameter initialization are left-to-right.
+8. Generated lifecycle functions are implementation machinery, not extra HUC
+   customization points.
+9. Active/inactive state belongs to a storage place and must not add a hidden
+   field to nominal `T`.
+10. Cleanup covers every normal exit and active replacement. An inactive
+    source receives no cleanup merely because its physical C storage leaves scope.
+11. Relocation sources satisfy the root-place restriction; a possibly aliasing
+    indirect destination is checked before replacement.
+12. Raw-pointer copying leaves the source unchanged and never cleans up or
+    extends the lifetime of a pointee.
 
-The middle-end must make construction, copy, relocation, activation,
-deactivation, and cleanup explicit before C emission. C assignment and byte
-copying are permitted implementations only when they preserve the complete
-HUC operation, including direct-owner nulling and active state, and obey C's
-storage and aliasing rules. This keeps the semantics usable by a future C++ or
-native-code backend without changing HUC value semantics.
+The middle-end makes construction, copy, relocation, activation, deactivation,
+and cleanup explicit before C emission. C assignment and byte copying are
+permitted implementations only when they preserve the complete HUC operation,
+including active state, and obey C's storage and aliasing rules. This keeps
+the semantics usable by a future C++ or native-code backend.
 
 ## 17. Design references
 
@@ -1613,5 +1379,5 @@ WG21's relocation work:
   deliberately defers.
 
 These papers do not define HUC semantics. In particular, HUC's bitwise
-relocation rule, direct-owner nulling exception, `mod` requirement, and
+relocation rule, `mod` requirement, and
 unchecked address-dependence contract are HUC decisions.

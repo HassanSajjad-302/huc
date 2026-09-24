@@ -44,12 +44,12 @@ the others.
   and `&value`. Binary `&` still gets surrounding spaces: `left & right`.
 - Keep calls tight: `run(value)`, not `run ( value )`.
 - Put a space after a control-flow keyword: `if (ready)`.
-- Keep type suffixes attached: `Widget*` and `Widget#`.
+- Keep type suffixes attached: `Widget*`.
 - Put binding `mod` before the name and pointee `mod` inside the type.
 
 ```huc
-let mod owner: mod Widget# = new Widget(42);
-let observer: Widget* = owner;
+let mod widget: Widget = Widget(42);
+let observer: Widget* = &widget;
 
 fn inspect(widget: Widget*) -> i32 {
     return widget->value;

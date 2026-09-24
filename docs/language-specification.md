@@ -11,7 +11,7 @@ Target audience: compiler implementers, library authors, and language reviewers
 > [controlling implementation plan](implementation-plan.md) and
 > [value-semantics specification](value-semantics.md) take precedence. In
 > particular, current HUC uses name-first `let name: Type` declarations,
-> fixed-by-default storage, layer-specific `mod`, `T#` unique ownership,
+> fixed-by-default storage, layer-specific `mod`, destructive value transfer,
 > `fn clone() -> T`, and
 > `fn drop() mod -> void`; it has no source-level `const`, `var`, `copy struct`,
 > or C++ reference type.
@@ -26,8 +26,8 @@ HUC has two defining mechanisms:
 
 1. A numbered phase model unifies ordinary runtime code, generic
    specialization, compile-time evaluation, reflection, and code generation.
-2. A small ownership model distinguishes unchecked observation (`T*`) from
-   automatic unique ownership (`T#`).
+2. A small value model copies Basic values and transfers Advanced values,
+   with deterministic cleanup and unchecked observation through `T*`.
 
 HUC is not a memory-safe language. In particular, HUC does not have a borrow
 checker, lifetime parameters, mandatory bounds checks, or automatic data-race
@@ -48,10 +48,10 @@ report the relevant source location.
 Other recurring terms:
 
 - A **place** or **slot** is a storage location, such as a local or field.
-- An **inline** value is a `T` stored directly, rather than a `T*` or `T#`
+- An **inline** value is a `T` stored directly, rather than a `T*`
   holding its address.
-- A **pointee** is the object a pointer or owner points to.
-- **Reseating** a pointer or owner means replacing the address stored in its slot.
+- A **pointee** is the object a pointer points to.
+- **Reseating** a pointer means replacing the address stored in its slot.
 - A **binding** gives a value to a destination, such as a local or parameter.
 - An **active** slot holds a live value. An **inactive** slot must be
   reinitialized before it can be used as a value again and receives no cleanup.
@@ -66,11 +66,8 @@ Other recurring terms:
 HUC 0.1 makes these promises:
 
 - `T*` is pointer-sized and has no ownership or lifetime tracking.
-- `T#` is pointer-sized when the default allocator is used.
-- Directly relocating a `T#` transfers its address and leaves the source as a
-  usable null owner. Relocating an inline aggregate instead transfers its
-  representation and makes the whole source inactive without requiring
-  embedded-owner nulling.
+- Relocating an Advanced value transfers its representation and makes the
+  whole source inactive, without source cleanup or required byte clearing.
 - Destruction is deterministic and occurs at statically defined scope exits.
 - Function arguments and subexpressions evaluate from left to right.
 - An Advanced transfer is fixed, compiler-defined destructive relocation,
@@ -147,7 +144,7 @@ Top-level names are collected before bodies are checked, so a declaration may
 refer to a later declaration in the same module. HUC0 runtime globals are
 restricted to drop-free Basic scalars and raw pointers. A fixed global requires
 a constant initializer; an omitted initializer is allowed only for mutable
-storage and produces zero or null. Advanced globals, owners, structure globals,
+storage and produces zero or null. Advanced globals, structure globals,
 runtime initialization code, and program-exit global destruction are deferred.
 
 ## 3. Lexical structure
@@ -170,7 +167,6 @@ style rules. For example, `a + b`, `a+b`, and `a+ b` have the same meaning.
 Whitespace must still separate tokens where needed; changing string contents
 or the extent of a line comment is not a formatting-only change. The
 [default formatting guide](formatting.md) is a convention, not extra grammar.
-`#` is an owner-type suffix, not a comment marker or a preprocessor directive.
 
 ### 3.1 Numbered keywords
 
@@ -264,10 +260,9 @@ uses them; line breaks do not replace them.
 ### 3.4 Core intrinsic names
 
 HUC intrinsics use unqualified compiler-known names, not `std::` names.
-`slot_off(place)`, `release(owner)`, and `reset(owner)` use
-ordinary call syntax but cannot be overloaded or used as first-class function
-values. Semantic analysis checks their operands and argument counts. `as<T>`
-and `ptr_as<T*>` retain their explicit type operands.
+`slot_off(place)` uses ordinary call syntax but cannot be overloaded or used
+as a first-class function value. Semantic analysis checks its operand and
+argument count. `as<T>` and `ptr_as<T*>` retain their explicit type operands.
 
 Address-taking uses unary `&`, not a named intrinsic call. The former
 `addressof` and `std::slot_of` spellings are not aliases for
@@ -291,8 +286,6 @@ never
 T
 T*
 mod T*
-T#
-mod T#
 ```
 
 `usize` and `isize` have the target pointer width. Integer widths are exact.
@@ -306,16 +299,15 @@ Every value type is Basic or Advanced:
 
 - **Basic**: ordinary binding copies the value and leaves the source usable.
 - **Advanced**: ordinary binding transfers the value. This is destructive
-  relocation: an inline source becomes inactive; a directly transferred `T#`
-  instead remains active as a null owner.
+  relocation: the source becomes inactive and receives no cleanup.
 
 Assignment uses the same category rules, with destination cleanup when
 required. Basic and Advanced are category names, not source keywords.
 
 Built-in scalars and raw pointers are Basic. A structure is Basic when every
 field is Basic and it declares neither `clone` nor `drop`. Otherwise it is
-Advanced. Having `init()` alone does not make it Advanced. `T#` is Advanced,
-whereas `T*` remains Basic regardless of the pointee's category.
+Advanced. Having `init()` alone does not make it Advanced. `T*` remains Basic
+regardless of the pointee's category.
 
 ```huc
 struct Point {
@@ -356,45 +348,19 @@ when it supports the clone protocol in section 6.6.
 `T*` prohibits mutation of `T` through that pointer. `mod T*` permits mutation.
 Neither form extends the pointee lifetime or implies exclusive access.
 
-### 4.3 Unique owning pointers: `T#`
+### 4.3 Values and observation
 
-In HUC, `T#` is a primitive unique-owner type. HUC has no C++-style lvalue or
-rvalue reference type. The old owner spelling `T&` is not accepted.
+HUC has no C++-style lvalue or rvalue reference type. A value is stored inline;
+a raw pointer observes a separately stored value. Forming or copying a raw
+pointer does not transfer the pointee or take over its cleanup.
 
-An owner has these states:
-
-- **non-null**: it exclusively owns one dynamically allocated `T`;
-- **null**: it owns nothing.
-
-Its representation under the default allocator is exactly one address-sized
-word. No reference count, control block, lifetime table, or separate ownership
-flag is present.
-
-When a non-null owner is destroyed, HUC:
-
-1. invokes the pointee's `drop` operation, if any;
-2. destroys its fields in reverse declaration order;
-3. returns its storage to the allocator that created it.
-
-Destroying a null owner does nothing.
-
-An owner cannot participate in pointer arithmetic. It converts implicitly to
-a permission-compatible `T*` only in an observing context. Conversely, binding
-a compatible raw pointer to `T#` takes ownership without changing the raw
-pointer. The allocation and ownership preconditions are defined in section 6.8.
+Resource-managing structures use the ordinary Advanced-value rules and
+`drop`. A raw-pointer field receives no automatic pointee cleanup.
 
 ### 4.4 Pointer layering
 
-A trailing `#` in a type forms an owner type. Examples:
-
-```text
-T*      RawPtr<T>
-T#      Owner<T>
-```
-
-HUC0 accepts at most one pointer-like suffix on a non-pointer base type.
-`T**`, `T*#`, `T#*`, and `T##` are rejected, including equivalent types hidden
-by aliases.
+HUC0 accepts at most one `*` suffix on a non-pointer base type.
+`T**` is rejected, including equivalent types hidden by aliases.
 
 The non-overloadable unary operator `&place` returns `T*` for a fixed inline
 `T` place and `mod T*` for a writable inline `T` place. Its operand must be an
@@ -403,11 +369,9 @@ copying, relocating, destroying, or extending the lifetime of its value. It
 does not allocate or create a temporary, or change activation or cleanup state.
 Literals, non-place results, types, and function symbols are not valid operands.
 
-`&` rejects raw-pointer and owner slots because their typed addresses would
-require a forbidden composed type. `&owner` does not implicitly observe the
-pointee. Writing an owner expression where `T*` is expected instead performs
-pointee observation; it never produces an address to the owner word. Forming
-a place through an invalid pointer is not made valid by taking its address.
+`&` rejects raw-pointer slots because their typed addresses would require a
+forbidden composed type. Forming a place through an invalid pointer is not
+made valid by taking its address.
 Binary `&` remains bitwise AND; `&&` remains logical AND. The parser distinguishes
 prefix and binary `&` by expression position, not by whitespace.
 
@@ -421,10 +385,10 @@ let writable_observer: mod Widget* = &writable;
 The separate compiler-known, non-overloadable intrinsic
 `slot_off(place) -> usize` returns the untyped address of the storage slot
 designated by `place`. It accepts addressable locals, parameters, fields,
-elements, and dereferenced data storage, including raw-pointer and owner slots.
-An owner operand designates its owner word, not its pointee: a null owner value
-still has an addressable slot. Forming a place through an invalid pointer does
-not become valid merely because the intrinsic returns an integer.
+elements, and dereferenced data storage, including raw-pointer slots. A pointer
+operand designates its pointer slot, not its pointee. Forming a place through
+an invalid pointer does not become valid merely because the intrinsic
+returns an integer.
 
 The expression identifying the slot is evaluated exactly once. The intrinsic
 does not load, copy, relocate, or destroy the stored value, allocate or create a
@@ -437,30 +401,30 @@ the value is a data-storage address, not a portable serialized address.
 Both fixed and writable slots may have their addresses taken this way. The
 compiler does not track mutation permissions through the integer and cast or
 insert permission checks. Correct alignment, storage lifetime, access type,
-valid representation, unique ownership, and cleanup remain the programmer's
+valid representation, resource management, and cleanup remain the programmer's
 responsibility. Writing an actually fixed slot is undefined behavior, even if
 the reconstructed pointer has leading `mod`. Raw representation access does
-not automatically destroy a replaced owner, null another owner, or update
-compiler-maintained cleanup state. It does not make inactive storage readable
-or permit two owners of one allocation.
+not automatically destroy a replaced value or update compiler-maintained
+cleanup state. It does not make inactive storage readable or permit duplicate
+cleanup of a resource.
 
-`slot_off` is an untyped escape hatch, not a typed owner-slot alias. It does
+`slot_off` is an untyped escape hatch, not a typed reference. It does
 not add composed pointer types or change ordinary typed `mod` checks.
 
 Each `mod` keeps its own meaning inside a structure. A fixed structure
 prevents assignment to its fields and mutation of values stored inline in
-them. A `mod T*` or `mod T#` field still allows mutation of the separate
+them. A `mod T*` field still allows mutation of the separate
 object it points to. A read-only method may therefore mutate that pointee but
 may not replace the address stored in the field.
 
 ### 4.5 Nullability
 
-Both `T*` and `T#` may contain null. They convert explicitly to `bool` in a
+`T*` may contain null. It has a contextual conversion to `bool` in a
 condition:
 
 ```huc
-if (owner) {
-    owner->run();
+if (pointer) {
+    pointer->run();
 }
 ```
 
@@ -488,8 +452,7 @@ inheritance, or virtual dispatch.
 Construction selects an unnumbered `fn init(...)`. A constructor expression
 `T(arguments)` constructs directly in the destination when it directly
 initializes a local, a constructor field entry, a by-value parameter, or a
-`return` result. `new T(arguments)` constructs directly in the final
-allocation. No temporary `T` exists and no destructive relocation occurs in
+`return` result. No temporary `T` exists and no destructive relocation occurs in
 these contexts. This guaranteed destination construction lets `init` observe
 the final `this` address; it is not optional backend copy elision. The C17
 backend may use explicit destination pointers to preserve this guarantee.
@@ -500,7 +463,7 @@ body may then mutate fields declared with `mod` before their names. Fixed
 fields are initialized by their declaration or initializer entry and cannot
 be assigned in the body.
 
-An omitted mutable scalar initializes to zero, a mutable raw pointer or owner
+An omitted mutable scalar initializes to zero, a mutable raw pointer
 to null, and a mutable structure through its zero-argument constructor. Fixed
 fields without declaration initializers must be initialized by each constructor.
 
@@ -509,10 +472,10 @@ Methods receive an implicit non-owning `this`:
 - `this: T*` for a read-only method, which is the default;
 - `this: mod T*` for a method with trailing `mod`.
 
-Calling a method on an owner observes the pointee and never relocates the owner:
+Calling a method through a raw pointer observes the pointee and never transfers it:
 
 ```huc
-widget->update(); // no ownership binding, therefore no relocation
+widget->update(); // observes the pointee; no relocation
 ```
 
 ### 4.6.1 Lifecycle method
@@ -537,12 +500,11 @@ Declaring `drop` makes the structure Advanced.
 ### 4.7 Indexing and library containers
 
 Raw-pointer indexing is unchecked. Arrays, slices, and inline fixed-capacity
-storage are library types rather than additional primitive owner syntax in
+storage are library types rather than additional primitive storage syntax in
 0.1. A probable HUC1 standard library can provide `Array<T>`, `Slice<T>`, and
 `InlineArray<T, N>` families that generate concrete HUC0 structure types.
 
-Primitive `[N]T` fixed arrays are deferred. This also avoids an ambiguous
-`new[]`/`delete[]` distinction for `T#`: a `T#` always owns exactly one `T`.
+Primitive `[N]T` fixed arrays are deferred.
 
 ### 4.8 Type aliases
 
@@ -570,7 +532,7 @@ From lowest to highest precedence:
 | Shift | `<<`, `>>` | Left |
 | Additive | `+`, `-` | Left |
 | Multiplicative | `*`, `/`, `%` | Left |
-| Unary | unary `+`, `-`, `!`, `~`, dereference `*`, address-taking `&`, `copy`, `new`, and HUC1 `@` | Right |
+| Unary | unary `+`, `-`, `!`, `~`, dereference `*`, address-taking `&`, `copy`, and HUC1 `@` | Right |
 | Postfix | call, index, `.`, `->`, `++`, `--`, and HUC1 family request | Left |
 
 Unary `&` has the same precedence as dereference `*`. Postfix operations bind
@@ -583,15 +545,10 @@ Operands, function arguments, constructor arguments, and initializer elements
 are evaluated from left to right. Side effects of an earlier operand are
 complete before evaluation of the next operand begins.
 
-For example, if `take` consumes its parameters:
-
-```huc
-take(owner, owner);
-```
-
-the first parameter receives the allocation and clears `owner`; the second
-parameter receives null. HUC never leaves this dependent on backend evaluation
-order.
+For example, `combine(first(), second())` finishes evaluating and binding
+`first()` before evaluating `second()`. Passing the same Advanced local by
+value twice uses an inactive source on the second binding; evaluation order
+does not make that valid.
 
 `&&` and `||` short-circuit. Only the selected operand of `?:` is evaluated.
 
@@ -612,13 +569,13 @@ alias unless an API explicitly uses a future `restrict` facility. Accessing an
 object through an incompatible pointer type is undefined except through `u8*`
 or `c8*`.
 
-The compiler shall not infer non-aliasing merely because an address originated
-from `T#`; raw observers may exist.
+The compiler shall not infer non-aliasing merely because a structure manages
+a resource; raw observers may exist.
 
 ### 5.4 Member access
 
 `.` accesses a member of an inline value. `->` accesses a member through a raw
-or owning pointer. A method call is not an ownership-binding context.
+pointer. A method call observes its receiver rather than transferring it.
 
 ### 5.5 Casts
 
@@ -631,7 +588,7 @@ ptr_as<T*>(pointer_or_address) // raw pointer or usize address reinterpretation
 
 `ptr_as` accepts a raw pointer or a `usize` data address and produces the
 specified one-level raw pointer type, including a leading `mod` where spelled.
-It does not produce an owner or a composed pointer type. A `usize` obtained
+It does not produce a composed pointer type. A `usize` obtained
 from `slot_off(place)` can be converted back to a pointer addressing that
 same storage while the storage remains valid. Targets must support this
 data-address round trip. Arbitrary integer values do not establish valid
@@ -639,8 +596,8 @@ storage or access rights.
 
 `ptr_as` is unchecked: the cast does not validate alignment, lifetime,
 representation, mutation permissions, or access-type compatibility. For
-example, casting an owner slot's address to `Widget*` does not make that slot a
-`Widget`; its bytes are the owner representation, not the owned object. Byte
+example, casting a pointer slot's address to `Widget*` does not make that slot
+a `Widget`; its bytes represent a pointer, not the pointed-to object. Byte
 views through `u8*` or `c8*` follow section 5.3. No function-address conversion
 is provided by this rule. Numeric narrowing is explicit. Representation
 reinterpretation of values (`bit_as`) is deferred from 0.1.
@@ -659,80 +616,45 @@ Advanced value is supplied to a destination that stores that value:
 - return-value binding;
 - aggregate initialization.
 
-Merely naming, testing, dereferencing, or observing an owner does not relocate
-it.
-
-```huc
-let mod owner: mod Widget# = new Widget();
-
-owner->update(); // observe
-if (owner) {} // test
-let raw: Widget* = owner; // observe
-inspect(owner); // observe if parameter is Widget*
-
-let mod next: mod Widget# = owner; // relocate; owner becomes null
-consume(next); // relocate if parameter is Widget#
-```
+Taking a value's address or calling a method does not transfer it. To observe
+an inline value through a raw-pointer parameter, pass `&value` explicitly.
 
 Whenever relocation from a named place is otherwise permitted, its source
 storage must be writable, expressed by `mod` before the binding name.
-Section 6.4 further restricts non-owner subobject sources. Primitive owner
-fields and elements are an exception because transferring them leaves a usable
-null owner. Fresh
-unnamed results can be transferred directly: function results, `new` owner
-results, evaluated `copy` results, and other temporary Advanced values need no
-binding `mod`. There is no source declaration on which to write it. Direct
+Section 6.4 further restricts subobject sources. Fresh unnamed results can
+be transferred directly: function results, evaluated `copy` results, and
+other temporary Advanced values need no binding `mod`. Direct
 `T(arguments)` destination construction has no temporary source place.
 
-### 6.2 Owner destructive-relocation initialization
+### 6.2 Destructive-relocation initialization
 
-For:
-
-```huc
-let destination: T# = source;
-```
-
-When `source` is an owner in named storage, its slot must be writable, such as
-a parameter or local with `mod` before its name. Fresh owner results need no
-source binding permission. For an owner slot, the abstract operation is:
-
-```text
-destination.address = source.address
-source.address = null
-```
-
-No user function is called by the transfer. Unlike a relocated non-owner
-value, the source owner remains active and may immediately be tested, assigned,
-destroyed, or relocated again. It simply owns nothing.
-
-A raw-pointer source instead uses section 6.8's raw-to-owner binding rule and
-is left unchanged.
-
-### 6.3 Owner destructive-relocation assignment
-
-For:
+For an Advanced `T`:
 
 ```huc
-destination = source;
+let destination: T = source;
 ```
 
-where both expressions designate owners of the same type:
+The source must be eligible under section 6.4. Its representation transfers
+to the new destination, and the source becomes inactive without cleanup.
+No user function is called by the transfer.
 
-1. evaluate and retain the destination slot;
-2. evaluate the source slot;
-3. if both slots are identical, perform no operation;
-4. destroy the destination's old pointee, if non-null;
-5. copy the source address into the destination;
-6. store null into the source.
+### 6.3 Destructive-relocation assignment
 
-Exact self-relocation is therefore a defined no-op.
+For an Advanced `T`, `destination = source`:
 
-Assignment cannot be overloaded. A named method must express domain-specific
-operations such as merge, append, swap, or replace.
+1. evaluates and retains the destination slot;
+2. evaluates the source slot;
+3. does nothing if both slots are identical;
+4. destroys the destination's old value if it is active;
+5. transfers the source representation and makes the source inactive.
 
-### 6.4 Bitwise relocation of other Advanced values
+Exact self-relocation is a defined no-op. Assignment cannot be overloaded.
+Named methods express domain-specific operations such as merge, append, swap,
+or replace.
 
-Relocating a non-owner Advanced value performs a fixed representation transfer:
+### 6.4 Bitwise relocation of Advanced values
+
+Relocating an Advanced value performs a fixed representation transfer:
 
 1. the whole value's representation transfers to the destination;
 2. the source value's lifetime ends, and its storage and all field subobjects
@@ -740,8 +662,8 @@ Relocating a non-owner Advanced value performs a fixed representation transfer:
 3. the destination receives the cleanup obligation, with no source cleanup.
 
 This is bitwise relocation, not recursive invocation of the individual fields'
-transfer operations. Embedded owner words transfer unchanged and need not be
-nulled in the source. No source field remains an independently active value.
+transfer operations. No source field remains an independently active value,
+and no source bytes need to be cleared.
 The rule applies whether `clone`, `drop`, or an Advanced field makes the type
 Advanced; ordinary binding of a Basic type still leaves its source active.
 
@@ -776,30 +698,23 @@ static control-flow facts or hidden drop flags at joins where a value is only
 conditionally active. Such flags are an implementation detail, not runtime
 lifetime checking. Straight-line relocations require no flag.
 
-`T#` uses its null representation instead of an additional drop flag whenever
-possible.
-
-An explicit non-owner Advanced source must be a whole value whose active state
+An explicit Advanced source must be a whole value whose active state
 the compiler tracks directly: a named local or parameter, or a fresh temporary
 or result. These are called root places.
 Whole-value relocation includes subobjects in the same transfer. HUC0
-rejects moving a non-owner value out through a pointer, owner dereference,
-field selection, or array indexing. Otherwise the containing object or owner
+rejects moving an Advanced value out through a pointer dereference,
+field selection, or array indexing. Otherwise the containing object
 could remain active and later try to clean an inactive subobject without
 storing extra state to track which parts are still active.
 
-A primitive `T#` field or element moved individually is exempt because direct
-owner relocation stores null in that source slot, which remains active. This
-does not apply to its bits transferred within a whole aggregate relocation.
-Null owner words are valid in either operation. `copy *owner` is also valid for
-a non-null owner with a copyable pointee because it leaves the pointee active.
-Relocating the whole owner remains valid, including when null. An eligible
-root source may replace a valid indirect destination; if it may alias that
-destination, exact storage identity is checked before destruction. Containers
-manage backing storage and initialized element ranges explicitly. The deferred
-raw-storage lifetime intrinsics are limited to `construct_at` and
-`destruct_at`, with interfaces and detailed semantics to be designed
-later; they do not broaden ordinary relocation-source eligibility.
+An eligible root source may replace a valid indirect destination; if it may
+alias that destination, exact storage identity is checked before destruction.
+`copy *pointer` is valid when the pointee is live and supports cloning; it
+leaves that pointee active. Containers manage backing storage and initialized
+element ranges explicitly. The deferred raw-storage lifetime intrinsics are
+limited to `construct_at` and `destruct_at`, with interfaces and detailed
+semantics to be designed later; they do not broaden ordinary relocation-source
+eligibility.
 
 Inline values whose correctness depends on a stable address are an unchecked
 boundary of this model. For example, destructive relocation does not repair a
@@ -807,11 +722,10 @@ self-pointer, an interior pointer into the source, or an address registered
 with an external API. A program that later relies on such stale addresses has
 undefined behavior. The programmer must instead keep the inline value in one
 directly constructed fixed read-only storage location and never relocate it,
-redesign the representation, use a stable-address library container, or place
-it behind `T#` so relocation transfers only the owner while the pointee's
-address stays stable. A mutable address-dependent object should normally live
-behind `T#`; HUC 0.1 has no pinning qualifier, neither infers this restriction,
-nor provides a custom relocation hook.
+redesign the representation, or use storage whose address remains stable.
+A mutable address-dependent object must likewise stay at its construction
+address while those invariants are needed. HUC 0.1 has no pinning qualifier,
+neither infers this restriction, nor provides a custom relocation hook.
 
 ### 6.5 Destruction order
 
@@ -836,17 +750,8 @@ implementation-defined diagnostic output; it need not run pending destructors.
 - For a Basic type, it performs the ordinary copy.
 - For an Advanced structure, it calls a method with the effective signature
   `fn clone() -> T`.
-- For `T#`, the source must be non-null. The operation allocates a new `T`
-  and initializes it with `copy *source`. Copying a null owner is undefined
-  behavior, even if the pointee's copy operation would not read its storage;
-  no runtime null check or null-preserving result is required. `T` must support
-  logical copying at compile time.
 - For a raw pointer, it copies the address and never clones the pointee;
   copying a null raw pointer is valid.
-
-Null-preserving owner duplication requires an explicit source test by the
-caller, including inside `clone` methods for optional owner fields. This does
-not change the validity of null-owner relocation or destruction.
 
 ```huc
 struct Text {
@@ -862,9 +767,6 @@ struct Text {
 
 let a: Text = make_text("hello");
 let b: Text = copy a;
-
-let first: Widget# = new Widget();
-let second: Widget# = copy first;
 ```
 
 Declaring `clone` makes the type Advanced, even if all fields are Basic. The
@@ -888,120 +790,52 @@ It may allocate and update external bookkeeping, such as a reference count,
 through an explicitly writable observer. The compiler does not prove that
 custom code follows these rules.
 
-### 6.7 Allocation
+### 6.7 Manually managed storage
 
-```huc
-let aggregate: T# = new T(constructor_arguments);
-```
+Allocation and deallocation are explicit library or external operations.
+Copying a raw pointer does not create cleanup responsibility. Structures that
+manage resources must release them in `drop`; raw-pointer fields do not
+destroy or deallocate their pointees.
 
-`new T(...)` allocates suitably aligned storage, invokes the selected `init`,
-and returns a unique owner. Constructor initializer obligations follow section
-5 of the implementation plan. Named factory functions express validated or
-fallible construction. Allocation failure terminates in 0.1. A later standard
-library may provide a recoverable `try_new`.
+The planned `construct_at` and `destruct_at` operations will address object
+lifetimes in manually managed storage. Their interfaces remain deferred.
+HUC 0.1 has no built-in allocating constructor expression.
 
-Custom allocation policies use ordinary library owner types. Stateful custom
-deleters are deliberately not stored in primitive `T#`, preserving its
-one-word representation.
+### 6.8 Raw-pointer binding
 
-### 6.8 Taking ownership from raw pointers, release, and reset
-
-Binding a raw pointer to an owner takes ownership directly:
-
-```huc
-let mod first: Widget# = new Widget(7);
-let raw: Widget* = release(first); // first becomes null
-let mod owner: Widget# = raw; // raw is unchanged; owner now owns
-reset(owner); // destroy pointee and set owner to null; raw is now dangling
-```
-
-This built-in conversion applies wherever an owner destination is expected:
-local or field initialization, assignment, parameter binding, and return-value
-binding. No intrinsic call or cast is needed. The permitted conversions are:
-
-- `T*` to `T#`;
-- `mod T*` to `mod T#` or `T#`.
-
-Type aliases are resolved first. The pointee type must match and be a complete
-type that can be owned. The conversion may drop pointee `mod` but cannot add
-it or reinterpret the pointer. Any necessary pointer cast must be explicit
-and does not prove that taking ownership is valid. `let alias: auto = raw;`
-still infers a raw pointer and creates no owner.
-
-The pointer expression is evaluated once. The destination owner holds
-that address without allocating, constructing, cloning, or destroying the
-pointee. The conversion does not null, deactivate, or write to a source pointer
-slot, and it does not require that slot to have binding `mod`. Existing raw
-aliases remain observers; they do not gain ownership or a longer lifetime.
-The allocation receives cleanup through the new owner. For assignment to an
-existing owner, evaluate the destination place and then the raw-pointer value,
-retain that value, clean up the destination's old pointee if non-null, and
-store the retained pointer. The destination must be writable as usual.
-
-A non-null pointer must designate a live, complete `T` in an allocation
-compatible with the primitive owner's cleanup and deallocation rules. No
-other owner may still be responsible for that allocation. A pointer to a
-local, subobject, incompatible allocation, or already-owned object cannot be
-validly bound to an owner. Violating these unchecked preconditions is undefined
-behavior; the compiler does not insert allocation or uniqueness checks.
-Keeping raw observers is permitted, but separately freeing the allocation or
-giving it to another owner is not. This also rules out assigning an owner's
-own raw observer back to it; raw-to-owner assignment is not self-relocation.
-
-A null raw pointer produces an empty owner without changing the pointer.
-Direct binding of `null`, such as `let owner: T# = null;`, remains valid.
-Integers do not implicitly convert to owners. An owner source still uses
-owner-to-owner relocation and becomes null; the compiler must not convert it
-through a raw observer to bypass relocation or its source-`mod` requirement.
-
-`release` transfers the cleanup obligation to the programmer and clears the
-source owner. Taking ownership from a raw pointer instead leaves that source
-alone.
-`release(owner)` and `reset(owner)` require a named owner slot declared with
-`mod` before its name. A primitive owner `swap` operation is deferred from 0.1;
-a library can express it using `release`, `reset`, and destructive relocation.
+Initialization, assignment, argument passing, and return of a compatible raw
+pointer copy its address. The source stays unchanged, including when null.
+Binding may drop pointee mutation permission but cannot add it. No allocation,
+pointee copy, pointee destruction, or resource transfer occurs.
 
 ### 6.9 Function parameters
 
-The parameter type communicates transfer intent:
+The parameter type communicates whether a function observes or receives a value:
 
 ```huc
 fn inspect(widget: Widget*) -> void; // read-only observation
 fn mutate(widget: mod Widget*) -> void; // writable observation
-fn consume(widget: Widget#) -> void; // consume
+fn receive(widget: Widget) -> void; // copies Basic or consumes Advanced Widget
 ```
 
-Supplying an owner to a raw-pointer parameter is an implicit observation.
-Supplying it to an owner parameter destructively relocates it.
-Supplying a compatible raw pointer to an owner parameter gives that parameter
-ownership under section 6.8's preconditions, leaving the raw argument unchanged.
-If the callee destroys the object, retained raw observers become dangling.
-
-HUC 0.1 does not have an ownership-slot reference that lets a callee reseat the
-caller's owner without consuming it. Consume-and-return is the normal form:
-
-```huc
-owner = transform(owner);
-```
+Pass `&widget` to observe an inline value. An Advanced by-value parameter
+receives the transferred value and its cleanup obligation. An ordinary
+`mod Widget*` can also let a function replace a caller's writable value,
+subject to the usual source, destination, and lifetime rules.
 
 ### 6.10 Return values
 
-Returning an Advanced value destructively relocates it into the caller's result
-location. A returned non-owner local becomes inactive. A returned local owner
-becomes null, unless the implementation elides the transfer entirely.
+Returning an Advanced local destructively relocates it into the caller's
+result location and makes the source inactive. Direct constructor results
+instead use guaranteed destination construction. Returning a Basic value
+copies it. Returning `T*` never transfers or extends the pointee's lifetime.
 
-Returning `T*` never transfers or extends ownership.
-Returning a compatible raw pointer from a function whose result type is `T#`
-takes ownership for the result under section 6.8's rules. The raw source is
-unchanged; it is not treated as a relocated owner.
+### 6.11 Value and pointer conversions
 
-### 6.11 Ownership and overload resolution
-
-An overload set must not contain two candidates whose corresponding parameter
-types differ only between `T*`/`mod T*` and `T#`. Such a set would make
-observation versus consumption depend on overload ranking and is a diagnostic.
-
-Use different names when the ownership behavior differs.
+Values and pointers do not implicitly convert to each other. Use `&value`
+to observe addressable inline storage and `*pointer` to access a live
+pointee. Ordinary Advanced move-out through dereferencing is rejected;
+explicit `copy *pointer` may clone a copyable pointee.
 
 ## 7. Functions and control flow
 
@@ -1013,7 +847,7 @@ fn add(left: i32, right: i32) -> i32 {
 }
 ```
 
-Parameters are by value. Raw pointer parameters observe. Owner and other Advanced
+Parameters are by value. Raw pointer parameters observe. Advanced
 parameters consume. There is no C++-style lvalue reference, rvalue reference,
 reference collapsing, or perfect forwarding.
 
@@ -1022,8 +856,8 @@ reference collapsing, or perfect forwarding.
 Runtime locals begin with `let` and use `let [mod] name: Type`. The brackets
 here mean that `mod` is optional; they are not source punctuation. Fields,
 globals, and parameters use the same name-before-type order, but parameters
-omit `let`. A binding's `mod` precedes its name; `mod` inside `mod T*` or
-`mod T#` still controls access to the pointee, not the binding slot.
+omit `let`. A binding's `mod` precedes its name; `mod` inside `mod T*`
+still controls access to the pointee, not the binding slot.
 
 ```huc
 let mod count: i32 = 0;
@@ -1077,7 +911,7 @@ or a lone semicolon is not a loop body. Returning a value requires an explicit
 
 ### 7.4 No implicit truthiness
 
-`bool` is required by boolean operators and conditions. Raw and owning pointers
+`bool` is required by boolean operators and conditions. Raw pointers
 have a built-in explicit contextual conversion to `bool`; integers do not.
 
 ### 7.5 Function overloading
@@ -1086,12 +920,9 @@ have a built-in explicit contextual conversion to `bool`; integers do not.
 
 1. exact type matches;
 2. built-in lossless numeric promotions;
-3. permission-dropping pointer conversion;
-4. owner-to-observer or raw-to-owner conversion, including permitted pointee
-   permission dropping.
+3. permission-dropping pointer conversion.
 
 No user-defined implicit conversion participates. A tie is a diagnostic.
-Section 6.11's ownership-only restriction applies before ranking.
 
 ## 8. Lifetime and safety model
 
@@ -1108,33 +939,34 @@ fn remember(widget: Widget*) -> void {
 }
 
 fn example() -> void {
-    let owner: Widget# = new Widget();
-    remember(owner);
-} // owner destroys Widget
+    let widget: Widget = Widget();
+    remember(&widget);
+} // widget's lifetime ends
 
 // Dereferencing saved later is undefined behavior.
 ```
 
 The compiler does not infer or check a relationship between `saved` and
-`owner`.
+`widget`.
 
-### 8.2 Conditional owner relocation
+### 8.2 Conditional relocation
+
+For an Advanced `Widget`:
 
 ```huc
-let mod owner: Widget# = new Widget();
+let mod widget: Widget = Widget();
 
 if (condition) {
-    let mod local: Widget# = owner;
-    consume(local);
+    receive(widget);
 }
 
-use(owner);
+// widget must not be read if the branch transferred it.
 ```
 
-At the final call, `owner` is non-null if the branch was not taken and null if
-it was. HUC does not need borrow checking or a compile-time “possibly
-relocated” rejection for this owner case. Dereferencing the null state is
-undefined behavior.
+The source is inactive if the branch was taken, and active otherwise. Using
+an inactive value is undefined behavior. Cleanup must still occur exactly
+once, using static control-flow knowledge or a drop flag where needed.
+Assigning a new value to the source begins a new lifetime there.
 
 ### 8.3 Data races
 
@@ -1370,8 +1202,8 @@ body because they disappear. Raw source generation is prohibited within a
 single-variable invariant without parsing emitted text.
 
 Different specializations of one family may choose different value types,
-initializers, raw versus owning pointer forms, pointee permissions, and slot
-mutability. The family name is not itself a runtime variable; only a concrete
+initializers, inline values versus raw-pointer forms, pointee permissions,
+and slot mutability. The family name is not itself a runtime variable; only a concrete
 request such as `counter<true>` denotes one.
 
 `let1` is permitted at module scope and at function or nested-block scope. It
@@ -1901,12 +1733,11 @@ An `extern "C"` function may use:
 - `void` as a return type;
 - one-level raw pointers to built-in types.
 
-It must not expose `T#`, HUC Advanced values with `drop`, phase-1/2 types, or
-compiler metadata. Ownership across C boundaries is expressed by documented
-functions returning or accepting raw pointers. On the HUC side, binding a
-returned raw pointer to `T#` takes ownership when its allocation is compatible;
-`release` hands cleanup responsibility out of an owner. Mere observation of an
-owner as `T*` does not release ownership.
+It must not expose HUC Advanced values with `drop`, phase-1/2 types, or
+compiler metadata. Resource management across C boundaries is expressed by
+documented functions returning or accepting raw pointers or scalar handles.
+Copying or passing a raw pointer does not itself establish or release any
+cleanup obligation.
 
 C-layout structure attributes, opaque foreign handle declarations, pointer
 chains, and C variadics are deferred from 0.1. A small C shim can flatten such
@@ -1923,10 +1754,7 @@ directly consumable in 0.1. The compiler itself is implemented in C++20.
 The following list is representative rather than exhaustive:
 
 - invalid raw-pointer dereference or arithmetic;
-- dereferencing a null owner after its ownership was relocated;
-- evaluating `copy` on a null owner;
 - use of inactive Advanced storage;
-- taking ownership of an already-owned object or an incompatible allocation;
 - violation of an external function's contract;
 - out-of-range unchecked indexing;
 - signed overflow, invalid shifts, and integer division by zero;
@@ -1947,9 +1775,8 @@ The following require separate proposals:
 - checked references or lifetime analysis;
 - primitive fixed arrays;
 - representation reinterpretation with `bit_as`;
-- a primitive owner `swap`;
 - requester-side placement of cross-module family specializations;
-- inheritance and implicit subtype ownership conversion;
+- inheritance and implicit subtype conversion;
 - exceptions and stack unwinding;
 - coroutines and async suspension;
 - shared ownership as a primitive type;
@@ -1957,7 +1784,6 @@ The following require separate proposals:
 - arbitrary implicit conversions;
 - user-defined operator overloading;
 - dynamic runtime reflection;
-- stateful deleters in `T#`;
 - a stable HUC-to-HUC binary ABI;
 - compile-time network access or untracked host execution.
 
@@ -1973,13 +1799,8 @@ The closest C++ equivalents are:
 | HUC | Approximate C++ |
 |---|---|
 | `T*` | `T*` |
-| `T#` | `std::unique_ptr<T>` |
 | `&value` | `std::addressof(value)` or `&value` |
 | `slot_off(place)` | a data-slot address converted to `std::uintptr_t` |
-| `let owner: T# = raw` | constructing `std::unique_ptr<T>` from a compatible raw pointer |
-| owner relocation, `let b: T# = a` | `auto b = std::move(a)` |
-| `inspect(a)` where parameter is `T*` | `inspect(a.get())` |
-| `consume(a)` where parameter is `T#` | `consume(std::move(a))` |
 | `copy a` | clone/copy construction, explicitly selected |
 | `fn1` | a subset spanning templates and `constexpr` |
 | `fn2` | roughly `consteval` plus meta facilities |
@@ -1989,10 +1810,9 @@ The closest C++ equivalents are:
 
 This comparison is explanatory, not definitional. In C++, `std::move` merely
 selects operations such as a possibly user-defined move constructor; the source
-object remains alive and is destroyed later. A HUC non-owner Advanced transfer is
+object remains alive and is destroyed later. A HUC Advanced transfer is
 instead fixed destructive relocation: the source lifetime ends immediately,
-without source `drop` or field cleanup. The special `T#` source remains alive
-as a usable null owner. HUC does not inherit C++ value categories,
+without source `drop` or field cleanup. HUC does not inherit C++ value categories,
 overload-selected moves, reference collapsing, preprocessor macros, template
 substitution rules, or unspecified operand order.
 
@@ -2038,8 +1858,8 @@ fn inspect(widget: Widget*) -> void {
     io::println(widget->value);
 }
 
-fn consume(widget: Widget#) -> void {
-    inspect(widget);
+fn consume(widget: Widget) -> void {
+    inspect(&widget);
 }
 
 fn1 choose(T: auto, Greater: bool = true)(mod left: T, mod right: T) -> T {
@@ -2057,11 +1877,11 @@ fn1 choose(T: auto, Greater: bool = true)(mod left: T, mod right: T) -> T {
 }
 
 fn main() -> i32 {
-    let mod first: Widget# = new Widget(7);
-    inspect(first);
+    let mod first: Widget = Widget(7);
+    inspect(&first);
 
-    let mod second: Widget# = first;
-    let independent: Widget# = copy second;
+    let mod second: Widget = first;
+    let independent: Widget = copy second;
 
     let a: i32 = 3;
     let b: i32 = 5;
@@ -2069,11 +1889,11 @@ fn main() -> i32 {
     io::println(@choose<i32, false>(3, 5));
 
     consume(second);
-    inspect(independent);
+    inspect(&independent);
     return 0;
 }
 ```
 
-At the end of `main`, `independent` destroys its cloned `Widget`. Ownership from
-`second` was destructively relocated into `consume` and destroyed there.
-`first` and `second` are usable null owners whose destruction does nothing.
+At the end of `main`, `independent` is destroyed. The value from `second`
+was destructively relocated into `consume` and destroyed there. `first` and
+`second` are inactive and receive no cleanup.

@@ -33,43 +33,29 @@ fn inspect(widget: Widget*) -> void {
     io::println(widget->value);
 }
 
-fn consume(widget: Widget#) -> void {
-    inspect(widget);
-} // widget owns its argument and calls Widget.drop here
+fn consume(widget: Widget) -> void {
+    inspect(&widget);
+} // widget calls Widget.drop here
 
 fn main() -> i32 {
-    let mod first: Widget# = new Widget(42);
+    let mod first: Widget = Widget(42);
+    inspect(&first);
+    inspect(&first);
 
-    inspect(first);
-    inspect(first);
+    // Relocation transfers the representation and cleanup responsibility.
+    // first and its fields become inactive; no source cleanup runs.
+    let mod second: Widget = first;
+    let independent: Widget = copy second; // clone opens a separate handle
 
-    let observer: Widget* = first;
-    // Transferring an owner copies one address and sets the source to null.
-    // Unlike an inline Advanced source, first stays active and usable as null.
-    let mod second: Widget# = first;
-
-    // first is now null. observer still points at the Widget owned by second.
-    let independent: Widget# = copy second; // allocates a Widget and uses clone
+    let observer: Widget* = &second;
+    let another_observer: Widget* = observer; // copies the address unchanged
+    inspect(another_observer);
 
     consume(second);
-    // second is null. Its former Widget was dropped, so observer is dangling.
+    // second is inactive. Neither observer may be used to access it now.
 
-    // Taking ownership from a fixed raw pointer does not clear its address.
-    let mod original: Widget# = new Widget(11);
-    let raw: Widget* = release(original); // original becomes null
-    let mod restored: Widget# = raw; // takes ownership; raw is unchanged
-    inspect(raw); // observes the Widget now owned by restored
-
-    // Assignment uses the same rule and first cleans up the old destination.
-    let mod replacement: Widget# = new Widget(12);
-    let replacement_raw: Widget* = release(replacement);
-    restored = replacement_raw; // drops Widget(11); raw is now dangling
-    inspect(replacement_raw); // unchanged observer of Widget(12)
-
-    // An owner parameter can also take ownership from a raw pointer.
-    let argument: Widget* = release(restored);
-    consume(argument); // argument stays unchanged, but is now dangling
-
-    inspect(independent);
+    first = Widget(11); // begins a new lifetime in the inactive source
+    inspect(&first);
+    inspect(&independent);
     return 0;
-} // restored is null; independent destroys its separately cloned Widget
+} // independent and the reinitialized first are destroyed

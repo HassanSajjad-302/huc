@@ -45,7 +45,7 @@ A user may always write, inspect, and compile HUC0 without using HUC1.
 
 This choice is for the first implementation; it does not make HUC's rules
 depend on C or C++. HUC has its own parser, type checker, staging evaluator,
-specialization engine, ownership lowering,
+specialization engine, lifetime lowering,
 and intermediate representation, all implemented in C++20. Generated C17 is a
 separate output artifact and never defines HUC's behavior.
 
@@ -65,7 +65,6 @@ C++ or native-code output without redoing HUC semantic analysis.
 
 | Concern | First C17 backend | Possible later C++ backend |
 |---|---|---|
-| `T#` representation | One typed pointer with explicit cleanup | Plain pointer or a carefully matched helper |
 | Methods and modules | Mangled free functions and explicit receivers | Free functions or native namespace/member syntax |
 | Advanced values | Plain storage plus MIR-controlled relocation and drops | The same model; ordinary C++ moves alone are insufficient |
 | Generic specializations | Concrete functions and structures | Concrete functions and structures; templates are unnecessary |
@@ -73,12 +72,11 @@ C++ or native-code output without redoing HUC semantic analysis.
 | Backend constraints | C effective types, aliasing, alignment, and sequencing | C++ object lifetimes, aliasing, alignment, and sequencing |
 | Foreign integration | Direct supported C ABI; adapters for C++ later | C ABI plus potential direct C++ bindings later |
 
-The C emitter must not translate HUC source by token substitution. HUC owners
-and observers may share a C pointer representation while retaining different
-HUC operations. Copying such a C pointer does not by itself implement an owner
-transfer or satisfy HUC's cleanup requirements. The compiler also implements
-construction in final storage and HUC's fixed-by-default permissions; C
-declarations do not supply those rules.
+The C emitter must not translate HUC source by token substitution. Copying a
+C structure does not by itself implement HUC relocation or its cleanup
+obligations. Typed HIR and MIR record whether the operation copies or
+transfers a value. The compiler also implements construction in final storage
+and HUC's fixed-by-default permissions; C declarations do not supply those rules.
 
 Use ISO C17 as the initial output baseline. Compiler-specific extensions,
 direct C++ interoperability, and additional backends are not bootstrap
@@ -116,7 +114,7 @@ HUC0 source manager -> lexer -> parser -> syntax AST
 declaration collection -> name/type/lifecycle checking
     |
     v
-concrete typed HIR -> ownership/drop elaboration -> sequenced MIR
+concrete typed HIR -> lifetime/drop elaboration -> sequenced MIR
     |
     v
 C17 emitter + source map + runtime header
@@ -287,11 +285,11 @@ This is required for useful staging diagnostics.
 The lexer should:
 
 - recognize numbered keywords as dedicated tokens;
-- recognize `in` as a reserved keyword and `#` as the owner-suffix token;
+- recognize `in` as a reserved keyword;
 - preserve comments and trivia when formatter support is enabled;
 - diagnose unsupported phase spellings such as `fn3`;
-- use `&` for prefix address-taking and binary bitwise AND, separate from `#`
-  ownership and `&&` logical AND;
+- use `&` for prefix address-taking and binary bitwise AND, separate from
+  `&&` logical AND;
 - retain the raw spelling of numeric and string literals;
 - validate optional numeric `_` separators between digits of the applicable
   base, then ignore them when computing the value; preserve the spelling for
@@ -331,7 +329,6 @@ typedef enum HucTokenKind {
     HUC_TOKEN_KW_IMPORT2,
 
     HUC_TOKEN_STAR,
-    HUC_TOKEN_HASH, /* owner suffix in a type */
     HUC_TOKEN_AMPERSAND, /* prefix address-taking or binary bitwise AND */
     HUC_TOKEN_ARROW,
     HUC_TOKEN_LESS,
@@ -341,14 +338,12 @@ typedef enum HucTokenKind {
 } HucTokenKind;
 ```
 
-The parser turns `Hash` into an owner-type node only in postfix type position.
 `Ampersand` produces an address-of node in prefix expression position and
 bitwise AND in infix position; it is not a type suffix. Operator roles do not
 depend on whitespace. No C++-reference AST node exists. HUC0 has
-exactly two non-composable pointer-like forms: one terminal `T*` raw-pointer
-suffix or one terminal `T#` owner suffix. The type parser diagnoses `T**`,
-`T*#`, `T#*`, and `T##` immediately; canonical-type validation catches
-equivalent forms exposed through aliases.
+one pointer-like form: a terminal `T*` raw-pointer suffix. The type parser
+diagnoses `T**` immediately; canonical-type validation catches equivalent
+forms exposed through aliases.
 
 ### 5.3 Parser
 
@@ -379,11 +374,9 @@ flow parses braced bodies, with an `else if` alternative for chained
 conditionals; phase-control bodies still use the deferred-body scanner.
 Do not retain the old declaration order or `T&` as compatibility spellings.
 
-`slot_off(place)`, `release(owner)`, and `reset(owner)` use
-ordinary call syntax with compiler-known, non-overloadable, unqualified names.
-Resolve them as intrinsics, not `std::` library calls. Taking ownership from
-a raw pointer uses ordinary binding syntax; semantic analysis selects a
-built-in conversion, not a special call. Only `as` and `ptr_as` use the HUC0
+`slot_off(place)` uses ordinary call syntax with a compiler-known,
+non-overloadable, unqualified name. Resolve it as an intrinsic, not a
+`std::` library call. Only `as` and `ptr_as` use the HUC0
 type-operand call production. The old named address-taking intrinsic is
 replaced by unary `&`.
 
@@ -494,7 +487,7 @@ The HUC0 translator owns runtime semantic analysis:
 
 The module checker admits runtime globals only for drop-free Basic scalars and
 raw pointers. It requires constant initializers for fixed globals, supplies
-zero/null only to omitted mutable initializers, and rejects owners, structures,
+zero/null only to omitted mutable initializers, and rejects structures,
 Advanced values, runtime initialization, and global cleanup in 0.1.
 
 HUC1 performs its own phase checking, family matching, and selected-body
@@ -541,7 +534,6 @@ typedef enum HucTypeKind {
     HUC_TYPE_FLOAT,
     HUC_TYPE_STRUCT,
     HUC_TYPE_RAW_POINTER,
-    HUC_TYPE_OWNER,
     HUC_TYPE_FIXED_ARRAY,
     HUC_TYPE_FUNCTION,
     HUC_TYPE_META_TYPE,
@@ -549,50 +541,34 @@ typedef enum HucTypeKind {
 } HucTypeKind;
 ```
 
-`Owner<T>` and `RawPointer<T>` are distinct canonical nodes. HUC has no
-`const` type qualifier: fixedness and `mod` permissions are represented on the
-correct value, pointer-slot, owner-slot, and pointee layers, never inferred
-from emitted C declarator strings.
+A raw pointer has a canonical node containing its pointee type and access
+permissions. HUC has no `const` type qualifier: fixedness and `mod` are
+represented on the correct value, pointer-slot, and pointee layers, never
+inferred from emitted C declarator strings.
 
-Canonicalization rejects any raw-pointer or owner node whose pointee is itself
-raw-pointer- or owner-typed. Unary `&` accepts only an addressable inline
-non-pointer place, preserves its mutation permissions, and lowers to an address
-calculation with no call. Evaluate the place once; do not materialize a
-temporary, transfer its value, extend its lifetime, or update cleanup state.
-Reject pointer/owner slots and non-place operands, including function symbols.
-When an owner expression is required as `T*`, the
-resolved operation is observation of the owned `T`, not taking the storage
-address of the owner word.
+Canonicalization rejects a raw-pointer node whose pointee is itself a raw
+pointer. Unary `&` accepts an addressable inline non-pointer place,
+preserves its mutation permissions, and lowers to an address calculation.
+Evaluate the place once; do not materialize a temporary, transfer its value,
+extend its lifetime, or update cleanup state. Reject pointer slots and
+non-place operands, including function symbols.
 
-`slot_off` accepts any addressable data place, including a raw-pointer or
-owner slot, and lowers to that slot's address converted to `usize`. It does
-not load the value or invoke relocation, observation, or cleanup. Reject
-non-place operands rather than materializing temporaries. An explicit `ptr_as`
-from `usize` reconstructs a one-level raw pointer; it never synthesizes a
-composed pointer type. No permission metadata is carried through the integer
-or checked at runtime. Actual mutation permissions and lifetime/ownership
-preconditions remain the caller's responsibility; the compiler does not add
-liveness tracking for them. Escape and alias analysis must account for the
-exposed address: code can now access the owner slot through more than its
-original name.
+`slot_off` accepts any addressable data place, including a raw-pointer
+slot, and lowers to its address converted to `usize`. It does not load the
+value or invoke relocation or cleanup. Reject non-place operands rather than
+materializing temporaries. An explicit `ptr_as` from `usize` reconstructs
+a one-level raw pointer; it never synthesizes a composed pointer type.
+Permissions and lifetime preconditions remain the caller's responsibility;
+the integer carries no permission or liveness metadata. Escape and alias
+analysis must account for the exposed address.
 
-When an owner destination expects `Owner<T>` and the source has type
-`RawPointer<T>`, select raw-to-owner conversion. Check the pointee type after
-alias resolution and require a complete owned-object type. Permit dropping
-pointee `mod`, but never gaining it or implicitly reinterpreting the pointer.
-Apply this rule to initialization, assignment, arguments, and returns.
-An `auto` destination still infers the raw-pointer type; it does not request
-ownership. Null raw pointers and direct `null` bindings produce empty owners;
-integers do not implicitly convert to owners.
-
-An owner source must still use direct owner relocation, not an
-owner-to-observer-to-owner conversion sequence. Fixed owner sources therefore
-remain invalid relocation sources. Raw sources require no binding `mod` and
-are not nulled or made inactive. Record the conversion explicitly in HIR so
-the emitter cannot confuse it with relocation.
+Raw-pointer initialization, assignment, arguments, and returns copy the
+address without modifying the source or touching the pointee's lifetime.
+Check type compatibility and permit dropping pointee `mod`, but never
+gaining it. `auto` retains the inferred raw-pointer type.
 
 Member access preserves each layer's permissions. A fixed object prevents
-replacement of a pointer/owner field and mutation of an inline field. It does
+replacement of a pointer field and mutation of an inline field. It does
 not remove a field type's `mod` permission to mutate the separate object
 that the field points to.
 
@@ -643,13 +619,9 @@ The resolver implements only the ranking specified by the language:
 
 1. exact match;
 2. lossless built-in numeric promotion;
-3. permission-dropping pointer conversion;
-4. owner-to-observer or raw-to-owner conversion, including permitted pointee
-   permission dropping.
+3. permission-dropping pointer conversion.
 
-Before ranking, normalize each signature by replacing `T#` with its observing
-form. Two otherwise identical normalized signatures form a forbidden
-ownership-only overload set.
+Values and pointers do not implicitly convert to each other.
 
 For a phase-family specialization, its optional parenthesized predicate is
 evaluated only after arity and structural-pattern matching. Predicate failure
@@ -661,7 +633,7 @@ filter candidates but never rank them.
 An `extern "C"` signature is accepted only when every parameter and result
 lowers through the target's documented C ABI mapping. HUC0 permits built-in
 arithmetic scalars, `void` results, and one-level raw pointers to built-in
-types. It rejects owners, structures, fixed arrays, Advanced/drop types, phase
+types. It rejects structures, fixed arrays, Advanced/drop types, phase
 types, compiler metadata, pointer chains, opaque foreign handles, and
 variadics. Aliases are checked after canonicalization so they cannot hide a
 forbidden boundary type.
@@ -693,15 +665,13 @@ typedef struct HucHirExprHeader {
 } HucHirExprHeader;
 ```
 
-This distinction prevents the C emitter from rediscovering ownership intent
-from indistinguishable pointer representations.
+This distinction prevents the C emitter from rediscovering transfer intent
+from plain storage representations.
 
 Basic and Advanced are type categories; `Copy`, `Clone`, and `Relocate` name
 compiler operations, not categories. Same-type Basic binding uses `Copy`.
 An inline Advanced transfer uses `Relocate`: the destination becomes active
-and the source becomes inactive without receiving `drop`. A direct `T#`
-transfer instead uses `OwnerRelocate`, leaving an active null source.
-Raw-to-owner binding uses `OwnerFromRaw` without changing the raw source.
+and the source becomes inactive without receiving `drop`.
 Explicit duplication through `clone()` uses `Clone`.
 
 Representative HIR operations:
@@ -712,9 +682,6 @@ LoadRelocate(place)
 AddressOf(place)
 SlotAddress(place)
 PointerFromAddress(address, raw_pointer_type)
-OwnerObserve(place)
-OwnerRelocate(place)
-OwnerFromRaw(value, owner_type)
 Clone(value)
 ConstructInPlace(destination, constructor, arguments)
 Call(function, arguments)
@@ -723,34 +690,31 @@ Call(function, arguments)
 `ConstructInPlace` is not shorthand for “construct a temporary, then
 relocate.” When `T(arguments)` initializes a local, field, by-value parameter,
 or return result, HIR names that final place as the constructor destination.
-`new T(arguments)` similarly names the allocated storage. This preserves the
-final `this` address for constructors and avoids inventing an observable
+This preserves the final `this` address for constructors and avoids an observable
 relocation. A call that returns a structure uses an explicit result place so
 the callee can construct directly there.
 
 HIR records whether a place is named storage or a fresh unnamed Advanced
 result. Transferring from named storage requires `mod` before its name. A fresh
-function result, `new T` owner result, explicit `copy`/clone result, or
+function result, explicit `copy`/clone result, or
 unavoidable constructor temporary can be transferred once without a source
 declaration marked `mod`. Direct construction in the destination remains
 preferred and creates no such temporary.
 
 The metadata also distinguishes compiler-trackable root places from
 subobjects and indirect places. An explicit source-level relocation of a
-non-owner Advanced value is accepted only from a whole tracked local, parameter,
+Advanced value is accepted only from a whole tracked local, parameter,
 temporary, or result. It is rejected from `value.field`, `array[i]`,
 `*pointer`, and `pointer->field`: the enclosing cleanup would otherwise need
 hidden state inside the object to track which parts remain active. Transferring
 a whole root value includes all subobjects without separate field transfers.
 
-Primitive `T#` is the exception because relocation leaves its source as a
-usable null owner. An owner may relocate from any writable direct or indirect
-owner place. Indirect destinations may also be replaced when their validity and
-activity preconditions hold; the restriction above concerns non-owner
-sources. Containers manage their backing storage and initialized element
-ranges explicitly. The only additional raw-storage lifetime intrinsics planned
-are `construct_at` and `destruct_at`; their interfaces and lowering
-will be designed later, without adding user-overloadable relocation hooks.
+Indirect destinations may be replaced when their validity and activity
+preconditions hold; the restriction above concerns sources. Containers manage
+their backing storage and initialized element ranges explicitly. The only
+additional raw-storage lifetime intrinsics planned are `construct_at` and
+`destruct_at`; their interfaces and lowering will be designed later,
+without adding user-overloadable relocation hooks.
 
 ## 8. Compile-time evaluator
 
@@ -1069,17 +1033,11 @@ StorageDead place
 Copy destination, source
 Clone destination, source
 Relocate destination, source
-OwnerRelocate destination, source
 AddressOf destination_raw, source_inline
 SlotAddress destination_usize, source_place
 PointerFromAddress destination_raw, source_usize
-OwnerObserve destination_raw, source_owner
 ConstructInPlace destination, constructor, parameter_places
 Drop place
-OwnerDrop place
-OwnerFromRaw destination_owner, source_raw
-Release destination_raw, source_owner
-Reset source_owner
 Call result_destination_or_none, callee, parameter_places
 ```
 
@@ -1098,43 +1056,22 @@ necessary to preserve HUC's left-to-right order.
 
 `Relocate` is the complete destructive-relocation operation, not one half of
 an operation that requires a later `Deactivate`. It transfers the whole
-non-owner value's representation and makes the source and all its subobjects
+value's representation and makes the source and all its subobjects
 inactive as part of that operation. It never calls source `drop`, performs
-source component cleanup, or requires embedded-owner nulling. In particular,
-it does not expand owner fields into `OwnerRelocate` operations.
-
-`OwnerRelocate` is the complete direct primitive `T#` operation: it transfers
-the pointer and leaves the source active and usable as a null owner. This
-includes moving an owner field individually, but not transferring that word
-inside a whole aggregate relocation. Null owner words are valid in both cases.
-
-`OwnerFromRaw` is an internal conversion operation, not a source intrinsic.
-It reads an already evaluated raw-pointer value and establishes an active
-owner with that address and the checked destination pointee permissions. It
-does not store null to the raw source, mark it inactive, allocate, or invoke
-pointee construction or copying. No binding `mod` is required on the raw source.
-Existing raw aliases remain unchanged. A null raw pointer simply produces
-an empty owner. Compatible allocation and exclusive ownership of a non-null
-pointee are unchecked preconditions, not inserted runtime checks.
-`Release` still nulls the owner it releases; it must not be confused with
-`OwnerFromRaw` or raw-pointer copying. When replacing an active owner, retain
-the raw-pointer value before dropping the old destination and applying
-`OwnerFromRaw`. Assigning the destination's own raw observer back to it
-violates the unique-ownership precondition; it is not self-relocation.
+source component cleanup, or requires source fields to be cleared.
 
 The two-place MIR operations require different source and destination storage.
-Relocation assignment emits a static no-op or a runtime address-equality branch before
-reaching `Relocate`/`OwnerRelocate` when source and destination might alias.
+Relocation assignment emits a static no-op or a runtime address-equality
+branch before reaching `Relocate` when source and destination might alias.
 
 `ConstructInPlace` makes an inactive final destination active only after its
 constructor obligations succeed. `Call` consumes already bound parameter
 places in declaration order; its result destination is the caller's final
 return place, so a structure result is constructed there rather than returned
-through an observable temporary. `Drop` and `OwnerDrop` make their places
-inactive. These state transitions are MIR semantics, not optional annotations
+through an observable temporary. `Drop` makes its place inactive. These state transitions are MIR semantics, not optional annotations
 for the backend.
 
-## 12. Ownership and drop elaboration
+## 12. Lifetime and drop elaboration
 
 ### 12.1 Place state
 
@@ -1155,16 +1092,13 @@ warn, or a strict lint mode may reject it.
 ### 12.2 Drop flags
 
 - No flag is needed when static control flow proves a place active or inactive.
-- Primitive owners normally use their null address as the drop condition.
-- Other `MaybeActive` values receive a hidden boolean only when necessary.
-- `Relocate` makes a non-owner source inactive; `OwnerRelocate` leaves an
-  active-null source.
+- `MaybeActive` values receive a hidden boolean only when necessary.
+- `Relocate` makes its source inactive.
 - successful construction or reinitialization marks the destination active.
 
 A conditional flag belongs to one MIR storage place. It is stored separately,
 as a local or guard state, never as a field of the HUC type. It therefore does
-not change `sizeof(T)`, field offsets, foreign-interface layout, or the
-one-word representation of `T#`.
+not change `sizeof(T)`, field offsets, or foreign-interface layout.
 
 ### 12.3 Cleanup edges
 
@@ -1202,18 +1136,10 @@ Elaboration handles the operations as follows:
   the copy expression's result place; lacking `clone` is a diagnostic, and
   copy assignment specifically uses a fresh result before destination
   destruction;
-- `copy` of `T#` requires a logically copyable `T` and a non-null source,
-  allocates a new `T`, and logically copies the pointee; a null source is
-  undefined behavior, with no required runtime null check or null-preserving
-  branch. This precondition applies even when copying `T` would not read its
-  storage. Copying `T*` copies only the observer address and permits null;
-- binding from an Advanced non-owner becomes one fixed representation-transfer
+- copying `T*` copies only the observer address and permits null;
+- binding from an Advanced value becomes one fixed representation-transfer
   `Relocate`, which intrinsically makes the source and all subobjects inactive
   without requiring source-field clearing;
-- owner-to-owner binding becomes `OwnerRelocate`; it transfers the pointer and
-  stores null in the still-active source owner;
-- raw-to-owner binding becomes `OwnerFromRaw`, not `OwnerRelocate`; it evaluates
-  the raw-pointer expression once and never changes a source pointer slot;
 - a fresh unnamed Advanced result can be transferred directly;
   relocation from named storage requires `mod` before its name;
 - relocation assignment first proves distinctness or compares source and
@@ -1233,7 +1159,7 @@ Field fixedness affects source-level assignment, not this compiler operation.
 Once an allowed whole root source has the required writable slot permission,
 `Relocate` transfers the whole representation, including its fixed fields.
 
-The source of a successful non-owner relocation contains no active HUC value.
+The source of a successful relocation contains no active HUC value.
 Its representation may retain old bits, but the compiler never calls its
 `drop` method or cleans its fields. Reinitializing that place starts a new
 active lifetime. This is destructive relocation, not a C++-style move
@@ -1247,100 +1173,66 @@ a HUC customization point. See
 The compiler does not repair self-pointers or other address-dependent
 invariants during bitwise relocation. Such inline values must remain in
 directly constructed fixed storage, use a suitable future stable-address
-container, or normally live behind `T#`. Violating that contract and then
-relocating the value is undefined behavior.
+container, or use other stable-address storage. Violating that contract and
+then relying on invalidated addresses is undefined behavior.
 
-Representation transfer is the semantic definition of non-owner relocation,
+Representation transfer is the semantic definition of relocation,
 not an optional optimization of recursive field operations. No separate proof
-is needed to omit embedded-owner clearing: every source subobject is inactive,
+is needed to omit source clearing: every source subobject is inactive,
 and reading it as a live value is invalid. The lowering must still preserve
 layout, valid C storage access, source deactivation, and exactly-once cleanup.
 It may use bulk copies, loads/stores, registers, or elision when observably
 equivalent; the contract neither mandates a literal memory-copy instruction
-nor gives padding bytes semantic significance. Direct `OwnerRelocate` remains
-distinct and must preserve the active-null source semantics.
+nor gives padding bytes semantic significance.
 
 ## 13. C17 lowering
 
-### 13.1 Runtime owner
+### 13.1 Runtime representation
 
-Each HUC primitive owner is represented by one typed C pointer. Concrete
-generated helpers provide its operations; no C++ smart pointer, destructor,
-deleter field, or hidden liveness field is involved. For one pointee type,
-the generated support is conceptually:
+Raw pointers lower to typed C pointers. Structures lower to concrete C
+structures with the specified field layout. The emitted representation does
+not determine whether HUC copies or transfers a value: MIR does.
 
-```c
-#include <stddef.h>
+Generate per-type initialization, clone, and drop functions where needed.
+Cleanup of a structure invokes its `drop` body and then destroys its fields
+in reverse order. Raw-pointer fields receive no pointee cleanup. Explicit
+allocation or release of resources in user code remains part of that code's
+library or external-call contract.
 
-typedef struct huc_Widget huc_Widget;
-typedef huc_Widget *huc_Widget_owner;
-
-// Generated for this pointee: HUC drop, reverse field cleanup, then
-// deallocation compatible with the original allocation.
-static void huc_Widget_destroy_owned(huc_Widget *pointer);
-
-static huc_Widget *huc_Widget_owner_release(huc_Widget_owner *slot) {
-    huc_Widget *result = *slot;
-    *slot = NULL;
-    return result;
-}
-
-static void huc_Widget_owner_reset(huc_Widget_owner *slot) {
-    if (*slot != NULL) {
-        huc_Widget_destroy_owned(*slot);
-        *slot = NULL;
-    }
-}
-```
-
-These are internal backend operations, not new HUC intrinsics. A pointer to a
-C owner slot is permitted in generated code; it does not add `T#*` or `T**`
-to HUC. Owner and observer distinctions remain in HUC semantic analysis even
-when their C representations coincide. MIR controls whether a reset leaves
-an active null owner or whether final cleanup makes the HUC place inactive.
-
-The destroy helper is selected statically from the pointee type. The emitter
-must handle forward declarations, allocation alignment, and matching
-deallocation without changing the one-pointer owner representation.
+Generated helper parameters may use C pointer chains internally; this does
+not add pointer-chain types to HUC.
 
 ### 13.2 Operation mapping
 
 | HUC operation | Generated C17 |
 |---|---|
 | `T*` / `mod T*` | Typed C pointers with HUC access permissions checked before emission |
-| `T#` | One typed C pointer with MIR-controlled ownership |
-| owner observation | Read the pointer without transferring it |
 | `&value` | Address of the corresponding typed storage place |
 | `slot_off(place)` | the slot's data-storage address converted to target `usize` |
 | `ptr_as<T*>(address)` for `usize` | target-supported integer-to-data-pointer reconstruction |
-| owner destructive relocation | Transfer the pointer, then null the source slot |
-| non-owner Advanced relocation | Transfer the whole representation; deactivate the source and all subobjects without requiring embedded-owner nulling |
+| Advanced relocation | Transfer the whole representation and deactivate the source and its subobjects without requiring source-byte clearing |
+| `copy value` for an Advanced type | Call the resolved clone function into a fresh result place |
+| Destruction | Call user `drop`, then reverse field cleanup, only for active values |
 | `T(values)` initializing a final place | Generated initializer with an explicit final-destination pointer |
-| `new T(values)` | Aligned allocation, terminate-on-failure check, then initialization in that allocation |
-| `copy owner` | Assume a non-null source; allocate, then fieldwise-copy or clone the pointee |
-| raw-to-owner binding | Store the pointer in the destination owner and establish cleanup; leave the raw source unchanged |
-| `release(owner)` | Return the pointer and null the owner slot |
-| `reset(owner)` | Drop/deallocate the pointee if non-null, then leave a null owner |
 
 The backend must preserve the specified data-address round trip, using
 `uintptr_t` or an equivalent target-supported unsigned representation. Targets
 must support the specified pointer-width integer round trip. Taking a slot
-address requires no allocation or runtime helper call. Taking an owner slot's
-address addresses the pointer slot itself, not the pointee. Representation
+address requires no allocation or runtime helper call. Taking a pointer slot's
+address addresses that slot, not the pointee. Representation
 access must respect HUC's byte-aliasing rules, not depend on an incompatible
 C typed dereference. Raw writes do not automatically update HUC drop flags
-or perform lifecycle operations; ordinary owner cleanup must observe any valid
-changes to its stored representation.
+or perform lifecycle operations. User code must preserve valid values and
+cleanup obligations.
 
 Methods, constructors, clone/drop helpers, and relocation helpers are ordinary
 generated C functions. HUC overloads are resolved before emission and receive
-distinct C names. Owner replacement drops the active destination before
+distinct C names. Advanced-value replacement drops the active destination before
 transfer, after checking exact self-relocation where aliasing is possible.
 
-Allocation uses a primitive with an explicit failure result and a HUC
-termination path before initialization executes. HUC 0.1 has no exception
-unwinding. Foreign adapters must not unwind or otherwise bypass generated
-cleanup across a HUC frame; a later C++ adapter must catch and translate or
+Allocation failure follows the chosen library API's contract. HUC 0.1 has
+no exception unwinding. Foreign adapters must not unwind or otherwise bypass
+generated cleanup across a HUC frame; a later C++ adapter must catch and translate or
 terminate before an exception crosses that boundary.
 
 ### 13.3 Sequencing
@@ -1408,16 +1300,15 @@ For each HUC type, generate the required concrete functions or equivalent
 inline code for:
 
 - initialization in supplied final storage;
-- whole-representation relocation of non-owner Advanced values without a user
-  relocation hook or required embedded-owner clearing;
+- whole-representation relocation of Advanced values without a user
+  relocation hook or required source clearing;
 - user `drop` followed by reverse field cleanup;
 - explicit logical cloning when supported;
-- compatible allocation and deallocation where ownership requires them.
+- explicit library calls for resource allocation and deallocation.
 
 MIR emits drop calls only for active HUC places. A destructively relocated raw
 handle may retain its old bits, but the source never receives a HUC drop call.
-No automatic C cleanup must be neutralized. A standalone relocated-from `T#`
-is different: the transfer writes null, leaving an active usable empty owner.
+No automatic C cleanup must be neutralized.
 
 When static analysis cannot decide whether cleanup is needed, a separate
 boolean tracks whether the value is active. It is never a field of the C
@@ -1430,10 +1321,9 @@ HUC fixed-by-default permissions are enforced before emission. Do not add C
 relocation or reinitialization. Read-only access remains a HUC semantic
 property even when the underlying C storage is physically writable.
 
-C structure assignment or `memcpy` may implement non-owner relocation when it
+C structure assignment or `memcpy` may implement relocation when it
 preserves the representation-transfer semantics and activation state. Do not
-add owner-field null stores merely because an aggregate contains owners.
-Direct owner relocation separately preserves its required active-null source.
+clear fields merely because an aggregate manages resources.
 Observe C effective-type, alignment, and aliasing rules; an arbitrarily cast
 byte buffer is not automatically valid typed storage.
 Prefer concrete typed storage and explicitly aligned allocation. HUC
@@ -1628,7 +1518,7 @@ symbol hashes must be identical across processes for identical inputs.
 
 ### 17.1 Unit tests
 
-- tokenization, including `#`, `&`, `<`, `>`, `@`, `in`, and numbered keywords;
+- tokenization, including `&`, `<`, `>`, `@`, `in`, and numbered keywords;
 - valid and invalid numeric separator positions in all supported bases;
 - name-first declarations, independent binding/type `mod`, and `let1` headers;
 - optional trailing commas in nonempty single/multiline lists, and rejection
@@ -1637,18 +1527,16 @@ symbol hashes must be identical across processes for identical inputs.
 - rejection of old `T&`, type-first declarations, and colon-only `for1` headers;
 - Pratt precedence, ambiguous angle postfixes, and recovery;
 - prefix `&` versus binary `&` and `&&`, including postfix field/index binding;
-- non-composable pointer-suffix and forbidden typed owner-address diagnostics;
+- non-composable pointer-suffix and forbidden pointer-slot address diagnostics;
 - typed `&` addresses and `slot_off` integer addresses, each evaluating its
-  place once with no implicit owner-to-observer conversion;
-- slot addresses of fixed, inline, raw-pointer, and owner slots;
+  place once without transferring its value;
+- slot addresses of fixed, inline, and raw-pointer slots;
 - invalid non-place slot operands and integer-to-pointer type checking;
 - canonical type interning;
-- raw-to-owner conversion in initialization, assignment, arguments, and returns,
-  accepting fixed raw sources and checking compatible pointee types/permissions;
-- empty owners from null raw pointers or direct `null` binding, and raw-pointer
-  inference for `auto` without introducing ownership;
-- rejection of implicit integer-to-owner conversion, incompatible pointee types,
-  added pointee `mod`, and implicit conversion chains that bypass owner relocation;
+- raw-pointer copying, including null, with no source changes or pointee cleanup;
+- raw-pointer inference for `auto` and permission-dropping conversions;
+- rejection of incompatible pointer types and added pointee `mod`;
+
 - unqualified intrinsic resolution, with no former-spelling compatibility aliases;
 - overload ranking;
 - C-linkage signature acceptance and rejection;
@@ -1673,36 +1561,27 @@ Store input plus expected:
 Golden C tests require deterministic temporary names rather than masking
 nondeterministic numbering.
 
-Relocation goldens must distinguish whole-aggregate `Relocate` from direct
-`OwnerRelocate`. Owner-bearing aggregates, including nested ones, require no
-recursive owner-null stores; an owner field moved individually must still
-lower to `OwnerRelocate` and leave that field active-null.
-
-Raw-to-owner goldens must use `OwnerFromRaw`, not `OwnerRelocate`: there is no
-null store or inactive-state update for the raw source. Replacement goldens
-must retain the source value before cleaning up the destination. Address-taking
-goldens must distinguish `&inline_place` from `slot_off(place)`; only the latter
-returns an integer and can address a primitive pointer or owner slot.
+Relocation goldens must show whole-value `Relocate`, including for nested
+Advanced aggregates, with no recursive source-field transfers or null stores.
+Replacement goldens must check exact self-relocation before destination
+cleanup. Address-taking goldens distinguish `&inline_place` from
+`slot_off(place)`; only the latter returns an integer and accepts pointer slots.
 
 ### 17.3 Execute tests
 
 Compile and run small programs that record:
 
 - argument evaluation and by-value parameter-binding order;
-- direct-construction `this` addresses for locals, parameters, results, and
-  allocations;
+- direct-construction `this` addresses for locals, fields, parameters, and results;
 - destructive-relocation and clone counts;
-- source nulling after direct owner relocation, including an individual field;
-- unchanged raw sources and aliases after raw-to-owner binding, including
-  fixed bindings and null pointers, with exactly one owning cleanup obligation;
-- raw-to-owner assignment dropping the old destination once, and raw arguments
-  and return expressions establishing cleanup in their owner destinations;
-- relocation of aggregates with nested non-null and null owner fields, with
-  cleanup only through the active destination;
+- copying fixed and writable raw pointers without modifying the source;
+- relocation of nested Advanced aggregates with cleanup only through the
+  active destination;
+
 - exact self-relocation behavior;
 - destruction order;
 - early-return cleanup;
-- conditional owner relocation;
+- conditional relocation;
 - `if1` branch removal;
 - `for1` unrolling;
 - forced `@` evaluation;
@@ -1716,18 +1595,13 @@ inactive source fields or requiring their old bytes to remain intact.
 
 ### 17.4 ABI and cost assertions
 
-Generated C contains concrete per-type C17 static assertions, for example:
+Use generated C17 static assertions to compare sizes, alignments, and field
+offsets with HUC's target layout calculations. Active-state flags must not
+change a nominal value's layout.
 
-```c
-_Static_assert(sizeof(huc_Widget_owner) == sizeof(void *),
-               "HUC owners require one data-pointer word");
-_Static_assert(_Alignof(huc_Widget_owner) == _Alignof(void *),
-               "HUC owner alignment must match the target data pointer");
-```
-
-Compiler tests should inspect optimized assembly for representative owner
-relocations and observations, but assembly shape is a regression aid rather
-than a language guarantee.
+Inspect optimized assembly for representative Basic copies, Advanced
+transfers, observations, and cleanup paths. Assembly shape is a regression
+aid rather than a language guarantee; a transfer may be optimized away.
 
 ### 17.5 Differential backend tests
 
@@ -1752,7 +1626,7 @@ Implement in this order:
 4. typed HIR and sequenced MIR with explicit parameter places,
    direct-construction destinations, relocation, and cleanup;
 5. scalar C17 headers plus one root translation unit;
-6. pointer-represented owners, explicit bitwise relocation and clone/drop
+6. explicit bitwise relocation and clone/drop
    functions, cleanup edges, sidecar active-state handling, and lifecycle
    hardening.
 
@@ -1808,9 +1682,8 @@ C17 root translation unit
 Then complete HUC0 with:
 
 ```text
-T*, mod layers, and T#
+T* and independent mod layers
 constructors and direct destination construction
-new/release/reset and raw-to-owner binding
 Basic/Advanced classification
 destructive relocation, clone, and drop
 left-to-right typed parameter binding
@@ -1834,7 +1707,7 @@ The following should be enforced in code review and tests:
    no structural-generation API is implied.
 8. Backend output preserves HUC left-to-right argument evaluation and
    by-value parameter initialization.
-9. `T#` remains one word under the default allocator.
+9. Source inactivity and cleanup state do not add fields to nominal value types.
 10. Diagnostics retain source and expansion chains across both translators.
 11. A future C++ or native-code backend can consume MIR without recreating
     semantic analysis.

@@ -23,10 +23,9 @@ The following syntax and behavior describe language rules, not library proposals
 
 - `let`, `let1`, and `let2`;
 - `mod`;
-- `T*` and `T#`;
+- inline values and raw `T*` pointers;
 - unary `&` for inline-place observation;
 - `slot_off` for unchecked, untyped slot addresses;
-- raw-to-owner binding without clearing the raw pointer;
 - `fn`, `fn1`, and `fn2`;
 - `struct`, `struct1`, and `struct2`;
 - `if1`, `for1`, and `while1`;
@@ -56,9 +55,8 @@ APIs, and signatures are not yet settled.
 Some terms used in the explanations:
 
 - A **slot** or **place** is a storage location, such as a variable or field.
-- A **pointee** is the object a pointer or owner points to.
-- **Relocation** transfers an Advanced value. An inline source becomes
-  inactive; a directly transferred owner instead becomes a usable null owner.
+- A **pointee** is the object a pointer points to.
+- **Relocation** transfers an Advanced value and makes its source inactive.
 - A **family** describes a set of declarations selected by compile-time
   arguments. A **specialization** is one selected version.
 - **Residual code** is the runtime code left after compile-time work.
@@ -85,15 +83,15 @@ Notable HUC-specific combinations are:
 
 1. One partial-specialization model for structures, functions, and variables.
 2. A `let1` specialization that chooses the variable’s complete declaration,
-   including a different type or ownership mode.
+   including a different type or mutation permission.
 3. Typed phase conditions at module and type-body scope whose discarded bodies
    are never parsed.
 4. Compiler helper functions that emit raw HUC0 at their expansion call site,
    followed by a separately inspectable and independently parsed HUC0 round.
 5. A normal `fn1` call that generates and calls a runtime specialization, while
    the same call prefixed by `@` must run completely at compile time.
-6. Fixed/read-only-by-default declarations, layer-specific `mod`, and a
-   one-word unique owner expressed directly as `T#`.
+6. Fixed/read-only-by-default declarations, layer-specific `mod`, and fixed
+   destructive relocation of Advanced values.
 
 ## 2. Use-case catalog
 
@@ -102,18 +100,18 @@ The examples below cover these use cases:
 | Area | Use case |
 |---|---|
 | Runtime | Fixed-by-default local and field storage |
-| Runtime | Mutable scalar, pointer slot, pointee, and owner permissions |
+| Runtime | Mutable scalar, pointer slot, and pointee permissions |
 | Runtime | Non-owning observation without lifetime tracking |
 | Runtime | Explicit inline address-taking with unary `&` |
-| Runtime | Automatic unique ownership and deterministic cleanup |
-| Runtime | Explicit consumption through an owner parameter |
-| Runtime | Owner-containing structures and destructive relocation |
+| Runtime | Deterministic cleanup of active values |
+| Runtime | Consumption through an Advanced by-value parameter |
+| Runtime | Advanced-containing structures and destructive relocation |
 | Runtime | Ordinary copying of Basic values |
 | Runtime | Explicit deep copying with `copy` and `clone` |
 | Runtime | Custom clone opting a type into the Advanced category |
 | Runtime | Fixed, non-overridable destructive relocation |
 | Runtime | Relocation assignment, exact self-relocation, and reinitialization |
-| Runtime | Address-dependent values, self-pointers, and stable ownership |
+| Runtime | Address-dependent values, self-pointers, and stable storage |
 | Runtime | Constructor-required fixed fields |
 | Runtime | Deterministic default initialization |
 | Runtime | Read-only and writable methods |
@@ -178,7 +176,7 @@ to allow changes.
 The expected result is `42`. A backend may map `base` to a C `const` local,
 but the HUC rule still applies if a backend uses another representation.
 
-### 3.2 Pointer and owner permission layers
+### 3.2 Pointer permission layers
 
 ```huc
 module examples.pointer_permissions;
@@ -207,16 +205,16 @@ fn mutate(counter: mod Counter*) -> void {
 }
 
 fn example() -> i32 {
-    let mod owner: mod Counter# = new Counter();
+    let mod counter: Counter = Counter();
 
-    let fixed_readonly: Counter* = owner;
-    let fixed_writable: mod Counter* = owner;
-    let mod reseatable_readonly: Counter* = owner;
-    let mod reseatable_writable: mod Counter* = owner;
+    let fixed_readonly: Counter* = &counter;
+    let fixed_writable: mod Counter* = &counter;
+    let mod reseatable_readonly: Counter* = &counter;
+    let mod reseatable_writable: mod Counter* = &counter;
 
     mutate(fixed_writable);
     reseatable_readonly = null;
-    reseatable_writable = owner;
+    reseatable_writable = &counter;
     mutate(reseatable_writable);
 
     return observe(fixed_readonly);
@@ -228,8 +226,8 @@ This returns `2`.
 Important distinctions:
 
 - `mod` inside the type controls access to the pointee.
-- `mod` before the binding name controls the pointer or owner slot.
-- Observing an owner as a raw pointer does not relocate it.
+- `mod` before the binding name controls the pointer slot.
+- Taking an inline value's address does not relocate it.
 - None of the raw pointers keep the `Counter` alive.
 
 Address-taking for inline storage is explicit and never overloadable:
@@ -245,49 +243,31 @@ fn inline_address_example() -> i32 {
 
 Unary `&` preserves pointee permission, so a fixed `Counter` would produce
 `Counter*` and the writable `counter` above produces `mod Counter*`.
-Unary `&` rejects pointer and owner slots because their typed addresses would
+Unary `&` rejects pointer slots because their typed addresses would
 require one of the forbidden composed pointer types. Prefix `&` takes an
 address; binary `&` remains bitwise AND. Neither operation depends on spacing.
 
 Untyped slot addresses are a separate, unchecked facility:
 
 ```huc
-fn owner_slot_address_example() -> void {
-    let mod owner: Counter# = new Counter();
-    let address: usize = slot_off(owner);
+fn pointer_slot_address_example() -> void {
+    let mod counter: Counter = Counter();
+    let mod pointer: Counter* = &counter;
+    let address: usize = slot_off(pointer);
     let bytes: mod u8* = ptr_as<mod u8*>(address);
-    // bytes addresses the owner word's representation, not the Counter.
-    // Taking these addresses does not transfer ownership.
+    // bytes addresses the pointer slot, not the Counter.
+    // Taking these addresses does not transfer a value.
 }
 ```
 
-An ordinary function can receive `address`, but it receives no typed owner-slot
+An ordinary function can receive `address`, but it receives no typed slot
 reference or automatic lifecycle handling. Taking a fixed slot's address is
-also permitted; writing actually fixed storage remains undefined behavior,
-without compiler permission tracking through the integer and cast. The caller
-is responsible for storage lifetime, alignment, representation, and ownership
-rules. This does not make `Counter#*` a valid type.
+also permitted; writing actually fixed storage remains undefined behavior.
+The caller is responsible for storage lifetime, alignment, valid access, and
+cleanup. This does not make pointer chains valid.
 
-Taking ownership through ordinary binding leaves a raw-pointer source unchanged:
-
-```huc
-fn raw_to_owner_example() -> i32 {
-    let mod original: mod Counter# = new Counter();
-    let raw: mod Counter* = release(original); // original becomes null
-    let owner: mod Counter# = raw; // takes ownership; raw stays unchanged
-
-    raw->increment(); // raw still observes the live Counter
-    return owner->read();
-} // only owner destroys the Counter
-```
-
-The raw binding needs no `mod` because taking ownership does not write to it.
-The `mod` inside its type permits mutation of the Counter. The conversion
-requires a compatible allocation that no other owner still owns. This is an
-unchecked precondition, not an automatic allocation or ownership check. The
-`release` above hands cleanup responsibility out of the original owner first.
-The same conversion works in owner assignment, arguments, and returns; an
-`auto` declaration initialized from `raw` still creates only a raw observer.
+Copying a raw pointer leaves its source unchanged, including when null. It
+does not transfer or extend the pointee's lifetime.
 
 ### 3.3 Observation and consumption
 
@@ -316,128 +296,98 @@ fn inspect(file: FileHandle*) -> bool {
     return file->valid();
 }
 
-fn consume(file: FileHandle#) -> void {
-    // file owns the allocation for the duration of this call.
-    if (file) {
-        probable_log_file(file);
+fn consume(file: FileHandle) -> void {
+    if (file.valid()) {
+        probable_log_file(&file);
     }
-} // file and its pointee are destroyed here
+} // FileHandle.drop closes the transferred handle
 
 fn run(native: i32) -> bool {
-    let mod file: FileHandle# = new FileHandle(native);
-    let was_valid: bool = inspect(file); // observation
-    consume(file); // owner relocation; file becomes null
+    let mod file: FileHandle = FileHandle(native);
+    let was_valid: bool = inspect(&file);
+    consume(file); // file becomes inactive
     return was_valid;
 }
 ```
 
-`inspect(file)` converts the owner to a raw observer. `consume(file)` binds an
-owner parameter and therefore relocates the owned address. The caller’s slot
-must be `mod` because owner relocation clears it to null.
+`inspect(&file)` observes the inline value. `consume(file)` transfers the
+Advanced value and its cleanup obligation. The caller's source slot requires
+binding `mod`.
 
-The language does not reject saving the raw pointer from `inspect`; using such
-a saved pointer after `consume` would be undefined behavior.
+HUC does not prevent saving the raw pointer from `inspect`; using it after
+the source is transferred would access inactive storage.
 
-### 3.4 Owner-containing structures
+### 3.4 Advanced-containing structures
+
+Using the `FileHandle` type from the preceding example:
 
 ```huc
-module examples.tree;
+struct Session {
+    let id: i32;
+    let input: FileHandle;
+    let output: FileHandle;
 
-struct Node {
-    let value: i32;
-    let mod left: Node#;
-    let mod right: Node#;
-
-    fn init(value: i32) : value(value) {
-        // left and right default to null.
-    }
-
-    fn sum() -> i32 {
-        let mod result: i32 = this->value;
-
-        if (this->left) {
-            result += this->left->sum();
-        }
-
-        if (this->right) {
-            result += this->right->sum();
-        }
-
-        return result;
+    fn init(id: i32, mod input: FileHandle, mod output: FileHandle)
+        : id(id),
+          input(input),
+          output(output),
+    {
     }
 }
 
-fn make_tree() -> Node {
-    let mod root: Node = Node(10);
-    root.left = new Node(20);
-    root.right = new Node(30);
-    return root; // fixed destructive relocation
-}
-
-fn run() -> i32 {
-    let tree: Node = make_tree();
-    return tree.sum();
+fn run(input_handle: i32, output_handle: i32) -> void {
+    let mod source: Session =
+        Session(10, FileHandle(input_handle), FileHandle(output_handle));
+    let destination: Session = source;
 }
 ```
 
-`Node` is in the Advanced category because it contains owners. Its fixed
-destructive relocation:
-
-1. transfers the entire representation, including `value` and both owner words;
-2. makes the source `Node` and its field subobjects inactive;
-3. leaves the destination responsible for cleanup, with no source cleanup.
-
-The source's `left` and `right` fields need not be nulled. Their old bits are
-not independently active owners and must not be used or destroyed. This is
-also valid for a leaf whose child owners are null. In contrast, moving just
-`root.left` while `root` remains active nulls that individual owner slot.
-
-At the end of `run`, cleanup recursively destroys both children. No reference
-count or tracing collector is involved.
+`Session` is Advanced because its fields include Advanced values.
+Transferring it moves the whole representation and makes the source and all
+its fields inactive. No source bytes are cleared and no source cleanup runs.
+At scope exit, `destination.output` is destroyed before `destination.input`.
+Ordinary transfer out of an individual Advanced field remains prohibited.
 
 ### 3.5 Explicit deep copy
 
 ```huc
-module examples.tree_copy;
+module examples.buffer_copy;
 
-struct Node {
-    let value: i32;
-    let mod left: Node#;
-    let mod right: Node#;
+import std.memory as memory;
 
-    fn init(value: i32) : value(value) {
+struct ByteBuffer {
+    let mod data: mod u8*;
+    let size: usize;
+
+    fn init(size: usize)
+        : data(memory::allocate_zeroed_bytes(size)),
+          size(size),
+    {
     }
 
-    fn clone() -> Node {
-        let mod result: Node = Node(this->value);
-
-        if (this->left) {
-            result.left = copy this->left;
-        }
-
-        if (this->right) {
-            result.right = copy this->right;
-        }
-
+    fn clone() -> ByteBuffer {
+        let mod result: ByteBuffer = ByteBuffer(this->size);
+        memory::copy_bytes(result.data, this->data, this->size);
         return result;
+    }
+
+    fn drop() mod -> void {
+        memory::free_raw_bytes(this->data, this->size);
     }
 }
 
-fn duplicate(source: Node*) -> Node {
+fn duplicate(source: ByteBuffer*) -> ByteBuffer {
     return copy *source;
 }
 ```
 
-The child-owner tests are required to preserve empty children: `copy` on a
-null owner is undefined behavior. When a child is absent, the corresponding
-field in `result` retains its default null value.
+The pointer passed to `duplicate` must designate a live buffer. The explicit
+`copy` calls `clone`, which duplicates the bytes into independent storage.
+Both buffers may then be destroyed independently. Ordinary binding instead
+transfers the Advanced value without calling `clone`.
 
-Ordinary binding of `Node` destructively relocates it. Only `copy` asks for a
-logical duplicate. This keeps potentially expensive allocation visible at the
-call site. “Deep” follows what the value owns: `left` and `right` are owners,
-so the clone duplicates their objects and children recursively. The raw
-`source` parameter is only an observer. A raw-pointer field would normally
-keep the same address, not clone the object it points to.
+Copying a raw `ByteBuffer*` alone copies only its address; it neither clones
+the buffer nor keeps it alive.
 
 ### 3.6 Required field initialization and defaults
 
@@ -540,19 +490,12 @@ Transferring a value in that category performs **destructive relocation**:
 2. Make the entire source and all its subobjects inactive.
 3. Run neither the source's `drop` body nor its automatic field cleanup.
 
-Embedded owners require no source nulling. This rule does not depend on whether
-`clone`, `drop`, or an owning field made the structure Advanced.
+Source fields require no clearing. This rule does not depend on whether
+`clone`, `drop`, or an Advanced field made the structure Advanced.
 
 There is no user move constructor, move-assignment operator, or relocation
 hook. Relocation assignment first cleans an active destination and then applies
 the same fixed operation. Exact self-relocation assignment is a no-op.
-
-Direct `T#` relocation is the primitive exception to the otherwise
-inactive-source rule. Relocating an owner slot transfers its one address and
-leaves the source as an active, usable null owner. This makes conditional owner
-consumption practical without a borrow checker. It also applies to an owner
-field moved individually, but not to its bits transferred as part of a whole
-structure relocation.
 
 ```huc
 module examples.native_lease;
@@ -668,13 +611,12 @@ A C++ move constructor constructs a destination while leaving a live source
 whose destructor will run later; the example must therefore exchange the
 source handle with `-1`. HUC destructive relocation ends the source lifetime
 and skips source cleanup. Using the inactive HUC source is undefined
-behavior, apart from the specified null-source behavior of a directly
-relocated `T#`.
+behavior.
 
 HUC makes the potentially expensive copy explicit and fixes relocation
 behavior instead of selecting user code through C++ value categories. The
-detailed comparison, including parameters, returns, owner values, assignment,
-exact self-relocation, and a complete image type, is in
+detailed comparison, including parameters, returns, resource-managing values,
+assignment, exact self-relocation, and a complete image type, is in
 [Value Semantics and Special Operations](value-semantics.md).
 
 ### 3.9 Address stability, self-pointers, and containers
@@ -729,63 +671,34 @@ The compiler need not reject the example. HUC is an unchecked systems
 language, so the programmer must ensure that any stored addresses remain
 correct.
 
-The normal solution is to allocate the object once and relocate only its
-owner:
+One solution for a local value is to construct it in fixed storage and pass
+only observers:
 
 ```huc
-fn safe_owner_relocation() -> u64 {
-    let mod original: SelfIndexed# = new SelfIndexed(42);
-    let relocated: SelfIndexed# = original;
-
-    // original is a usable null owner. The allocation kept its address.
-    return relocated->read_key_through_self();
+fn stable_local() -> u64 {
+    let original: SelfIndexed = SelfIndexed(42);
+    let observer: SelfIndexed* = &original;
+    return observer->read_key_through_self();
 }
 ```
 
-Here the `T#` source becomes null, but the `SelfIndexed` pointee remains at the
-address where `init` stored `this`. The pointee is destroyed exactly once when
-`relocated` leaves scope.
+The value remains at its construction address until cleanup. A pointer does
+not keep it alive, so observers must not be used after that lifetime ends.
 
-Container choice follows the same rule. A contiguous
-`Vector<SelfIndexed>` may destructively relocate inline elements when it grows,
-erases, compacts, or sorts. That breaks `SelfIndexed`'s self-pointer, even
-though the compiler may accept the operation. Store
-owners instead:
+A contiguous `Vector<SelfIndexed>` may relocate elements when it grows,
+erases, compacts, or sorts. That breaks the stored self-pointer even if the
+compiler accepts the operation. Use stable-address storage or redesign the
+representation. Mutable address-dependent values have the same requirement:
+do not relocate them while their address-dependent invariants are needed.
 
-```huc
-import std.collections as collections;
+Contiguous containers manage backing storage and initialized element ranges
+explicitly, including preventing cleanup of retired source slots. Ordinary
+Advanced move-out through indexing or dereferencing remains prohibited.
+The planned `construct_at` and `destruct_at` interfaces will be designed
+separately.
 
-fn make_stable_index()
-    -> collections::Vector<SelfIndexed#> {
-    let mod values: collections::Vector<SelfIndexed#> =
-        collections::Vector<SelfIndexed#>();
-
-    values.push(new SelfIndexed(10));
-    values.push(new SelfIndexed(20));
-    values.push(new SelfIndexed(30));
-    return values;
-}
-```
-
-The vector may relocate its `T#` elements, but each relocation transfers only
-an owned address and leaves each pointee at the same location.
-`Vector<SelfIndexed*>` does not provide the same ownership: `T*` does not keep
-its pointee alive.
-A future standard library may also provide a stable-address node container,
-but HUC0 does not need a special pin type for the initial milestone.
-
-Relocating non-owner Advanced elements through raw storage is not an ordinary HUC0
-source operation. Contiguous containers manage backing storage and initialized
-element ranges explicitly, including preventing cleanup of retired source
-slots. The only additional raw-storage lifetime intrinsics planned are
-`construct_at` and `destruct_at`, whose interfaces and detailed
-semantics will be designed later.
-
-A fixed inline slot can be used only when the value is constructed directly in
-its final storage and no later path relocates, reorders, returns, or captures it
-by value. Mutable address-dependent values are therefore normally clearer as
-`T#`. A future user-defined relocation hook should be considered only if real
-address-repair use cases prove that explicit stable ownership is inadequate.
+A future custom relocation hook should be considered only if real
+address-repair cases justify changing the fixed-transfer model.
 
 ### 3.10 Left-to-right evaluation
 
@@ -828,41 +741,35 @@ int32_t huc_arg2 = next(3);
 int32_t result = combine(huc_arg0, huc_arg1, huc_arg2);
 ```
 
-### 3.11 Relocating the same owner twice in one call
+### 3.11 Copy before transfer in one call
 
 ```huc
-module examples.double_relocation;
+module examples.copy_then_transfer;
 
 struct Item {
     let value: i32;
 
     fn init(value: i32) : value(value) {
     }
+
+    fn clone() -> Item {
+        return Item(this->value);
+    }
 }
 
-fn take(first: Item#, second: Item#) -> i32 {
-    let mod result: i32 = 0;
-
-    if (first) {
-        result += first->value;
-    }
-
-    if (second) {
-        result += second->value;
-    }
-
-    return result;
+fn take(first: Item, second: Item) -> i32 {
+    return first.value + second.value;
 }
 
 fn run() -> i32 {
-    let mod item: Item# = new Item(7);
-    return take(item, item);
+    let mod item: Item = Item(7);
+    return take(copy item, item);
 }
 ```
 
-The first argument relocates the address and clears `item`. The second argument
-therefore receives null. The result is `7`. This behavior is defined by HUC’s
-left-to-right rule rather than by backend argument ordering.
+The result is `14`. The first argument clones the value before the second
+argument transfers it. `take(item, item)` would instead use an inactive
+source on its second binding; there is no implicit empty value after transfer.
 
 ### 3.12 Conditional relocation remains unchecked
 
@@ -872,29 +779,31 @@ module examples.conditional_relocation;
 struct Job {
     let id: i32;
     fn init(id: i32) : id(id) {}
+
+    fn drop() mod -> void {
+        probable_finish_job(this->id);
+    }
 }
 
-fn consume(job: Job#) -> void {
+fn consume(job: Job) -> void {
 }
 
 fn run(transfer: bool) -> i32 {
-    let mod job: Job# = new Job(9);
+    let mod job: Job = Job(9);
 
     if (transfer) {
         consume(job);
+        return 0; // job is inactive, so no second cleanup
     }
 
-    if (job) {
-        return job->id;
-    }
-
-    return 0;
+    return job.id; // this path still has an active job
 }
 ```
 
-HUC needs no borrow-checker rejection here. The owner is either non-null or
-null, and the condition checks that state. Without the condition,
-dereferencing it could be undefined behavior.
+The branching explicitly avoids reading an inactive value. Reading `job`
+after a taken transfer branch would be undefined behavior, not a null test.
+The compiler must still arrange exactly-once cleanup, using control-flow
+knowledge or a separate drop flag when necessary.
 
 ### 3.13 Probable file-processing application
 
@@ -921,14 +830,14 @@ struct CopyStats {
     }
 }
 
-fn copy_stream(input: fs::Reader#, output: fs::Writer#)
+fn copy_stream(mod input: fs::Reader, mod output: fs::Writer)
     -> result::Result<CopyStats, fs::Error> {
     let mod stats: CopyStats = CopyStats();
     let mod buffer: fs::Buffer = fs::Buffer(64 * 1024);
 
     while (true) {
         let mod count: result::Result<usize, fs::Error> =
-            input->read(buffer.writable_bytes());
+            input.read(buffer.writable_bytes());
 
         if (count.is_error()) {
             return result::Result<CopyStats, fs::Error>::error(
@@ -941,7 +850,7 @@ fn copy_stream(input: fs::Reader#, output: fs::Writer#)
         }
 
         let mod written: result::Result<void, fs::Error> =
-            output->write_all(buffer.bytes(0, count.value()));
+            output.write_all(buffer.bytes(0, count.value()));
 
         if (written.is_error()) {
             return result::Result<CopyStats, fs::Error>::error(
@@ -955,8 +864,8 @@ fn copy_stream(input: fs::Reader#, output: fs::Writer#)
     return result::Result<CopyStats, fs::Error>::value(stats);
 }
 
-fn run(source: text::Text, destination: text::Text) -> i32 {
-    let mod opened_input: result::Result<fs::Reader#, fs::Error> =
+fn run(mod source: text::Text, mod destination: text::Text) -> i32 {
+    let mod opened_input: result::Result<fs::Reader, fs::Error> =
         fs::open_reader(source);
 
     if (opened_input.is_error()) {
@@ -964,9 +873,9 @@ fn run(source: text::Text, destination: text::Text) -> i32 {
         return 1;
     }
 
-    let mod input: fs::Reader# = opened_input.take_value();
+    let mod input: fs::Reader = opened_input.take_value();
 
-    let mod opened_output: result::Result<fs::Writer#, fs::Error> =
+    let mod opened_output: result::Result<fs::Writer, fs::Error> =
         fs::create_writer(destination);
 
     if (opened_output.is_error()) {
@@ -974,7 +883,7 @@ fn run(source: text::Text, destination: text::Text) -> i32 {
         return 1;
     }
 
-    let mod output: fs::Writer# = opened_output.take_value();
+    let mod output: fs::Writer = opened_output.take_value();
     let copied: result::Result<CopyStats, fs::Error> =
         copy_stream(input, output);
 
@@ -992,14 +901,16 @@ fn run(source: text::Text, destination: text::Text) -> i32 {
 }
 ```
 
-The standard-library API is not settled, but its ownership behavior is clear:
+The standard-library API is not settled, but the intended value behavior is:
 
-- `open_reader` returns an owner.
-- `take_value` destructively relocates that owner and leaves its source null.
-- `copy_stream` consumes both stream owners.
-- all early returns deterministically clean still-active owners.
-- buffers and errors use ordinary value semantics rather than special language
-  exceptions.
+- `open_reader` returns a result containing an Advanced stream value.
+- `copy_stream` consumes both stream values.
+- early returns clean up still-active values.
+- buffers and errors use ordinary value semantics.
+
+The illustrative result-extraction methods must manage their initialized
+payload state explicitly. They depend on the separately planned manual-storage
+lifetime operations; they do not permit ordinary transfer out of an Advanced field.
 
 ## 4. HUC1 control-flow examples
 
@@ -1352,12 +1263,12 @@ fn run() -> i32 {
     }
 
     let1 slot()<Widget> {
-        let mod slot: Widget# = new Widget(99);
+        let mod slot: Widget = Widget(99);
     }
 
     let first: i32 = slot<i32>;
     let second: Widget* = slot<Widget*>;
-    let third: i32 = slot<Widget>->id;
+    let third: i32 = slot<Widget>.id;
 
     if (second) {
         return -1;
@@ -1372,22 +1283,22 @@ Illustrative HUC0 at the family declaration site:
 ```huc
 let __huc_slot_i32: i32 = i32();
 let mod __huc_slot_Widget_ptr: Widget* = null;
-let mod __huc_slot_Widget: Widget# = new Widget(99);
+let mod __huc_slot_Widget: Widget = Widget(99);
 
 let first: i32 = __huc_slot_i32;
 let second: Widget* = __huc_slot_Widget_ptr;
-let third: i32 = __huc_slot_Widget->id;
+let third: i32 = __huc_slot_Widget.id;
 ```
 
 The same family name can produce:
 
 - an inline `i32`;
 - a raw `Widget*`;
-- an owning `Widget#`.
+- a writable inline `Widget`.
 
 This is one of HUC’s most unusual direct facilities. C++ variable templates can
 also be explicitly/partially specialized, but HUC integrates the selected
-ordinary `let` declaration, ownership syntax, phase control, and HUC0
+ordinary `let` declaration, mutation permissions, phase control, and HUC0
 materialization into the same numbered model.
 
 ### 5.5 `let1` selecting mutability
@@ -1597,7 +1508,7 @@ This example combines:
 
 - a family selected by element type and inline capacity;
 - fixed-by-default fields;
-- owner-backed spill storage;
+- explicitly managed spill storage;
 - phase-selected layout;
 - runtime destructive relocation and cleanup;
 - probable allocator APIs.
@@ -1617,45 +1528,47 @@ struct1 HeapArray(T: auto) {
     let capacity: usize;
 
     fn init(capacity: usize)
-        : values(memory::allocate_raw_items<T>(capacity)),
-          capacity(capacity),
-    {
+        : capacity(capacity) {
+        if (capacity != 0) {
+            this->values = memory::allocate_raw_items<T>(capacity);
+        }
     }
 
     fn drop() mod -> void {
-        memory::free_raw_items<T>(
-            this->values,
-            this->capacity,
-        );
-        this->values = null;
+        if (this->values) {
+            memory::free_raw_items<T>(this->values, this->capacity);
+            this->values = null;
+        }
     }
 }
 
 struct1 SmallVector(T: auto, Inline: usize) {
     let mod inline_values: InlineArray<T, Inline>;
-    let mod heap_values: HeapArray<T>#;
+    let mod heap_values: HeapArray<T>;
     let mod size: usize;
     let mod capacity: usize;
 
     fn init()
-        : capacity(Inline) {
+        : heap_values(HeapArray<T>(0)),
+          capacity(Inline),
+    {
     }
 
     fn using_heap() -> bool {
-        return this->heap_values != null;
+        return this->heap_values.values != null;
     }
 
     fn data() -> T* {
-        if (this->heap_values) {
-            return this->heap_values->values;
+        if (this->using_heap()) {
+            return this->heap_values.values;
         }
 
         return &this->inline_values[0];
     }
 
     fn data_mut() mod -> mod T* {
-        if (this->heap_values) {
-            return this->heap_values->values;
+        if (this->using_heap()) {
+            return this->heap_values.values;
         }
 
         return &this->inline_values[0];
@@ -1671,12 +1584,12 @@ struct1 SmallVector(T: auto, Inline: usize) {
             next_capacity = requested;
         }
 
-        let mod replacement: HeapArray<T># =
-            new HeapArray<T>(next_capacity);
+        let mod replacement: HeapArray<T> =
+            HeapArray<T>(next_capacity);
 
         let mod index: usize = 0;
         while (index < this->size) {
-            replacement->values[index] = this->data_mut()[index];
+            replacement.values[index] = this->data_mut()[index];
             index += 1;
         }
 
@@ -1739,7 +1652,7 @@ This illustrates the design; it is not a finished, safety-checked container:
 
 - The pointer specialization is chosen structurally.
 - The predicate limits the compact form to capacities up to four.
-- The general form has one owner word for spill storage.
+- The general form contains an inline resource-managing spill buffer.
 - HUC does not add bounds or dangling-pointer checks.
 - The backend sees only concrete HUC0 structures.
 
@@ -1900,41 +1813,41 @@ struct MessageHeader {
 
 struct Packet {
     let header: MessageHeader;
-    let mod payload: net::ByteBuffer#;
+    let mod payload: net::ByteBuffer;
 
-    fn init(header: MessageHeader, mod payload: net::ByteBuffer#)
+    fn init(header: MessageHeader, mod payload: net::ByteBuffer)
         : header(header),
           payload(payload),
     {
     }
 }
 
-fn send_packet(socket: net::Socket*, packet: Packet#)
+fn send_packet(socket: net::Socket*, packet: Packet)
     -> result::Result<void, net::Error> {
     let mod header_result: result::Result<void, net::Error> =
-        socket->write(probable_bytes_of(&packet->header));
+        socket->write(probable_bytes_of(&packet.header));
 
     if (header_result.is_error()) {
         return header_result;
     }
 
     return socket->write(
-        packet->payload->bytes(
+        packet.payload.bytes(
             0,
-            packet->header.payload_size.value,
+            packet.header.payload_size.value,
         ),
     );
 }
 
 fn run(
     socket: net::Socket*,
-    mod payload: net::ByteBuffer#,
+    mod payload: net::ByteBuffer,
     size: usize,
 ) -> i32 {
-    let checksum: u32 = probable_checksum(payload->bytes(0, size));
+    let checksum: u32 = probable_checksum(payload.bytes(0, size));
     let header: MessageHeader =
         MessageHeader(7, as<u16>(size), checksum);
-    let mod packet: Packet# = new Packet(header, payload);
+    let mod packet: Packet = Packet(header, payload);
 
     let sent: result::Result<void, net::Error> =
         send_packet(socket, packet);
@@ -1949,7 +1862,7 @@ fn run(
 ```
 
 The HUC0 output has exactly one header layout and constructor. Runtime packet
-ownership is independent of the compile-time layout mechanism.
+transfer and cleanup are independent of the compile-time layout mechanism.
 
 ## 11. Large case study: generated command registry
 
@@ -2010,8 +1923,8 @@ Usefulness:
 ## 12. Large case study: ECS component storage
 
 Entity-component systems often need type-directed storage. The following
-illustrates a family that chooses inline storage for small Basic components and
-owner storage for Advanced components.
+illustrates a family that selects value-parameter handling for Basic and
+Advanced components, while storing both inline.
 
 The predicate helpers are probable future compiler type queries.
 
@@ -2030,9 +1943,9 @@ struct Position {
 
 struct Sprite {
     let texture: u32;
-    let mod pixels: memory::ByteBuffer#;
+    let mod pixels: memory::ByteBuffer;
 
-    fn init(texture: u32, mod pixels: memory::ByteBuffer#)
+    fn init(texture: u32, mod pixels: memory::ByteBuffer)
         : texture(texture),
           pixels(pixels),
     {
@@ -2041,15 +1954,15 @@ struct Sprite {
 
 struct1 ComponentStore(T: auto) {
     if1 (@compiler::type<T>().is_advanced()) {
-        let mod values: collections::Vector<T#>;
+        let mod values: collections::Vector<T>;
 
-        fn add(mod value: T#) mod -> usize {
+        fn add(mod value: T) mod -> usize {
             this->values.push(value);
             return this->values.size() - 1;
         }
 
         fn get(index: usize) -> T* {
-            return this->values[index];
+            return this->values.pointer_at(index);
         }
     } else {
         let mod values: collections::Vector<T>;
@@ -2081,7 +1994,7 @@ This exact predicate needs the future reflection API, so it is outside the
 first implementation. It shows why HUC plans to provide stable type metadata:
 
 - Basic components can be stored inline.
-- Advanced components can be stored through unique owners.
+- Advanced components transfer into storage and receive exactly-once cleanup.
 - users interact with a uniform `get` observer;
 - each concrete store is generated in HUC0;
 - runtime storage contains no reflection metadata.
@@ -2193,8 +2106,8 @@ including its content hash.
 
 The compiler library should allow phase code to ask questions such as:
 
-- Which types contain an owner?
-- Which functions consume an owner parameter?
+- Which types contain Advanced fields?
+- Which functions consume an Advanced parameter?
 - Which structures have a `drop` method?
 - Which declarations and attributes exist in each imported module?
 - Which statements perform unchecked pointer arithmetic?
@@ -2220,13 +2133,12 @@ Possible tools include:
 
 | HUC facility | Typical alternative elsewhere | HUC’s direct contract |
 |---|---|---|
-| `T#` | `unique_ptr`, owned boxes, library wrapper | One-word unique ownership integrated with relocation-by-binding |
 | `init` / `clone` / `drop` | C++ special members, RAII wrappers | Custom construction, explicit logical copy, and cleanup |
 | Fixed destructive relocation | C++ move constructors and move assignment | Bitwise non-failing transfer of inline Advanced values that ends the source lifetime, with no user hook or value-category overload |
 | Layered `mod` | const qualifiers, mutable references, capabilities | Slot and pointee permissions remain visually separate |
 | `if1` in a type body | conditional members, macros, template/static conditionals | Selected declarations become normal HUC0; discarded body is not parsed |
 | `fn1` partial specialization | overloads, traits, macros | Same primary/partial/full mechanism as structure and variable families |
-| `let1` | variable templates, macros, generated locals | Selected leaf is a complete ordinary `let`, including type and ownership |
+| `let1` | variable templates, macros, generated locals | Selected leaf is a complete ordinary `let`, including type and mutation permissions |
 | `@fn1(...)` | constant evaluation or interpreter call | Same family either residualizes or must fully execute |
 | Raw call-site emission | macros, mixins, compiler plugins | Compiler helper inherits a lexical HUC0 insertion cursor |
 | Printable HUC0 boundary | internal compiler IR or generated source | Second public translator parses the exact intermediate source |

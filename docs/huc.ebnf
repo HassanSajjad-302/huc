@@ -160,7 +160,7 @@ phase-argument-list
                     { ",", phase-argument }, [ "," ] ], ">" ;
 phase-argument    = type-pattern | expression-1 ;
 
-type-pattern      = [ "mod" ], type-pattern-primary, [ "*" | "#" ] ;
+type-pattern      = [ "mod" ], type-pattern-primary, [ "*" ] ;
 type-pattern-primary
                   = builtin-type
                   | symbol-path, [ phase-argument-list ] ;
@@ -255,10 +255,10 @@ compiler-for-statement-1
 
 (* ---------- Types ---------- *)
 
-type-0            = [ "mod" ], type-primary-0, [ "*" | "#" ] ;
+type-0            = [ "mod" ], type-primary-0, [ "*" ] ;
 type-primary-0    = builtin-type | symbol-path ;
 
-type-1            = [ "mod" ], type-primary-1, [ "*" | "#" ] ;
+type-1            = [ "mod" ], type-primary-1, [ "*" ] ;
 type-primary-1    = builtin-type
                   | symbol-path, [ phase-argument-list ] ;
 
@@ -267,8 +267,8 @@ builtin-type      = "bool" | "c8"
                   | "u8" | "u16" | "u32" | "u64" | "usize"
                   | "f32" | "f64" | "void" | "never" ;
 
-(* A type may end in one optional suffix: * or #. The type-primary rules do
-   not include a suffix, so T**, T*#, T#*, and T## cannot be parsed.
+(* A type may end in one optional * suffix. The type-primary rules do
+   not include a suffix, so T** cannot be parsed.
    & is not a type suffix; it remains an expression operator.
    Named HUC0 types never have phase arguments. *)
 
@@ -357,8 +357,7 @@ unary-expression-0
                   = postfix-expression-0
                   | ( "+" | "-" | "!" | "~" | "*" | "&" ),
                     unary-expression-0
-                  | "copy", unary-expression-0
-                  | "new", type-0, argument-list-0 ;
+                  | "copy", unary-expression-0 ;
 postfix-expression-0
                   = primary-expression-0,
                     { argument-list-0
@@ -396,8 +395,7 @@ unary-expression-1
                   = postfix-expression-1
                   | ( "+" | "-" | "!" | "~" | "*" | "&" | "@" ),
                     unary-expression-1
-                  | "copy", unary-expression-1
-                  | "new", type-1, argument-list-1 ;
+                  | "copy", unary-expression-1 ;
 postfix-expression-1
                   = primary-expression-1,
                     { argument-list-1
@@ -438,14 +436,10 @@ binary-op         = "||" | "&&"
    associativity are those specified by the Pratt-parser table in the
    implementation and language specification. Unary & takes an eligible
    inline place's typed address; binary & remains bitwise AND.
-   slot_off(place), release(owner), and reset(owner) are
-   compiler-known, non-overloadable ordinary call forms with unqualified
-   names. Semantic analysis checks their arity and operands. Binding a
-   compatible raw pointer to an owner uses ordinary initialization,
-   assignment, argument, or return syntax and leaves the raw source unchanged.
-   This is a built-in conversion, not an intrinsic call. slot_off returns
-   usize without transferring a value. ptr_as sources must be raw pointers
-   or usize values. *)
+   slot_off(place) is a compiler-known, non-overloadable ordinary call form
+   with an unqualified name. Semantic analysis checks its arity and operand.
+   It returns usize without transferring a value. ptr_as sources must be
+   raw pointers or usize values. *)
 
 literal           = integer-literal
                   | float-literal
