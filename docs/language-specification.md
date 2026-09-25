@@ -268,6 +268,11 @@ HUC intrinsics use unqualified compiler-known names, not `std::` names.
 use ordinary call syntax but cannot be overloaded or used as first-class
 function values. Semantic analysis checks their operands and argument counts.
 `as<T>` and `ptr_as<T*>` retain their explicit type operands.
+`size_of<T>()` and `align_of<T>()` are target-layout queries with one type
+operand and no value operands. `raw_storage<T, N>` is a built-in storage type,
+not a phase family; `storage_ptr(pointer)` exposes its element storage.
+`is_basic<T>()` queries the existing Basic/Advanced category at compile time.
+These names likewise cannot be overloaded or used as function values.
 
 Address-taking uses unary `&`, not a named intrinsic call. The former
 `addressof` and `std::slot_of` spellings are not aliases for
@@ -312,7 +317,9 @@ required. Basic and Advanced are category names, not source keywords.
 Built-in scalars and raw pointers are Basic. A structure is Basic when every
 field is Basic and it declares neither `clone` nor `drop`. Otherwise it is
 Advanced. Having `init()` alone does not make it Advanced. `T*` remains Basic
-regardless of the pointee's category.
+regardless of the pointee's category. The built-in `raw_storage<T, N>` type
+is always Advanced and has no `clone` or automatic element cleanup (section
+6.7.5). A structure containing it is therefore Advanced too.
 
 ```huc
 struct Point {
@@ -509,10 +516,11 @@ Declaring `drop` makes the structure Advanced.
 
 ### 4.7 Indexing and library containers
 
-Raw-pointer indexing is unchecked. Arrays, slices, and inline fixed-capacity
-storage are library types rather than additional primitive storage syntax in
-0.1. A probable HUC1 standard library can provide `Array<T>`, `Slice<T>`, and
-`InlineArray<T, N>` families that generate concrete HUC0 structure types.
+Raw-pointer indexing is unchecked. Arrays, slices, and containers remain
+library types. The built-in `raw_storage<T, N>` supplies aligned, contiguous
+inline slots without constructing elements or managing their cleanup.
+A HUC1 library can build `Array<T>`, `Slice<T>`, and `InlineArray<T, N>`
+families that generate concrete HUC0 structure types using this facility.
 
 Primitive `[N]T` fixed arrays are deferred.
 
@@ -564,6 +572,27 @@ reason, `f(x, x.size())` is ill-formed while `f(x.size(), x)` is valid.
 `&&` and `||` short-circuit. Only the selected operand of `?:` is evaluated.
 `?:` yields a value, not a place: an arm that names an Advanced local or
 parameter relocates it into the result on that arm's path.
+
+This also applies when the result is used only as a method receiver:
+
+```huc
+// a and b are live Advanced locals declared with binding mod.
+(condition ? a : b).size(); // transfers the selected value, then observes it
+// The result is destroyed at this semicolon. Both a and b are now MaybeActive.
+```
+
+To observe one of the existing values, select pointers or select the results
+of the observations instead:
+
+```huc
+(condition ? &a : &b)->size(); // observes; neither value is transferred
+condition ? a.size() : b.size(); // evaluates only the selected call
+```
+
+These are alternative examples with live inputs, not consecutive statements
+after the consuming example. Fixed Advanced operands cannot be transferred.
+There is no special exception based on whether `?:` appears in an initializer,
+return, argument, or method receiver.
 
 ### 5.2 Arithmetic
 
@@ -761,6 +790,15 @@ destruction; exact self-relocation remains a no-op. `construct_at` initializes
 inactive storage and `destruct_at` destroys a live value there (section 6.7).
 Pointer extraction uses ordinary dereference syntax and needs no separate
 intrinsic.
+
+This is an unchecked lifetime operation even when the surrounding expression
+looks like an ordinary read. `let working: T = *p`, `return *p`, `consume(*p)`,
+and `construct_at(q, *p)` all extract an Advanced pointee in their value-binding
+contexts. The same expressions copy Basic pointees. Calling `p->method()`
+observes the pointee; `copy *p` requests an independent logical copy when
+supported. A writable observer parameter alone does not promise to preserve
+the pointee's lifetime: the function's contract must state any extraction and
+the required source cleanup or reconstruction.
 
 Inline values whose correctness depends on a stable address are an unchecked
 boundary of this model. For example, destructive relocation does not repair a
@@ -1047,6 +1085,120 @@ preconditions, not mandatory runtime tests. Static errors such as a read-only
 pointer, wrong arity, incompatible initializer, or ineligible Advanced source
 require diagnostics. Allocation APIs remain library choices; HUC0 has no
 built-in allocating constructor expression.
+
+#### 6.7.4 Target layout queries
+
+`size_of<T>()` and `align_of<T>()` return `usize` constants for the selected
+runtime target, never the compiler host. `T` must be a complete runtime object
+type; `void`, `never`, phase-only types, and types with recursive inline layout
+are rejected. Pointer types, including pointer chains, are complete even when
+their ultimate pointee's layout is not yet known.
+
+Size includes padding and is the stride of contiguous `T` slots. Alignment is
+the byte alignment required for a `T` address. Both queries take no runtime
+arguments, evaluate no values, and start or end no lifetimes. A pointer's size
+is its own representation size, not its pointee's size. Layout arithmetic for
+allocations must be checked for overflow before allocation or pointer use.
+HUC1 may use these queries during specialization once `T` and the target are
+known; HUC0 accepts the same queries on concrete types without staging.
+
+`is_basic<T>()` takes the same complete runtime type operand and no value
+operands, and returns a constant `bool`. It is true for Basic types and false
+for Advanced types, including `raw_storage`. It reports the existing inferred
+category; it does not declare a trait, opt a type into copying, or generate
+`clone`. HUC1 can use `if1 (is_basic<T>())` to end a copied Basic source's
+lifetime without trying to destroy an extracted Advanced source.
+
+#### 6.7.5 Typed raw inline storage
+
+`raw_storage<T, N>` reserves `N` contiguous slots for `T` inside the containing
+object, with alignment `align_of<T>()` and size `N * size_of<T>()`. It adds no
+tag, length, allocation, or per-element cleanup flags. `T` must be a complete
+runtime object type. `N` must be positive and the total size must fit the
+target's object-size limits and `usize`. Invalid layouts are compile-time
+errors. HUC0 spells `N` as an integer literal; HUC1 can use a compile-time
+`usize` expression and emits the resolved literal. Aliases preserve this type.
+Zero-capacity libraries specialize to a representation with no storage field.
+
+The zero-argument expression `raw_storage<T, N>()` creates the storage with
+every element slot inactive. It calls no `T` constructor and need not initialize
+any payload bytes. An omitted mutable local or field of this type has the same
+initialization; fixed bindings require an initializer as usual. Its slots are
+reserved for exactly `T`, including that type's pointer permissions. Casting
+an address does not permit using the same slot for an unrelated type.
+
+`storage_ptr(pointer)` takes exactly one pointer to a live `raw_storage<T, N>`
+object and returns the address of its first element slot. A read-only storage
+pointer produces `T*`; a writable storage pointer produces `mod T*`. The
+operand is evaluated once. It must be non-null, aligned, and valid; the
+operation neither reads the payload nor constructs an element. It works even
+when all element slots are inactive. It has no type operand and cannot be
+overloaded or used as a function value. Use `&storage` to address the storage
+object itself, and `storage_ptr(&storage)` to address its element region.
+
+```huc
+let mod storage: raw_storage<File, 4> = raw_storage<File, 4>();
+let slots: mod File* = storage_ptr(&storage);
+construct_at(slots, File(handle)); // only slot 0 is now live
+let file: File = *slots; // Advanced extraction; slot 0 is inactive again
+// file has automatic cleanup; storage never closes a File by itself.
+```
+
+Pointer arithmetic within the region, including forming its one-past address,
+is allowed independently of which slots are live. Reading a value, calling its
+methods, or destroying it requires a live slot. `construct_at` instead requires
+an inactive slot. Merely declaring a `T*`, casting bytes, or obtaining a slot
+address never constructs a `T`.
+
+Raw storage is always Advanced, even for Basic `T`. Ordinary whole-value
+transfer relocates its representation and any live payload values to the
+corresponding destination slots, leaving the source inactive without cleanup.
+Inactive bytes may be transferred as representation without reading them as
+initialized `T` values. No source clearing or element-state scan is required.
+`copy storage` is rejected: a container's `clone` must create fresh storage and
+explicitly copy its live elements. Pointers into relocated storage still point
+to the old region and must not be used as observers of the new values.
+
+Ending or replacing a raw-storage object's lifetime never invokes element
+cleanup. Any live payload lifetimes end with it, potentially leaking resources.
+The containing library type must destroy or extract its live elements before
+releasing that storage. Its ordinary `drop` can do so; subsequent automatic
+cleanup of the raw-storage field does not repeat element destruction. Storing
+a length or tag is a library responsibility, not hidden compiler state.
+
+One slot plus a presence flag is enough for a library inline optional. A sum
+type can use separate raw-storage fields for its alternatives and a tag; this
+uses more space than an overlapping union. Compact overlapping alternatives
+and a general union syntax remain separate design work. These facilities do
+not make ordinary `T` fields manually managed or allow direct Advanced field
+moves.
+
+#### 6.7.6 Allocated storage and container bookkeeping
+
+Dynamic containers obtain suitably aligned, sufficiently large storage from
+an allocator library. The allocator contract must permit constructing the
+chosen `T` values there. `size_of<T>()` and `align_of<T>()` supply its layout
+requirements; no allocation intrinsic is required. For a contiguous allocation,
+the library establishes capacity for whole `T` slots before using element
+pointer arithmetic. Zero capacity may use a null pointer; it permits no
+dereference or pointer arithmetic on that null pointer.
+
+A vector maintains `0 <= length <= capacity`, with exactly `[0, length)` live.
+Push constructs at `data + length` before increasing length. Pop extracts an
+Advanced last element or copies a Basic one, then removes that slot from the
+live range. A copied Basic source still has a lifetime: use `destruct_at` to
+end it before reusing the slot with `construct_at`. This calls no user code.
+The same distinction applies when growing into a new allocation: Advanced
+sources become inactive on transfer, while copied Basic sources must have
+their lifetimes ended before the old region is reused. The old allocation
+can then be freed without destroying already-transferred Advanced elements.
+
+Clear destroys each live element exactly once and sets length to zero. The
+library must not publish an unconstructed element or let cleanup reach an
+extracted one, including on early returns. An ordinary inline-storage field
+containing live `T` objects would receive automatic field cleanup; a
+`raw_storage<T, N>` field deliberately does not. No hidden array of drop flags
+is needed in either inline or allocated storage.
 
 ### 6.8 Raw-pointer binding
 
@@ -2255,14 +2407,19 @@ relocation; copying them explicitly exposes reference-count changes.
 
 ## 16. C++ comparison
 
-The closest C++ equivalents are:
+The closest C++ equivalents are conceptual, not emitted C17 declarations:
 
 | HUC | Approximate C++ |
 |---|---|
-| `T*` | `T*` |
+| `T*` | `const T*` for a non-pointer `T` |
+| `mod T*` | `T*` for a non-pointer `T` |
 | `&value` | `std::addressof(value)` or `&value` |
 | `slot_off(place)` | a data-slot address converted to `std::uintptr_t` |
 | `copy a` | clone/copy construction, explicitly selected |
+| Advanced binding from `*p` | Move construction from `std::move(*p)`, except HUC ends the source lifetime and requires manual source cleanup management |
+| `construct_at(p, value)` / `destruct_at(p)` | `std::construct_at` / `std::destroy_at`, with HUC initialization and cleanup rules |
+| `raw_storage<T, N>` | Typed, aligned storage with manually managed element lifetimes; no implicit element cleanup |
+| `size_of<T>()` / `align_of<T>()` | `sizeof(T)` / `alignof(T)` |
 | `fn1` | a subset spanning templates and `constexpr` |
 | `fn2` | roughly `consteval` plus meta facilities |
 | `if1` | roughly `if constexpr` |

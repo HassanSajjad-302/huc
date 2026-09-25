@@ -457,15 +457,23 @@ fn demonstrate() -> void {
 }
 ```
 
-A conventional C++20 counterpart is:
+A C++20 counterpart that manages the allocation directly is:
 
 ```cpp
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <string_view>
+#include <utility>
+
 class HeapText {
 public:
     explicit HeapText(std::string_view source)
         : data_(new std::uint8_t[source.size()]),
           size_(source.size()) {
-        std::memcpy(data_, source.data(), size_);
+        if (size_ != 0) {
+            std::memcpy(data_, source.data(), size_);
+        }
     }
 
     HeapText(const HeapText& source)
@@ -481,13 +489,13 @@ public:
 
     HeapText(HeapText&& source) noexcept
         : data_(std::exchange(source.data_, nullptr)),
-          size_(source.size_) {}
+          size_(std::exchange(source.size_, 0)) {}
 
     HeapText& operator=(HeapText&& source) noexcept {
         if (this != &source) {
             delete[] data_;
             data_ = std::exchange(source.data_, nullptr);
-            size_ = source.size_;
+            size_ = std::exchange(source.size_, 0);
         }
         return *this;
     }
@@ -497,6 +505,9 @@ public:
     }
 
     std::string_view view() const {
+        if (size_ == 0) {
+            return {};
+        }
         return {
             reinterpret_cast<const char*>(data_),
             size_
@@ -509,10 +520,16 @@ private:
 };
 ```
 
-The user writes five C++ special members here. The HUC user writes `clone` and
-`drop`; HUC supplies fixed destructive relocation. This comparison does not
-describe the emitted backend code: the first backend emits C17 with explicit
-lifetime operations, not C++ special members.
+This direct-allocation C++ example writes five special members and leaves a
+moved-from object empty and copyable. The HUC version writes `clone` and `drop`;
+HUC supplies fixed destructive relocation. This is not a requirement for every
+C++ class: composing standard resource types, as in the `Image` example,
+often removes custom cleanup and move code. A `std::string` member could
+provide this text wrapper's resource management and copying with no custom
+special members. A `unique_ptr` member supplies cleanup and ownership transfer,
+but a copyable wrapper still needs to define how to duplicate its resource.
+The first HUC backend emits C17 with explicit lifetime operations; this source
+comparison does not describe the generated backend code.
 
 ### 6.2 Copying through a raw pointer
 
@@ -775,6 +792,18 @@ manages its own live slots, such as a vector that reduces its initialized
 length after extracting the last element. This distinction is about cleanup
 responsibility, not stack versus heap allocation. No per-element flags or
 runtime ownership lookup are required.
+
+The programmer must recognize this operation in every value-binding context:
+`return *p`, `consume(*p)`, and `construct_at(q, *p)` extract an Advanced
+pointee just as `let result: T = *p` does. A function taking `mod T*` can do
+this, but must document the resulting lifetime obligation. For ordinary
+in-place changes, call a method through the pointer. For an independent value,
+use `copy *p` if cloning is supported. To consume an automatic local, prefer
+passing it by value, so its compiler-managed cleanup state follows the transfer.
+If a pointer-taking function temporarily extracts an automatic value, it must
+reconstruct a live value with `construct_at` before the caller uses or destroys
+that slot. Merely avoiding further reads in the caller does not prevent the
+invalid automatic destruction.
 
 Direct field and array-element moves remain rejected:
 
@@ -1217,6 +1246,58 @@ cannot be overloaded, and cannot be used as function values. See
 [language specification section 6.7](language-specification.md#67-manually-managed-storage)
 for the full contract.
 
+### 9.3 Reserving raw inline storage
+
+`raw_storage<T, N>` reserves aligned space for `N` contiguous `T` values,
+without constructing any of them. It is a built-in HUC0 type, not a generic
+library family. HUC0 uses a concrete type and positive literal count; HUC1
+can resolve a type parameter and compile-time count into that form.
+
+```huc
+let mod storage: raw_storage<File, 2> = raw_storage<File, 2>();
+let slots: mod File* = storage_ptr(&storage);
+construct_at(slots, File(first_handle));
+construct_at(slots + 1, File(second_handle));
+
+let file: File = *(slots + 1); // second slot becomes inactive
+destruct_at(slots); // close the first File
+// storage has no live elements left; only file gets automatic File cleanup.
+```
+
+`storage_ptr` evaluates its storage-pointer operand once. A writable storage
+pointer gives `mod T*`; a read-only one gives `T*`. Obtaining the pointer does
+not read or initialize the element region. `size_of<T>()` and `align_of<T>()`
+return target layout constants of type `usize`; the region occupies
+`N * size_of<T>()` bytes aligned for `T`. Reject zero counts, incomplete
+element types, and sizes exceeding the target limits at compile time.
+
+Raw storage is always Advanced, with no `clone` and no automatic element
+cleanup. Moving it, including as part of a container, transfers its live
+payloads without scanning slots or clearing the source. It also carries
+inactive representation bytes without reading them as `T` values. A container
+must track its initialized length or presence flag, destroy the live elements
+in its `drop`, and explicitly copy live elements if it offers `clone`.
+Discarding raw storage without that cleanup can leak resources. Pointers into
+the old region do not follow a relocation.
+
+An inline optional can use `raw_storage<T, 1>` plus a flag; its empty state
+contains no live `T` and needs no default or sentinel `T`. A sum type can use
+separate storage fields and a tag, at the cost of space for every alternative.
+This does not introduce overlapping unions or general primitive arrays.
+See [the raw-storage contract](language-specification.md#675-typed-raw-inline-storage)
+and [container examples](use-cases-and-examples.md#39a-raw-storage-for-containers).
+
+For allocated storage, allocator APIs must honor the requested size and
+alignment and permit constructing the chosen element type. Check capacity
+multiplications for overflow. Allocation does not construct elements; freeing
+storage does not run their cleanup.
+
+`is_basic<T>()` reports the existing category as a compile-time `bool`. It lets
+generic code distinguish a copied Basic element, which remains live, from an
+extracted Advanced one. A Basic source can be retired with `destruct_at`
+before its slot is reused; that operation emits no user cleanup call. Do not
+call `destruct_at` on the already-inactive Advanced source.
+
 ## 10. Parameters and argument order
 
 Parameters are passed by value. Their behavior follows their type:
@@ -1276,6 +1357,24 @@ argument. Saving pointers to source places and deferring their transfers
 until the final C call is insufficient. Typed parameter slots, separately
 or in a call frame, preserve sequencing and exactly-once cleanup. Optimizers
 may reorder pure computation when the program still behaves the same.
+
+### 10.1 Selecting a value or observing one
+
+The conditional operator produces a value. For live, writable Advanced
+locals, `(condition ? first : second).size()` transfers the selected value to
+a temporary, calls its method, and destroys the temporary at the semicolon.
+Both original locals are then MaybeActive, so later named use is rejected.
+
+To observe one without transferring it, use either of these alternatives:
+
+```huc
+(condition ? &first : &second)->size();
+condition ? first.size() : second.size();
+```
+
+Each evaluates only the selected observation. The pointer form copies an
+address, which is Basic; it does not extend the pointee's lifetime. The rule
+does not change according to where the conditional expression appears.
 
 ## 11. Return values
 
@@ -1620,11 +1719,20 @@ relocation behavior, C++ references, or C++ value-category overloads.
 | `destination = source` for Advanced `T` | Move assignment | HUC drops the destination, then performs non-overridable relocation |
 | `T*` | `const T*` by default | HUC pointer is always raw and unchecked |
 | `mod T*` | `T*` | Writable pointee |
-| `&value` | `std::addressof(value)` | HUC permits only eligible inline data places and cannot overload `&` |
+| `T**` and longer chains | Nested raw pointers with corresponding access permissions | HUC permits chains, including through aliases; none of the levels owns its pointee |
+| `&value`, including a pointer slot | `std::addressof(value)` | HUC accepts addressable data places and cannot overload `&`; it does not materialize a temporary |
 | `fn clone() -> T` | Copy constructor, often clone function | Invoked only by explicit logical copying |
-| `fn drop() mod -> void` | Destructor body | HUC destroys fields after `drop` |
+| `fn drop() mod -> void` | Destructor body | Both run the body before reverse member cleanup; HUC has no inheritance cleanup or exception unwinding |
 | Fixed HUC destructive relocation | Move constructor/assignment | HUC ends the source lifetime and has no user hook |
-| Inactive source storage after relocation | Valid-but-unspecified moved-from object | HUC source has no live object until reinitialized; uses of roots tracked as Inactive or MaybeActive are compile-time errors |
+| Inactive source storage after relocation | Source remains alive after move construction | HUC source has no live object until reinitialized; C++ moved-from guarantees depend on the type, with standard-library types generally valid but unspecified |
+| Advanced binding from `*p`, including arguments and returns | Move construction from `std::move(*p)` | HUC ends the source lifetime without drop or source clearing; the programmer must prevent later source cleanup. Plain `T v = *p` in C++ normally copies instead |
+| `construct_at(p, value)` | `std::construct_at(p, arguments...)` | HUC takes one initializer, including guaranteed direct destination construction, and requires inactive storage; neither operation allocates it |
+| `destruct_at(p)` | `std::destroy_at(p)` | Both perform destruction without deallocation; HUC does not cancel an aliased local's scheduled cleanup |
+| `raw_storage<T, N>` and `storage_ptr` | Typed aligned storage managed with placement construction/destruction | HUC does not automatically construct or destroy its elements; whole-storage transfer is destructive |
+| `size_of<T>()`, `align_of<T>()` | `sizeof(T)`, `alignof(T)` | Target layout constants; no value evaluation or construction |
+| Unconsumed temporary | Usually destroyed at full-expression end | HUC specifies condition, initializer, and return boundaries and has no reference-based lifetime extension |
+| Checked use of an Inactive or MaybeActive local | No corresponding C++ destructive-move state | HUC rejects named uses on uncertain paths; raw-pointer aliases remain unchecked |
+| `(c ? a : b).size()` for writable Advanced locals | Same-type C++ lvalue arms can yield an lvalue | HUC transfers the selected value into a temporary; use `(c ? &a : &b)->size()` to observe |
 
 “Comparable with C++” therefore means that ordinary C++ RAII and value-oriented
 designs have direct HUC representations. It does not mean every C++ special
@@ -1653,13 +1761,15 @@ The compiler must reject:
 - a call whose argument evaluation relocates the root of its receiver, or
   relocates a local or parameter after an earlier argument that is `&`
   applied to it or to one of its fields;
-- any chained pointer form, including one hidden by an alias;
-- unary `&` applied to a pointer slot or non-place result;
+- unary `&` applied to a non-place result, literal, type, or function symbol;
 - `slot_off` applied to a non-place, such as a literal or function symbol;
 - `construct_at` or `destruct_at` with incorrect arity, a non-pointer or
   read-only pointer operand, or an invalid/incomplete pointee type;
 - `construct_at` with an incompatible initializer or ineligible Advanced source;
 - attempts to overload either lifetime intrinsic or use it as a function value.
+- invalid `raw_storage` element types, zero/nonconstant counts, or layout overflow;
+- `copy` of raw storage, or a `storage_ptr` operand that is not a pointer to it;
+- invalid type operands or value arguments for `size_of`, `align_of`, or `is_basic`.
 
 Useful warnings include:
 
@@ -1702,6 +1812,10 @@ inheriting C defaults:
     value or creating an intermediate by-value parameter. `destruct_at` ends
     a live value with its full cleanup, without deallocating its storage.
     Neither operation changes an aliased root's tracked cleanup state.
+14. Raw storage reserves aligned contiguous slots without constructing `T` or
+    adding element flags. Its transfer carries live payloads; its cleanup never
+    drops them. The owning library controls payload cleanup through its length
+    or tag. Target layout queries and category queries are compile-time constants.
 
 The middle-end makes construction, copy, relocation, activation, deactivation,
 and cleanup explicit before C emission. C assignment and byte copying are
@@ -1716,9 +1830,12 @@ WG21's relocation work:
 
 - [P1144R6, “Object relocation in terms of move plus destroy”](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2022/p1144r6.html)
   analyzes relocation and representation-transfer optimizations.
-- [P2786R12, “Trivial Relocatability For C++26”](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2025/p2786r12.html)
-  describes relocation in terms of ending the source lifetime and beginning
-  the destination lifetime.
+- [P2786R13, “Trivial Relocatability For C++26”](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2025/p2786r13.html)
+  is historical proposal background, not a feature to assume in C++26.
+- [P3920R0, “Wording for NB comment resolution on trivial relocation”](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2025/p3920r0.html)
+  records the November 2025 decision and wording to remove P2786's trivial
+  relocation feature from C++26. HUC's comparison must not present it as an
+  available standard C++ operation.
 - [P2785R3, “Relocation in terms of a relocation constructor”](https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2023/p2785r3.html)
   explores a user-defined relocation constructor—the customization point HUC0
   deliberately defers.

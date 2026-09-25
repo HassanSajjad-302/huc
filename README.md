@@ -23,7 +23,8 @@ unqualified names, not `std::` names; ordinary library APIs remain separate.
 **Basic values are copied; Advanced values are transferred.** Numbers, raw
 pointers, and structures containing only Basic fields with neither `clone()`
 nor `drop()` are Basic. Structures with an Advanced field, `clone()`, or
-`drop()` are Advanced. Use `copy value` for an explicit duplicate;
+`drop()` are Advanced. Built-in `raw_storage<T, N>` is also Advanced, without
+automatic element cleanup. Use `copy value` for an explicit duplicate;
 Advanced structures support this by defining `clone()`.
 
 An Advanced transfer is bitwise relocation, not C++ move construction.
@@ -150,6 +151,17 @@ and its fields without freeing the slot's storage.
 Both infer the type from `mod T*`. Neither changes automatic cleanup state
 through aliases. The programmer supplies valid storage and tracks which
 slots are live. See [manual storage lifetimes](docs/value-semantics.md#92-constructing-and-destroying-values-in-manual-storage).
+
+`raw_storage<T, N>` reserves aligned inline slots without constructing `T`.
+`storage_ptr(&storage)` obtains their typed address; `size_of<T>()` and
+`align_of<T>()` provide target layout constants. A container tracks its live
+elements and cleans them up in `drop`. `is_basic<T>()` lets generic code tell
+a copied Basic source from an extracted Advanced source when retiring slots.
+See [raw storage](docs/value-semantics.md#93-reserving-raw-inline-storage).
+
+Conditional expressions produce values. With Advanced operands,
+`(condition ? a : b).size()` transfers the selected value and destroys the
+temporary after the call. Use `(condition ? &a : &b)->size()` to observe instead.
 
 ## Why HUC
 
