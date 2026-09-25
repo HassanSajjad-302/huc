@@ -139,7 +139,7 @@ fn main() -> i32;
 ```
 
 Program arguments will be exposed through an opaque standard-library value,
-not through a C-style pointer chain. Its API and any alternate entry-point
+not through a C-style pointer representation. Its API and any alternate entry-point
 signature belong to the separate standard-library design.
 
 ### 2.2 Declaration order
@@ -364,19 +364,23 @@ Resource-managing structures use the ordinary Advanced-value rules and
 
 ### 4.4 Pointer layering
 
-HUC0 accepts at most one `*` suffix on a non-pointer base type.
-`T**` is rejected, including equivalent types hidden by aliases.
+HUC accepts any number of `*` suffixes on a pointer type. For example,
+`Widget*`, `Widget**`, and `Widget***` are nullable, non-owning raw-pointer
+types. Each additional suffix points to the storage of the preceding pointer
+type; it does not add ownership or lifetime tracking. Pointer dereferencing is
+unchecked at every level.
 
 The non-overloadable unary operator `&place` returns `T*` for a fixed inline
-`T` place and `mod T*` for a writable inline `T` place. Its operand must be an
-addressable, non-pointer data place. It evaluates the place once without
+`T` place and `mod T*` for a writable inline `T` place. For a pointer slot it
+adds one pointer level, so taking the address of a `Widget*` place produces
+`Widget**`, or `mod Widget**` when the pointer slot is writable. Its operand
+must be an addressable data place. It evaluates the place once without
 copying, relocating, destroying, or extending the lifetime of its value. It
 does not allocate or create a temporary, or change activation or cleanup state.
 Literals, non-place results, types, and function symbols are not valid operands.
 
-`&` rejects raw-pointer slots because their typed addresses would require a
-forbidden composed type. Forming a place through an invalid pointer is not
-made valid by taking its address.
+Forming a place through an invalid pointer is not made valid by taking its
+address.
 Binary `&` remains bitwise AND; `&&` remains logical AND. The parser distinguishes
 prefix and binary `&` by expression position, not by whitespace.
 
@@ -400,7 +404,7 @@ does not load, copy, relocate, or destroy the stored value, allocate or create a
 temporary, extend storage lifetime, or change activation or cleanup state.
 Literals, non-place results, types, and function symbols are not valid operands.
 The returned integer may be passed to an ordinary function and converted to a
-one-level raw pointer using `ptr_as` (section 5.5). `usize` is target-pointer-sized;
+raw pointer using `ptr_as` (section 5.5). `usize` is target-pointer-sized;
 the value is a data-storage address, not a portable serialized address.
 
 Both fixed and writable slots may have their addresses taken this way. The
@@ -413,8 +417,8 @@ not automatically destroy a replaced value or update compiler-maintained
 cleanup state. It does not make inactive storage readable or permit duplicate
 cleanup of a resource.
 
-`slot_off` is an untyped escape hatch, not a typed reference. It does
-not add composed pointer types or change ordinary typed `mod` checks.
+`slot_off` is an untyped escape hatch, not a typed reference. It does not
+change ordinary typed `mod` checks.
 
 Each `mod` keeps its own meaning inside a structure. A fixed structure
 prevents assignment to its fields and mutation of values stored inline in
@@ -596,8 +600,8 @@ ptr_as<T*>(pointer_or_address) // raw pointer or usize address reinterpretation
 ```
 
 `ptr_as` accepts a raw pointer or a `usize` data address and produces the
-specified one-level raw pointer type, including a leading `mod` where spelled.
-It does not produce a composed pointer type. A `usize` obtained
+specified raw pointer type, including a leading `mod` where spelled. It may
+produce a composed pointer type. A `usize` obtained
 from `slot_off(place)` can be converted back to a pointer addressing that
 same storage while the storage remains valid. Targets must support this
 data-address round trip. Arbitrary integer values do not establish valid
@@ -931,9 +935,9 @@ Two non-overloadable HUC0 intrinsics manage these lifetimes:
 
 Both infer `T` from a first operand of type `mod T*`. The pointer binding
 itself may be fixed. `T` must be a complete runtime object type, not `void`
-or `never`. The existing pointer-chain ban still applies: these forms cannot
-address a pointer slot through a forbidden `T**`. There is no additional type
-operand, untyped-address overload, or `std::` spelling.
+or `never`. Pointer slots are valid destinations when the supplied pointer has
+the appropriate pointer-chain type. There is no additional type operand,
+untyped-address overload, or `std::` spelling.
 
 The pointer must be non-null and designate valid, writable storage of
 sufficient size and alignment for `T`, within its allocation's lifetime.
@@ -2183,7 +2187,7 @@ An `extern "C"` function may use:
 
 - built-in arithmetic types with documented target mappings;
 - `void` as a return type;
-- one-level raw pointers to built-in types.
+- raw pointers, including pointer chains, to built-in types.
 
 It must not expose HUC Advanced values with `drop`, phase-1/2 types, or
 compiler metadata. Resource management across C boundaries is expressed by
@@ -2191,9 +2195,9 @@ documented functions returning or accepting raw pointers or scalar handles.
 Copying or passing a raw pointer does not itself establish or release any
 cleanup obligation.
 
-C-layout structure attributes, opaque foreign handle declarations, pointer
-chains, and C variadics are deferred from 0.1. A small C shim can flatten such
-an interface to the supported scalar and one-level-pointer boundary.
+C-layout structure attributes, opaque foreign handle declarations, and C
+variadics are deferred from 0.1. A small C shim can flatten such an interface
+to the supported scalar and pointer boundary.
 
 The bootstrap compiler emits ISO C17 with explicit HUC construction,
 relocation, and cleanup. Generated C is an implementation technique, not a

@@ -218,14 +218,15 @@ HUC performs no lifetime tracking between a raw pointer and its pointee.
 ### 5.3 Address-taking and storage
 
 General aliasing-reference types do not exist. HUC0 has only the raw-pointer
-type constructor `T*`; `T**` and equivalent alias-hidden forms are
-diagnostics.
+type constructor `T*`; the constructor composes, so `T**` and longer pointer
+chains are valid non-owning types.
 
 The non-overloadable unary `&place` produces `T*` for a fixed inline
 `T` place and `mod T*` for a writable inline `T` place. It evaluates
-its addressable non-pointer operand once without creating a temporary,
-transferring a value, extending a lifetime, or changing cleanup state. It
-rejects pointer slots, non-place results, literals, types, and function symbols.
+its addressable operand once without creating a temporary, transferring a
+value, extending a lifetime, or changing cleanup state. It adds one pointer
+level for pointer slots and rejects non-place results, literals, types, and
+function symbols.
 Binary `&` remains bitwise AND.
 
 The non-overloadable `slot_off(place) -> usize` intrinsic separately exposes
@@ -233,7 +234,8 @@ the untyped address of any addressable data slot, including raw-pointer slots.
 It evaluates the place once without loading or transferring its value and
 does not extend storage lifetime or update cleanup state. Fixed slots are
 accepted, but rvalues are not materialized. `usize` is target-pointer-sized;
-`ptr_as<T*>(address)` can reconstruct a one-level raw pointer. Byte views
+`ptr_as<T*>(address)` can reconstruct a raw pointer, including a pointer-chain
+type. Byte views
 use `u8*` or `c8*`; the integer does not make incompatible typed access valid.
 
 Mutation permissions are not tracked through the integer and cast. The
@@ -396,7 +398,8 @@ syntax. Infer the concrete `T` from a `mod T*` operand; do not add a type
 argument, constructor-argument pack, or overload accepting an untyped address.
 `construct_at` takes exactly two operands and returns the same `mod T*`;
 `destruct_at` takes one and returns `void`. The pointer binding may be fixed,
-but the pointee type must be complete and writable. `T**` remains disallowed.
+but the pointee type must be complete and writable. Pointer-chain pointee
+types are allowed when the destination storage is valid and writable.
 
 Evaluate the destination pointer once before the initializer. Check the
 initializer as for a local of type `T`, without introducing a by-value `T`
@@ -1095,7 +1098,7 @@ Implement:
 - method receiver permissions;
 - constructor obligation checking;
 - `extern "C"` signatures limited to built-in scalars, `void` returns, and
-  one-level raw pointers to built-in types, with no structure, array,
+  raw pointers, including pointer chains, to built-in types, with no structure, array,
   phase type, or variadic boundary;
 - overload resolution using only specified built-in conversions;
 - no user-defined implicit conversions.
@@ -1477,7 +1480,7 @@ Include:
 - multiple residual declarations from `let1`;
 - resource-limit exhaustion;
 - numbered syntax emitted into HUC0.
-- invalid C-linkage structures, arrays, phase types, pointer chains,
+- invalid C-linkage structures, arrays, and phase types,
   opaque handles, or variadics.
 
 ### 13.4 Execute tests

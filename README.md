@@ -13,9 +13,9 @@ Its two central ideas are:
 - A small value model: Basic values copy, Advanced values transfer, and raw
   `T*` pointers observe without extending lifetimes.
 
-HUC has no general reference type. `T*` is the only pointer-like form, and
-pointer chains such as `T**` are invalid. Use unary `&value` to get a
-non-owning pointer to an inline value. It cannot be overloaded. The unchecked
+HUC has no general reference type. `T*`, `T**`, and longer pointer chains are
+non-owning raw-pointer types. Use unary `&value` to get a non-owning pointer
+to an inline value or storage slot. It cannot be overloaded. The unchecked
 `slot_off(place)` intrinsic instead returns the address of a storage slot as
 a `usize` integer and also accepts raw-pointer slots. HUC intrinsics use
 unqualified names, not `std::` names; ordinary library APIs remain separate.

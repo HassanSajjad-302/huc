@@ -255,10 +255,10 @@ compiler-for-statement-1
 
 (* ---------- Types ---------- *)
 
-type-0            = [ "mod" ], type-primary-0, [ "*" ] ;
+type-0            = [ "mod" ], type-primary-0, { "*" } ;
 type-primary-0    = builtin-type | symbol-path ;
 
-type-1            = [ "mod" ], type-primary-1, [ "*" ] ;
+type-1            = [ "mod" ], type-primary-1, { "*" } ;
 type-primary-1    = builtin-type
                   | symbol-path, [ phase-argument-list ] ;
 
@@ -267,8 +267,8 @@ builtin-type      = "bool" | "c8"
                   | "u8" | "u16" | "u32" | "u64" | "usize"
                   | "f32" | "f64" | "void" | "never" ;
 
-(* A type may end in one optional * suffix. The type-primary rules do
-   not include a suffix, so T** cannot be parsed.
+(* A type may end in any number of * suffixes. The type-primary rules do
+   not include a suffix, so pointer chains are parsed as repeated suffixes.
    & is not a type suffix; it remains an expression operator.
    Named HUC0 types never have phase arguments. *)
 

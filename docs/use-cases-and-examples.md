@@ -245,9 +245,9 @@ fn inline_address_example() -> i32 {
 
 Unary `&` preserves pointee permission, so a fixed `Counter` would produce
 `Counter*` and the writable `counter` above produces `mod Counter*`.
-Unary `&` rejects pointer slots because their typed addresses would
-require one of the forbidden composed pointer types. Prefix `&` takes an
-address; binary `&` remains bitwise AND. Neither operation depends on spacing.
+Unary `&` adds one pointer level when applied to a pointer slot. Prefix `&`
+takes an address; binary `&` remains bitwise AND. Neither operation depends on
+spacing.
 
 Untyped slot addresses are a separate, unchecked facility:
 
@@ -266,7 +266,8 @@ An ordinary function can receive `address`, but it receives no typed slot
 reference or automatic lifecycle handling. Taking a fixed slot's address is
 also permitted; writing actually fixed storage remains undefined behavior.
 The caller is responsible for storage lifetime, alignment, valid access, and
-cleanup. This does not make pointer chains valid.
+cleanup. Pointer chains remain ordinary non-owning pointer types; this does
+not add ownership or automatic cleanup.
 
 Copying a raw pointer leaves its source unchanged, including when null. It
 does not transfer or extend the pointee's lifetime.

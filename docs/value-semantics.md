@@ -40,10 +40,12 @@ let value: Widget = Widget(7);
 let observer: Widget* = &value;
 ```
 
-Pointer chains such as `T**` are not HUC0 types, including through aliases.
-Unary `&` accepts an addressable inline non-pointer place: it returns
+Pointer chains such as `T**` are ordinary HUC0 raw-pointer types. Each `*`
+adds another non-owning level; no level adds ownership or lifetime tracking.
+Unary `&` accepts an addressable place: it returns
 `T*` for a fixed place and `mod T*` for a writable place. Applying it to a
-raw-pointer slot is a compile-time error. Its operand is evaluated once
+pointer slot adds one pointer level, so `&p` where `p` has type `T*` produces
+`T**` (or `mod T**` for a writable slot). Its operand is evaluated once
 without transferring a value, creating a temporary, extending storage
 lifetime, or changing cleanup state. Binary `&` remains bitwise AND.
 
@@ -55,7 +57,7 @@ without loading or transferring its value. It does not clone, destroy,
 allocate, extend a lifetime, or change cleanup state.
 
 An ordinary function may receive this integer and reconstruct a raw pointer
-with `ptr_as<T*>(address)`. This gives low-level access to the stored bytes,
+with `ptr_as<T*>(address)`, including a pointer-chain type. This gives low-level access to the stored bytes,
 not a new reference type or permission to use inactive storage. Byte access
 through `u8*` or `c8*` does not itself perform lifetime operations or
 establish another valid cleanup obligation for a resource.
@@ -1209,8 +1211,8 @@ tracked as Inactive does not make that name active again. That value must
 be accessed and cleaned up through manual-storage operations. The same rule
 applies to fields: these operations do not disable automatic field cleanup.
 
-Both intrinsics require a writable typed pointer. The current `T**` ban means
-they cannot directly address a raw-pointer slot. Their names are unqualified,
+Both intrinsics require a writable typed pointer. They can directly address
+raw-pointer slots when given the corresponding pointer-chain type. Their names are unqualified,
 cannot be overloaded, and cannot be used as function values. See
 [language specification section 6.7](language-specification.md#67-manually-managed-storage)
 for the full contract.

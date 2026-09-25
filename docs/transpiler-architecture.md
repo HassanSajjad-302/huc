@@ -341,9 +341,9 @@ typedef enum HucTokenKind {
 `Ampersand` produces an address-of node in prefix expression position and
 bitwise AND in infix position; it is not a type suffix. Operator roles do not
 depend on whitespace. No C++-reference AST node exists. HUC0 has
-one pointer-like form: a terminal `T*` raw-pointer suffix. The type parser
-diagnoses `T**` immediately; canonical-type validation catches equivalent
-forms exposed through aliases.
+one pointer-like form: a repeatable `T*` raw-pointer suffix. The type parser
+accepts pointer chains directly; canonical-type validation preserves each
+level of indirection through aliases.
 
 ### 5.3 Parser
 
@@ -547,18 +547,18 @@ permissions. HUC has no `const` type qualifier: fixedness and `mod` are
 represented on the correct value, pointer-slot, and pointee layers, never
 inferred from emitted C declarator strings.
 
-Canonicalization rejects a raw-pointer node whose pointee is itself a raw
-pointer. Unary `&` accepts an addressable inline non-pointer place,
-preserves its mutation permissions, and lowers to an address calculation.
-Evaluate the place once; do not materialize a temporary, transfer its value,
-extend its lifetime, or update cleanup state. Reject pointer slots and
-non-place operands, including function symbols.
+Canonicalization preserves raw-pointer nodes at every indirection level.
+Unary `&` accepts an addressable place, preserves its mutation permissions,
+and lowers to an address calculation. Evaluate the place once; do not
+materialize a temporary, transfer its value, extend its lifetime, or update
+cleanup state. Reject non-place operands, including function symbols.
 
 `slot_off` accepts any addressable data place, including a raw-pointer
 slot, and lowers to its address converted to `usize`. It does not load the
 value or invoke relocation or cleanup. Reject non-place operands rather than
 materializing temporaries. An explicit `ptr_as` from `usize` reconstructs
-a one-level raw pointer; it never synthesizes a composed pointer type.
+a raw pointer, including a composed pointer type; it never changes the
+pointer's ownership or lifetime meaning.
 Permissions and lifetime preconditions remain the caller's responsibility;
 the integer carries no permission or liveness metadata. Escape and alias
 analysis must account for the exposed address.
@@ -645,9 +645,9 @@ filter candidates but never rank them.
 
 An `extern "C"` signature is accepted only when every parameter and result
 lowers through the target's documented C ABI mapping. HUC0 permits built-in
-arithmetic scalars, `void` results, and one-level raw pointers to built-in
-types. It rejects structures, fixed arrays, Advanced/drop types, phase
-types, compiler metadata, pointer chains, opaque foreign handles, and
+arithmetic scalars, `void` results, and raw pointers, including pointer chains,
+to built-in types. It rejects structures, fixed arrays, Advanced/drop types, phase
+types, compiler metadata, opaque foreign handles, and
 variadics. Aliases are checked after canonicalization so they cannot hide a
 forbidden boundary type.
 
@@ -1344,8 +1344,8 @@ in reverse order. Raw-pointer fields receive no pointee cleanup. Explicit
 allocation or release of resources in user code remains part of that code's
 library or external-call contract.
 
-Generated helper parameters may use C pointer chains internally; this does
-not add pointer-chain types to HUC.
+Generated helper parameters may use C pointer chains internally; these have
+the same non-owning representation as HUC pointer chains.
 
 ### 13.2 Operation mapping
 
