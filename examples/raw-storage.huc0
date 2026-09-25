@@ -1,0 +1,102 @@
+module examples.raw_storage;
+
+// A self-contained lifetime example: main returns 0 when the checks pass.
+let mod drop_order: i32;
+
+struct Probe {
+    let id: i32;
+
+    fn init(id: i32) : id(id) {
+    }
+
+    fn drop() mod -> void {
+        drop_order = drop_order * 10 + this->id;
+    }
+}
+
+struct InlineProbes {
+    let mod storage: raw_storage<Probe, 2>;
+    let mod length: usize;
+
+    fn init() {
+        // No Probe is constructed. length starts at zero.
+    }
+
+    // Precondition: length < 2. The parameter is consumed by this call.
+    fn push(mod value: Probe) mod -> void {
+        let slots: mod Probe* = storage_ptr(&this->storage);
+        construct_at(slots + this->length, value);
+        this->length += 1;
+    }
+
+    // Precondition: length > 0.
+    fn pop() mod -> Probe {
+        let last: usize = this->length - 1;
+        let mod result: Probe = *(storage_ptr(&this->storage) + last);
+        this->length = last; // exclude the inactive source slot
+        return result;
+    }
+
+    fn drop() mod -> void {
+        let slots: mod Probe* = storage_ptr(&this->storage);
+        while (this->length > 0) {
+            this->length -= 1;
+            destruct_at(slots + this->length);
+        }
+        // Automatic raw-storage field cleanup performs no Probe drops.
+    }
+}
+
+fn main() -> i32 {
+    if (size_of<raw_storage<Probe, 2>>() != 2 * size_of<Probe>()) {
+        return 1;
+    }
+    if (align_of<raw_storage<Probe, 2>>() != align_of<Probe>()) {
+        return 2;
+    }
+    if (!is_basic<i32>() || is_basic<Probe>() || is_basic<raw_storage<i32, 1>>()) {
+        return 3;
+    }
+
+    {
+        let mod buffer: InlineProbes = InlineProbes();
+        buffer.push(Probe(1));
+        buffer.push(Probe(2));
+        let removed: Probe = buffer.pop();
+        if (removed.id != 2 || drop_order != 0) {
+            return 4;
+        }
+        let relocated: InlineProbes = buffer;
+        // No cached self-pointer: element addresses are recomputed after moving.
+        if (relocated.length != 1) {
+            return 5;
+        }
+    } // relocated drops 1, then removed drops 2; buffer is inactive
+    if (drop_order != 12) {
+        return 6;
+    }
+
+    drop_order = 0;
+    {
+        let mod buffer: InlineProbes = InlineProbes();
+        buffer.push(Probe(3));
+        buffer.push(Probe(4));
+    } // reverse initialized-range cleanup: 4, then 3
+    if (drop_order != 43) {
+        return 7;
+    }
+
+    {
+        let mod numbers: raw_storage<i32, 1> = raw_storage<i32, 1>();
+        let slot: mod i32* = storage_ptr(&numbers);
+        construct_at(slot, 10);
+        let old: i32 = *slot; // Basic copy: source remains live
+        destruct_at(slot); // retire it before construction reuses the slot
+        construct_at(slot, 20);
+        if (old != 10 || *slot != 20) {
+            return 8;
+        }
+        destruct_at(slot);
+    }
+    return 0;
+}
