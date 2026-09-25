@@ -108,14 +108,29 @@ fn receive(buffer: NativeBuffer) -> u8 {
 // The caller must destroy only the remaining initialized prefix afterward.
 // Pointer extraction does not cancel automatic cleanup through aliases.
 // Do not use this helper on an automatic local and then let that inactive
-// local be destroyed. Raw-storage construction/destruction APIs are deferred,
-// so main does not allocate backing storage for this helper yet.
+// local be destroyed. Backing allocation is a separate container operation;
+// main demonstrates manual lifetimes in existing stack storage instead.
 fn pop_last_buffer(data: mod NativeBuffer*, length: mod usize*) -> NativeBuffer {
     let last: usize = *length - 1;
     let mod result: NativeBuffer = *(data + last);
     // The old slot is inactive. Extraction neither clears it nor changes data.
     *length = last;
     return result; // direct local transfer suppresses result's cleanup here
+}
+
+// Preconditions: the live prefix has *length elements, a spare inactive slot
+// follows it, and length points to separate writable bookkeeping.
+fn push_buffer(data: mod NativeBuffer*, length: mod usize*, mod buffer: NativeBuffer) -> void {
+    construct_at(data + *length, buffer);
+    *length += 1;
+}
+
+// The caller owns cleanup of exactly this live prefix; allocation is unchanged.
+fn clear_buffers(data: mod NativeBuffer*, length: mod usize*) -> void {
+    while (*length > 0) {
+        *length -= 1;
+        destruct_at(data + *length);
+    }
 }
 
 fn demonstrate_copy_values() -> void {
@@ -200,6 +215,33 @@ fn demonstrate_temporary_lifetimes() -> void {
     io::println(temporary_drop_order); // 34
 }
 
+fn demonstrate_manual_lifetimes() -> void {
+    temporary_drop_order = 0;
+    {
+        let mod storage: TemporaryProbe = TemporaryProbe(1);
+        let original: TemporaryProbe = storage;
+        // storage is tracked as Inactive. slot_off can still expose its storage.
+        let slot: mod TemporaryProbe* =
+            ptr_as<mod TemporaryProbe*>(slot_off(storage));
+
+        let initialized: mod TemporaryProbe* = construct_at(slot, TemporaryProbe(2));
+        let mod extracted: TemporaryProbe = *initialized;
+        construct_at(slot, extracted); // extracted becomes Inactive
+        destruct_at(slot); // drops 2; does not free the stack storage
+        // No automatic cleanup was registered for storage's manually built value.
+    } // original drops 1; neither storage nor extracted receives automatic cleanup
+    io::println(temporary_drop_order); // 21
+
+    temporary_drop_order = 0;
+    {
+        let mod automatic: TemporaryProbe = TemporaryProbe(3);
+        let slot: mod TemporaryProbe* = &automatic;
+        destruct_at(slot); // drops 3; automatic's tracked state is unchanged
+        construct_at(slot, TemporaryProbe(4)); // restore the slot before cleanup
+    } // the still-scheduled automatic cleanup drops 4
+    io::println(temporary_drop_order); // 34
+}
+
 fn main() -> i32 {
     demonstrate_copy_values();
     demonstrate_inline_relocation();
@@ -207,5 +249,6 @@ fn main() -> i32 {
     demonstrate_advanced_fields();
     demonstrate_address_stability();
     demonstrate_temporary_lifetimes();
+    demonstrate_manual_lifetimes();
     return 0;
 }

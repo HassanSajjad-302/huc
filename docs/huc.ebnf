@@ -436,9 +436,13 @@ binary-op         = "||" | "&&"
    associativity are those specified by the Pratt-parser table in the
    implementation and language specification. Unary & takes an eligible
    inline place's typed address; binary & remains bitwise AND.
-   slot_off(place) is a compiler-known, non-overloadable ordinary call form
-   with an unqualified name. Semantic analysis checks its arity and operand.
-   It returns usize without transferring a value. ptr_as sources must be
+   slot_off(place), construct_at(pointer, value), and destruct_at(pointer)
+   are compiler-known, non-overloadable ordinary call forms with unqualified
+   names. Semantic analysis checks their arity and operands. construct_at
+   infers T from mod T*, treats value as an initializer for that slot rather
+   than a by-value parameter, and returns mod T*. destruct_at requires mod T*
+   and returns void. They have no angle-delimited type operand.
+   slot_off returns usize without transferring a value. ptr_as sources must be
    raw pointers or usize values. *)
 
 literal           = integer-literal

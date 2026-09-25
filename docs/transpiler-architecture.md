@@ -374,9 +374,10 @@ flow parses braced bodies, with an `else if` alternative for chained
 conditionals; phase-control bodies still use the deferred-body scanner.
 Do not retain the old declaration order or `T&` as compatibility spellings.
 
-`slot_off(place)` uses ordinary call syntax with a compiler-known,
-non-overloadable, unqualified name. Resolve it as an intrinsic, not a
-`std::` library call. Only `as` and `ptr_as` use the HUC0
+`slot_off(place)`, `construct_at(pointer, value)`, and `destruct_at(pointer)`
+use ordinary call syntax with compiler-known, non-overloadable, unqualified
+names. Resolve them as intrinsics, not `std::` library calls. Only `as` and
+`ptr_as` use the HUC0
 type-operand call production. The old named address-taking intrinsic is
 replaced by unary `&`.
 
@@ -581,6 +582,18 @@ Each concrete type records:
 - phase class;
 - a stable structural fingerprint for caches.
 
+`construct_at` requires exactly two operands and `destruct_at` one. Infer a
+complete runtime object type `T` from `mod T*`; reject read-only/non-pointer
+operands, invalid pointee types, and first-class or overload declarations for
+these intrinsics. Preserve the pointer-chain restriction. Neither operation
+has a HUC0 angle-delimited type operand.
+
+Type-check the second operand of `construct_at` as an initializer for `T`,
+not as an ordinary call parameter. Apply normal built-in conversions,
+Basic/Advanced classification, source permissions, and relocation-state
+checks. Its result is `mod T*`; `destruct_at` returns `void`. Storage lifetime,
+capacity, alignment, and active/inactive preconditions are unchecked.
+
 ### 6.3 HUC1 phase checking
 
 Every expression receives:
@@ -684,6 +697,8 @@ SlotAddress(place)
 PointerFromAddress(address, raw_pointer_type)
 Clone(value)
 ConstructInPlace(destination, constructor, arguments)
+InitializeAt(pointer, initializer)
+DestructAt(pointer)
 Call(function, arguments)
 ```
 
@@ -719,10 +734,14 @@ Preserve this distinction through inlining and other optimizations.
 
 Indirect destinations may be replaced when their validity and activity
 preconditions hold; the restriction above concerns sources. Containers manage
-their backing storage and initialized element ranges explicitly. The only
-additional raw-storage lifetime intrinsics planned are `construct_at` and
-`destruct_at`; their interfaces and lowering will be designed later,
-without adding user-overloadable relocation hooks.
+their backing storage and initialized element ranges explicitly.
+`InitializeAt` represents `construct_at`: evaluate the pointer once, then
+initialize its slot from the second operand using `Copy`, `Clone`, `Relocate`,
+or destination construction. Return the retained pointer. Do not create a
+by-value initializer parameter or drop an old destination. `DestructAt`
+performs complete destruction at a retained pointer, without deallocation.
+Both leave automatic cleanup state of aliased roots unchanged. A directly
+tracked source consumed by `Relocate` still updates its own state normally.
 
 ## 8. Compile-time evaluator
 
@@ -1089,6 +1108,15 @@ return place, so a structure result is constructed there rather than returned
 through an observable temporary. `Drop` makes its place inactive. These state transitions are MIR semantics, not optional annotations
 for the backend.
 
+Lower `InitializeAt` to initialization in the retained indirect destination,
+using the existing value operations but without registering automatic cleanup
+for that slot. Lower `DestructAt` to `Drop` of an indirect manual place with
+its required-live precondition. Do not consult or update aliased root flags,
+even for `&local`; preserve that cleanup mode through inlining. Basic
+destruction needs no runtime call but ends the pointee lifetime in HUC.
+Neither operation adds allocation/deallocation or source/pointer-clearing
+code. Invalid runtime preconditions are not required to be checked.
+
 ## 12. Lifetime and drop elaboration
 
 ### 12.1 Place state
@@ -1127,8 +1155,8 @@ argument evaluation, including in a nested expression, in two cases. The
 first is when the root is the root of the call's receiver place. The second
 is when an earlier argument of that call is an `AddressOf` of the root or of
 one of its fields. An address formed inside an earlier argument that does
-not itself become an argument does not count. Constructor expressions and
-initializer entries count as calls. Receiver roots, destination roots, and
+not itself become an argument does not count. Constructor expressions,
+intrinsic calls, and initializer entries count as calls. Receiver roots, destination roots, and
 earlier `AddressOf` arguments are recognized as specification section 6.12
 describes.
 HIR records the source spellings needed for this: parentheses, field
@@ -1327,6 +1355,8 @@ not add pointer-chain types to HUC.
 | `&value` | Address of the corresponding typed storage place |
 | `slot_off(place)` | the slot's data-storage address converted to target `usize` |
 | `ptr_as<T*>(address)` for `usize` | target-supported integer-to-data-pointer reconstruction |
+| `construct_at(pointer, value)` | Initialize the retained indirect slot using the usual value operation, with no old-value drop or automatic cleanup registration; yield its address |
+| `destruct_at(pointer)` | Complete drop/field cleanup at the retained address without freeing the slot or updating aliased root flags |
 | Advanced relocation | Transfer the whole representation without source clearing; update tracked root state, or leave indirect source cleanup to the programmer |
 | `copy value` for an Advanced type | Call the resolved clone function into a fresh result place |
 | Destruction | Call user `drop`, then reverse field cleanup, only for active values |
@@ -1663,6 +1693,8 @@ symbol hashes must be identical across processes for identical inputs.
 - rejection of incompatible pointer types and added pointee `mod`;
 
 - unqualified intrinsic resolution, with no former-spelling compatibility aliases;
+- lifetime-intrinsic arity, writable-pointer inference, initializer checking,
+  result types, and rejection of first-class or overloaded uses;
 - overload ranking;
 - C-linkage signature acceptance and rejection;
 - phase availability;
@@ -1702,6 +1734,10 @@ Temporary-lifetime goldens must distinguish full-expression cleanup from
 parameter and local cleanup. Check that condition results and return values
 are retained before cleanup and that generated helper statements do not end
 HUC temporary lifetimes early.
+Manual-storage goldens must show pointer-before-initializer sequencing, direct
+construction at the supplied address, and complete manual destruction without
+deallocation. Verify that direct Advanced sources become Inactive but aliased
+destination roots keep their existing tracked state.
 
 ### 17.3 Execute tests
 
@@ -1726,6 +1762,11 @@ Compile and run small programs that record:
   updates, including a pop-style return with exactly one destination cleanup;
 - extraction through a fixed `mod T*` binding without changing its address;
 - Basic pointee copying and explicit pointee cloning leaving sources active;
+- `construct_at` from Basic, Advanced, explicit-copy, constructor, and function
+  result initializers, with each operand evaluated once and no hidden clone;
+- construct/extract/reconstruct/destruct cycles, final constructor addresses,
+  manual reverse field cleanup, and reuse of the allocation afterward;
+- unchanged root cleanup state when either intrinsic operates through an alias;
 
 - exact self-relocation behavior;
 - destruction order;

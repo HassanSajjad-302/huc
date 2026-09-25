@@ -26,6 +26,7 @@ The following syntax and behavior describe language rules, not library proposals
 - inline values and raw `T*` pointers;
 - unary `&` for inline-place observation;
 - `slot_off` for unchecked, untyped slot addresses;
+- `construct_at` and `destruct_at` for manually managed value lifetimes;
 - `fn`, `fn1`, and `fn2`;
 - `struct`, `struct1`, and `struct2`;
 - `if1`, `for1`, and `while1`;
@@ -710,9 +711,11 @@ Advanced moves from fields or array indexing remain rejected; the explicit
 pointer form leaves source cleanup to the programmer instead of tracking
 partial lifetimes.
 
-The planned `construct_at` and `destruct_at` interfaces will be designed
-separately. In particular, ordinary indirect assignment assumes a live
-destination, so it cannot construct a new value in the extracted slot.
+Use `construct_at(pointer, value)` to initialize an extracted or otherwise
+inactive slot, and `destruct_at(pointer)` to destroy a live element without
+freeing its backing storage. Both require `mod T*` and leave container
+bookkeeping to the programmer. Ordinary indirect assignment instead assumes
+a live destination and destroys its old value before replacement.
 
 A future custom relocation hook should be considered only if real
 address-repair cases justify changing the fixed-transfer model.
@@ -977,9 +980,9 @@ The standard-library API is not settled, but the intended value behavior is:
 
 The illustrative result-extraction methods must manage their initialized
 payload state explicitly. Pointer extraction can transfer a manually managed
-payload, but it does not disable automatic field cleanup. Payload construction
-and destruction still depend on the separately planned manual-storage lifetime
-operations; direct moves from Advanced fields remain rejected.
+payload, but it does not disable automatic field cleanup. `construct_at` and
+`destruct_at` provide payload lifetime operations; allocation and representation
+remain library design choices. Direct moves from Advanced fields remain rejected.
 
 ## 4. HUC1 control-flow examples
 

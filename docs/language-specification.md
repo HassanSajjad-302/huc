@@ -264,14 +264,15 @@ uses them; line breaks do not replace them.
 ### 3.4 Core intrinsic names
 
 HUC intrinsics use unqualified compiler-known names, not `std::` names.
-`slot_off(place)` uses ordinary call syntax but cannot be overloaded or used
-as a first-class function value. Semantic analysis checks its operand and
-argument count. `as<T>` and `ptr_as<T*>` retain their explicit type operands.
+`slot_off(place)`, `construct_at(pointer, value)`, and `destruct_at(pointer)`
+use ordinary call syntax but cannot be overloaded or used as first-class
+function values. Semantic analysis checks their operands and argument counts.
+`as<T>` and `ptr_as<T*>` retain their explicit type operands.
 
 Address-taking uses unary `&`, not a named intrinsic call. The former
 `addressof` and `std::slot_of` spellings are not aliases for
-the new operations. The planned `construct_at` and `destruct_at` also have
-unqualified names; their interfaces and lifetime rules remain deferred.
+the new operations. Section 6.7 specifies the manual-storage lifetime
+operations `construct_at` and `destruct_at`.
 
 ## 4. Type system
 
@@ -456,8 +457,9 @@ inheritance, or virtual dispatch.
 Construction selects an unnumbered `fn init(...)`. A constructor expression
 `T(arguments)` constructs directly in the destination when it directly
 initializes a local, a constructor field entry, a by-value parameter, or a
-`return` result. No temporary `T` exists and no destructive relocation occurs in
-these contexts. This guaranteed destination construction lets `init` observe
+`return` result, or is the value operand of `construct_at`. No temporary `T`
+exists and no destructive relocation occurs in these contexts. This
+guaranteed destination construction lets `init` observe
 the final `this` address; it is not optional backend copy elision. The C17
 backend may use explicit destination pointers to preserve this guarantee.
 
@@ -621,7 +623,8 @@ Advanced value is supplied to a destination that stores that value:
 - assignment;
 - argument binding to a by-value parameter;
 - return-value binding;
-- aggregate initialization.
+- aggregate initialization;
+- manual-storage initialization with `construct_at`.
 
 Taking a value's address or calling a method does not transfer it. To observe
 an inline value through a raw-pointer parameter, pass `&value` explicitly.
@@ -739,7 +742,7 @@ a new live value before pending cleanup reaches it. Ordinary assignment
 through a pointer assumes a live destination and cannot be used to construct
 into an inactive slot: it would first destroy the old value. Assignment to a
 named local whose cleanup state was not updated has the same problem.
-Construction into inactive manual storage is a separate operation.
+Use `construct_at` to initialize inactive manual storage (section 6.7).
 
 Direct relocation from `value.field`, `pointer->field`, or `array[index]`
 remains rejected. HUC does not track partially inactive aggregates. Explicitly
@@ -750,10 +753,10 @@ binding of a Basic pointee copies it instead of ending its lifetime.
 
 Either eligible source form may replace a valid indirect destination. If
 source and destination may alias, exact storage identity is checked before
-destruction; exact self-relocation remains a no-op. The only deferred
-raw-storage lifetime intrinsics are `construct_at` and `destruct_at`, with
-interfaces and detailed semantics to be designed later. Pointer extraction
-uses ordinary dereference syntax and needs no separate intrinsic.
+destruction; exact self-relocation remains a no-op. `construct_at` initializes
+inactive storage and `destruct_at` destroys a live value there (section 6.7).
+Pointer extraction uses ordinary dereference syntax and needs no separate
+intrinsic.
 
 Inline values whose correctness depends on a stable address are an unchecked
 boundary of this model. For example, destructive relocation does not repair a
@@ -810,6 +813,10 @@ Each evaluation of a loop condition or step has its own boundary. The field
 rule covers both declaration initializers evaluated during construction and
 explicit constructor initializer entries. All arguments of one entry belong
 to that entry's full expression; the field itself is not a temporary.
+`construct_at` initializes its supplied destination, not an intermediate
+temporary. Its helper temporaries belong to the enclosing full expression,
+as for other call operands. The constructed value is not automatically
+destroyed when that expression ends.
 
 Parentheses, nested calls, individual arguments, and operands of `&&`, `||`,
 and `?:` do not introduce earlier boundaries. Temporaries from evaluated
@@ -915,9 +922,127 @@ the programmer-managed cleanup rules in section 6.4. The old slot is inactive,
 not an empty live value, and must be excluded from destruction until a new
 value is constructed there. This operation does not deallocate the storage.
 
-The planned `construct_at` and `destruct_at` operations will address object
-lifetimes in manually managed storage. Their interfaces remain deferred.
-HUC 0.1 has no built-in allocating constructor expression.
+Two non-overloadable HUC0 intrinsics manage these lifetimes:
+
+| Expression | Required state of the destination/pointee | Result |
+|---|---|---|
+| `construct_at(pointer, value)` | Inactive storage suitable for `T` | The same address as a `mod T*`, now pointing to a live `T` |
+| `destruct_at(pointer)` | A live `T` | `void`; the slot becomes inactive |
+
+Both infer `T` from a first operand of type `mod T*`. The pointer binding
+itself may be fixed. `T` must be a complete runtime object type, not `void`
+or `never`. The existing pointer-chain ban still applies: these forms cannot
+address a pointer slot through a forbidden `T**`. There is no additional type
+operand, untyped-address overload, or `std::` spelling.
+
+The pointer must be non-null and designate valid, writable storage of
+sufficient size and alignment for `T`, within its allocation's lifetime.
+A cast alone does not establish these conditions or end a previous value's
+lifetime. Neither intrinsic allocates or deallocates the destination storage,
+changes the pointer address, or adds automatic cleanup registration. A
+constructor or `drop` body may of course manage resources of its own.
+
+#### 6.7.1 Construction in supplied storage
+
+`construct_at(pointer, value)` has exactly two operands. It evaluates the
+pointer expression once, then initializes the designated slot from the value
+expression, evaluated once. The second operand is an **initializer**, not an
+ordinary by-value parameter that would first receive its own `T`.
+
+Type checking and initialization follow the same rules as `let local: T = value`:
+
+- a Basic value is copied and its source remains active;
+- an eligible Advanced source is relocated, with the usual `mod` and source
+  cleanup rules; `copy source` explicitly requests cloning;
+- a direct `T(arguments)` expression constructs in the supplied slot, so
+  `init` observes its final address. A direct function-result initializer
+  likewise uses that slot as its result destination under the existing
+  result-placement rules.
+
+No old value is destroyed. The slot must be inactive when initialization
+begins and is live after initialization completes normally. The intrinsic
+then returns the destination pointer. It does not initialize a placeholder,
+call `clone` implicitly, or clear a relocated source. A constructor call has
+the usual argument binding and evaluation order. Other helper temporaries
+follow section 6.5.1; no extra expression boundary is introduced.
+
+Examples, each assuming `slot` is inactive before the call:
+
+```huc
+construct_at(slot, File(handle)); // direct construction in slot
+construct_at(slot, existing); // Advanced transfer; existing requires binding mod
+construct_at(slot, copy existing); // explicit clone into new storage
+construct_at(number_slot, 42); // Basic initialization; number_slot is mod i32*
+```
+
+Use an explicit initializer: `construct_at(slot, T())` for a default
+structure constructor, or a value such as `0` for a scalar. There is no
+one-operand default-construction form or constructor-argument pack overload.
+
+Constructing over a live value is undefined behavior, not replacement.
+Unlike assignment, construction has no self-relocation no-op: the source
+must be live and the destination inactive, so they cannot be the same slot.
+Overlapping source and destination storage is also invalid.
+
+#### 6.7.2 Destruction without deallocation
+
+`destruct_at(pointer)` has exactly one operand and evaluates it once. It
+performs the same destruction as automatic cleanup: run `T.drop`, if any,
+then destroy inline fields in reverse declaration order. The slot becomes
+inactive after destruction completes normally. Destroying a Basic value
+invokes no user code but still ends that value's lifetime.
+
+This is not a direct source-language call to `drop`; direct calls to that
+method remain rejected. The intrinsic performs the complete cleanup,
+including fields. It neither frees the slot's storage nor promises to clear
+its bytes or null the supplied pointer. It returns `void`.
+
+Destroying a null, uninitialized, already destroyed, or extracted slot is
+undefined behavior. Repeated destruction is not a no-op. `construct_at` can
+start a new lifetime in that slot before a later destruction.
+
+#### 6.7.3 Automatic cleanup and unchecked aliases
+
+Both intrinsics operate through raw pointers. Neither changes an aliased
+local's tracked state or the automatic cleanup of an enclosing object,
+even for a directly written `&local`. This is the same boundary as pointer
+extraction; inlining does not change it.
+
+- After `destruct_at(&local)`, the caller must construct a new live value
+  before automatic cleanup or any other value access reaches that slot.
+  Ordinary assignment still tries to destroy the old value and is not a
+  substitute for `construct_at` here.
+- Constructing through a pointer into a root already tracked as Inactive
+  does not reactivate that root for named use or automatic cleanup. The
+  programmer must manage the constructed value through pointers and destroy
+  or extract it before releasing the storage.
+- Destruction or extraction of an inline field does not cancel automatic
+  field cleanup. Restore that field before enclosing-object use or cleanup
+  requires it to be live.
+
+In contrast, an Advanced value transferred from a directly named local into
+`construct_at` updates that **source** local's tracked state normally. The
+ordinary relocation-state checks and direct receiver/address-argument checks
+also apply to the intrinsic operands; they do not establish the destination's
+lifetime preconditions.
+
+For example, the pointer remains usable as a storage address across this pair:
+
+```huc
+// slot points to one live, manually managed File.
+destruct_at(slot); // close its resource; keep the backing storage
+construct_at(slot, File(new_handle)); // create a new File in that storage
+```
+
+This is not clone-then-replace assignment: the old value is destroyed before
+the initializer in the second statement runs. HUC has no exception unwinding;
+a terminating panic need not perform pending cleanup.
+
+Incorrect runtime lifetime, alignment, and storage conditions are unchecked
+preconditions, not mandatory runtime tests. Static errors such as a read-only
+pointer, wrong arity, incompatible initializer, or ineligible Advanced source
+require diagnostics. Allocation APIs remain library choices; HUC0 has no
+built-in allocating constructor expression.
 
 ### 6.8 Raw-pointer binding
 
@@ -995,7 +1120,7 @@ expressions. Operands and arguments are processed left to right, and a
 method receiver is processed before the arguments. Each by-value parameter
 is bound before the next argument starts. An assignment evaluates its
 destination first and stores after its right-hand side (section 6.3). In
-this section, a *call* is a function or method call, a constructor
+this section, a *call* is a function, method, or intrinsic call, a constructor
 expression `T(arguments)`, or a constructor initializer entry
 `field(arguments)`.
 
@@ -2093,6 +2218,7 @@ The following list is representative rather than exhaustive:
 - accessing a value through an incompatible pointer type;
 - writing actually fixed storage through an untyped slot address;
 - raw slot manipulation that violates ownership or cleanup obligations;
+- `construct_at` into a live slot, or `destruct_at` on an inactive slot;
 - reading uninitialized storage;
 - returning or storing an observer and later using it after its pointee dies.
 

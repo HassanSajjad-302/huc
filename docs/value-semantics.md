@@ -232,7 +232,8 @@ applies when a constructor expression directly initializes:
 
 - a field through a constructor initializer entry;
 - a by-value function parameter;
-- a function result in `return T(arguments)`.
+- a function result in `return T(arguments)`;
+- the supplied slot in `construct_at(pointer, T(arguments))`.
 
 HUC guarantees this; it is not an optional optimization. `init` sees the final
 `this` address, and constructing a fixed Advanced value needs no writable
@@ -1012,9 +1013,9 @@ live. The destination is Active afterward.
 This does not apply to a slot made inactive through pointer extraction.
 Extraction did not update any aliased local's cleanup state. Ordinary
 assignment through a pointer, or through a local still tracked as active,
-would try to destroy the old value. Inactive manual storage instead needs
-construction without old-value destruction; the planned `construct_at`
-interface will cover that operation. The new value must be live before any
+would try to destroy the old value. Use `construct_at(pointer, value)` to
+initialize inactive manual storage without old-value destruction (section 9.2).
+The new value must be live before any
 pending automatic cleanup reaches the slot.
 
 ## 9. Destruction with `drop`
@@ -1149,6 +1150,70 @@ Similarly, a value built directly in a local or return result follows that
 destination's lifetime. These rules add no hidden clone or lifetime extension.
 See [language specification section 6.5.1](language-specification.md#651-temporary-values)
 for the precise boundaries.
+
+### 9.2 Constructing and destroying values in manual storage
+
+The two intrinsics separate a value's lifetime from its storage allocation:
+
+```huc
+construct_at(slot, File(handle)); // inactive slot becomes a live File
+destruct_at(slot); // close the File; its slot becomes inactive again
+```
+
+`slot` has type `mod File*`. It must point to valid, writable storage of the
+right size and alignment. Neither operation allocates or frees that storage,
+nulls the pointer, or registers automatic cleanup. Constructors and `drop`
+methods still perform whatever resource operations their bodies specify.
+
+`construct_at(pointer, value)` infers the type from `mod T*` and returns
+the same pointer. It evaluates the pointer once, then initializes that slot
+from the value expression. This follows ordinary initialization:
+
+- Basic values copy.
+- Advanced values transfer from an eligible source, leaving that source
+  inactive. A named source needs binding `mod`.
+- `copy value` explicitly clones when supported.
+- `T(arguments)` constructs directly in the slot; it does not first create
+  and move a temporary. This also preserves the final `this` address.
+
+There is no hidden by-value parameter between the initializer and the slot.
+For a default structure constructor write `construct_at(slot, T())`; for a
+scalar, supply its value. Helper temporaries still follow the enclosing
+expression's lifetime, but the newly constructed value is not destroyed at
+the semicolon.
+
+`destruct_at(pointer)` returns `void`. It performs full destruction: `drop`,
+if present, followed by automatic field cleanup in reverse order. A Basic
+value has no cleanup code, but its lifetime ends too. Source bytes need not
+be cleared. This is distinct from extraction: `let result: T = *slot;`
+transfers an Advanced value without running its destructor.
+
+These are unchecked operations. Constructing over a live value, destroying
+an inactive value, or passing an invalid pointer is undefined behavior.
+Construction has no self-assignment exception. Use ordinary assignment to
+replace a live value; use `construct_at` to initialize an inactive slot.
+
+**Automatic cleanup is not changed through aliases.** For example:
+
+```huc
+let mod file: File = File(first_handle);
+let slot: mod File* = &file;
+
+destruct_at(slot); // file's tracked state is unchanged, but its old value is gone
+construct_at(slot, File(second_handle)); // restore a live File before scope exit
+```
+
+Without the reconstruction, scope exit would try to destroy an inactive
+`file`. Conversely, constructing into storage whose local name is already
+tracked as Inactive does not make that name active again. That value must
+be accessed and cleaned up through manual-storage operations. The same rule
+applies to fields: these operations do not disable automatic field cleanup.
+
+Both intrinsics require a writable typed pointer. The current `T**` ban means
+they cannot directly address a raw-pointer slot. Their names are unqualified,
+cannot be overloaded, and cannot be used as function values. See
+[language specification section 6.7](language-specification.md#67-manually-managed-storage)
+for the full contract.
 
 ## 10. Parameters and argument order
 
@@ -1324,10 +1389,32 @@ The container must construct a new value before including that slot in its
 initialized range again. No clone, replacement value, or per-element flag
 is needed to pop.
 
-The only additional raw-storage lifetime intrinsics planned are `construct_at`
-and `destruct_at`; their interfaces and detailed semantics will be designed
-later. Extraction needs no separate intrinsic. Direct field/array-element
-move restrictions and the absence of user-defined relocation hooks remain.
+`construct_at` and `destruct_at` complete the element-lifetime operations.
+Extraction needs no separate intrinsic. For example, alongside `pop_file`:
+
+```huc
+// The live prefix has *length elements; storage has spare capacity for one more.
+// length points to separate bookkeeping, not into the element storage.
+fn push_file(storage: mod File*, length: mod usize*, mod file: File) -> void {
+    construct_at(storage + *length, file);
+    *length += 1; // publish the slot only after construction succeeds
+}
+
+// The container owns cleanup of exactly the live prefix.
+fn clear_files(storage: mod File*, length: mod usize*) -> void {
+    while (*length > 0) {
+        *length -= 1;
+        destruct_at(storage + *length);
+    }
+}
+```
+
+Relocation into a different inactive slot can be written
+`construct_at(destination, *source)` through writable pointers. For an
+Advanced element the old slot then needs no destruction; container bookkeeping
+must exclude it from later cleanup. Deallocating backing storage is a separate
+library operation. Direct field/array-element move restrictions and the
+absence of user-defined relocation hooks remain unchanged.
 
 If `Vector<T>` itself supports logical copying, its library implementation can
 declare `clone` and explicitly copy each element. Copying a vector of Advanced
@@ -1566,7 +1653,11 @@ The compiler must reject:
   applied to it or to one of its fields;
 - any chained pointer form, including one hidden by an alias;
 - unary `&` applied to a pointer slot or non-place result;
-- `slot_off` applied to a non-place, such as a literal or function symbol.
+- `slot_off` applied to a non-place, such as a literal or function symbol;
+- `construct_at` or `destruct_at` with incorrect arity, a non-pointer or
+  read-only pointer operand, or an invalid/incomplete pointee type;
+- `construct_at` with an incompatible initializer or ineligible Advanced source;
+- attempts to overload either lifetime intrinsic or use it as a function value.
 
 Useful warnings include:
 
@@ -1605,6 +1696,10 @@ inheriting C defaults:
     aliasing source/destination storage is checked before replacement.
 12. Raw-pointer copying leaves the source unchanged and never cleans up or
     extends the lifetime of a pointee.
+13. `construct_at` initializes its supplied slot without destroying an old
+    value or creating an intermediate by-value parameter. `destruct_at` ends
+    a live value with its full cleanup, without deallocating its storage.
+    Neither operation changes an aliased root's tracked cleanup state.
 
 The middle-end makes construction, copy, relocation, activation, deactivation,
 and cleanup explicit before C emission. C assignment and byte copying are

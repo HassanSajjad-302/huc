@@ -120,7 +120,8 @@ HUC0 contains:
 - `let` declarations;
 - `mod` permissions;
 - raw pointers `T*`;
-- unary `&`, `slot_off`, and the core type-operand intrinsics;
+- unary `&`, `slot_off`, `construct_at`, `destruct_at`, and the core
+  type-operand intrinsics;
 - constructors, methods, `clone`, and `drop`;
 - runtime expressions and control flow;
 - local `let name: auto` inference.
@@ -386,10 +387,37 @@ Container implementations manage backing storage and initialized element
 ranges. For example, a pop implementation extracts its last element through
 a writable pointer and reduces the length, excluding that inactive slot from
 later cleanup. No replacement value, per-element flag, or extraction intrinsic
-is required. The only additional raw-storage lifetime intrinsics planned are
-`construct_at` and `destruct_at`; their interfaces and detailed semantics are
-deferred to later standard-library design. Ordinary assignment is not a
-substitute for construction into an inactive slot.
+is required. `construct_at(pointer, value)` initializes an inactive slot and
+`destruct_at(pointer)` destroys a live value without freeing its storage.
+Ordinary assignment is not a substitute for construction into an inactive slot.
+
+Both are unqualified, non-overloadable runtime intrinsics using ordinary call
+syntax. Infer the concrete `T` from a `mod T*` operand; do not add a type
+argument, constructor-argument pack, or overload accepting an untyped address.
+`construct_at` takes exactly two operands and returns the same `mod T*`;
+`destruct_at` takes one and returns `void`. The pointer binding may be fixed,
+but the pointee type must be complete and writable. `T**` remains disallowed.
+
+Evaluate the destination pointer once before the initializer. Check the
+initializer as for a local of type `T`, without introducing a by-value `T`
+parameter: Basic values copy, eligible Advanced sources transfer, and explicit
+`copy` clones. A direct constructor or function result initializes the supplied
+slot as its final destination. No old value is destroyed. `destruct_at`
+performs user `drop` and reverse field cleanup; for Basic values it ends the
+lifetime without user code.
+
+The caller supplies valid storage with sufficient size and alignment and
+manages its live/inactive state. Null pointers, construction over a live value,
+overlapping source/destination storage, and destruction of an inactive value
+violate unchecked preconditions. No self-relocation no-op applies to
+construction. Neither intrinsic deallocates destination storage, nulls the
+pointer, or registers automatic cleanup. User constructors/destructors may
+manage their own resources.
+
+Do not update an aliased root's drop flags, even for `&local`. A directly
+named Advanced source transferred into `construct_at` still becomes Inactive
+normally. Destination cleanup remains manual. HIR must preserve this
+distinction through inlining. See language specification section 6.7.
 
 ### 5.5 Construction and initialization
 
@@ -1163,7 +1191,8 @@ Implement:
 - fixed bitwise relocation of Advanced values with no user transfer hook;
 - user `drop`;
 - reverse field cleanup;
-- raw-pointer copying without pointee cleanup.
+- raw-pointer copying without pointee cleanup;
+- `construct_at` and `destruct_at` with manual destination lifetime and cleanup.
 
 Acceptance:
 
@@ -1184,6 +1213,10 @@ Acceptance:
 - extraction through writable pointers is accepted without source clearing
   or alias-driven changes to automatic cleanup state;
 - direct field/array-element moves and read-only pointer extraction are rejected;
+- manual construction has no old-value drop, intermediate value parameter,
+  or automatic destination cleanup registration;
+- manual destruction performs full drop/field cleanup without deallocation;
+- neither intrinsic updates automatic cleanup state through aliases;
 - ordinary binding never invokes `clone`;
 - sanitizers find no backend double destruction;
 - optimized operation counts match equivalent explicit C resource-management code.
@@ -1428,6 +1461,10 @@ Include:
 - direct relocation from a field or array element;
 - unary `&` applied to a pointer slot, non-place result, or function symbol;
 - `slot_off` applied to a literal, temporary value, or function symbol;
+- wrong arity, non-pointer/read-only operands, or invalid pointee types for
+  `construct_at` and `destruct_at`;
+- invalid initializers and ineligible Advanced sources in `construct_at`;
+- overloads or first-class uses of either lifetime intrinsic;
 - attempts to use former address-taking or `std::` intrinsic spellings;
 - `ptr_as` with an invalid source type or a composed pointer target;
 - mutation without `mod`;
@@ -1473,6 +1510,14 @@ Compile generated C17 and test:
   including a pop-style return without cloning or a replacement value;
 - single evaluation of pointer sources with unchanged pointer addresses and
   no source clearing or per-element flags;
+- single evaluation and pointer-before-initializer ordering for `construct_at`;
+- manual construction from Basic, relocated Advanced, cloned, constructor,
+  and function-result initializers, including final `this` address checks;
+- construct/extract/reconstruct/destruct cycles in manually managed slots;
+- manual destruction of nested fields, unchanged pointer addresses, and
+  continued use of the backing allocation after the value is destroyed;
+- both alias cases: restoring a destroyed automatic local before its cleanup,
+  and manually cleaning a value constructed in a root tracked as Inactive;
 - user `drop` and reverse field cleanup;
 - module imports;
 - full HUC1-to-program examples.

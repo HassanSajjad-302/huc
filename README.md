@@ -140,6 +140,17 @@ See [value semantics](docs/value-semantics.md) for the full lifetime rules and
 [the resource-transfer example](examples/ownership.huc0) for working through
 transfers.
 
+### Manually managed storage
+
+`construct_at(pointer, value)` initializes an inactive slot and returns its
+pointer. Basic values copy, Advanced values transfer, and `T(arguments)`
+constructs directly in that slot. `destruct_at(pointer)` destroys a live value
+and its fields without freeing the slot's storage.
+
+Both infer the type from `mod T*`. Neither changes automatic cleanup state
+through aliases. The programmer supplies valid storage and tracks which
+slots are live. See [manual storage lifetimes](docs/value-semantics.md#92-constructing-and-destroying-values-in-manual-storage).
+
 ## Why HUC
 
 > Keep the metal. Lose the maze.
