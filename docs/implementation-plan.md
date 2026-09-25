@@ -484,6 +484,19 @@ The complete rules, diagnostics, and side-by-side C++20 examples are in
 HUC 0.1 has no exception unwinding. Process termination through panic need not
 run pending cleanup.
 
+Unconsumed temporaries remain alive until their full expression finishes,
+then are destroyed in reverse order of completed initialization. An ordinary
+statement cleans them up at its end. A condition cleans them up after saving
+its result and before entering the branch or loop body. Each `for` initializer
+or step and each field initializer has its own boundary. A return binds its
+result before temporary cleanup, then cleans up remaining locals and parameters.
+
+Arguments, nested calls, and short-circuit operands do not create earlier
+boundaries for the caller's temporaries. A value consumed into a by-value
+parameter instead follows the parameter lifetime and is cleaned up before
+that call returns unless transferred onward. No observer extends a source
+lifetime. Language specification section 6.5.1 defines the complete rule.
+
 ### 5.7 Evaluation order
 
 HUC evaluation is left-to-right for:
@@ -1085,6 +1098,7 @@ HIR records:
 MIR records:
 
 - ordered temporaries;
+- full-expression boundaries and the temporaries belonging to each boundary;
 - places and assignments;
 - calls and control-flow blocks;
 - active/inactive Advanced state;
@@ -1155,6 +1169,10 @@ Acceptance:
 
 - straight-line relocations require no hidden state;
 - conditional relocations use flags only when necessary;
+- unconsumed temporaries survive until their full-expression boundary,
+  then clean up in reverse order, independently of generated C statement layout;
+- consumed temporaries and directly constructed destinations receive no
+  duplicate cleanup at expression boundaries;
 - every named use of an `Inactive` or `MaybeActive` root is rejected, including
   uses in later arguments of the same call and self-receiver or earlier-`&`
   relocations, while reinitialization of such a root is accepted;
@@ -1433,6 +1451,13 @@ Compile generated C17 and test:
   place expressions evaluated once;
 - scalar computation;
 - argument side-effect ordering;
+- temporary receivers surviving an outer observing call and then dropping
+  in reverse order of completed initialization;
+- cleanup boundaries for discarded results, local and field initializers,
+  conditions on both outcomes, and `for` initializer/step expressions;
+- evaluated-path-only cleanup for short-circuit operands and `?:` arms;
+- return-result binding before temporary cleanup, followed by local and
+  parameter cleanup, with no cleanup of the value transferred to the caller;
 - constructors and field initialization order;
 - raw-pointer observation and Advanced-value consumption;
 - slot addresses for inline, pointer, and fixed storage;

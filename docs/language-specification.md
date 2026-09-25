@@ -777,10 +777,84 @@ initialization:
 - when an initialized destination is overwritten.
 
 Fields are destroyed in reverse declaration order after the user `drop` body
-runs. Function parameters are local values and follow the same rule.
+runs. Function parameters are local values and follow the same rule: active
+by-value parameters are destroyed before the call returns to its caller.
+On return, the result is bound first, then return-expression temporaries are
+cleaned up, then the function's remaining locals and parameters.
 
 HUC 0.1 has no exception unwinding. `panic` terminates the process after
 implementation-defined diagnostic output; it need not run pending destructors.
+
+#### 6.5.1 Temporary values
+
+A temporary is an unnamed value created during expression evaluation, such
+as a function result used as a method receiver or a discarded constructor
+result. A temporary that has not been transferred elsewhere stays alive until
+the end of its **full expression**. At that boundary, remaining active
+temporaries are destroyed in reverse order of completed initialization.
+Basic temporaries have no `drop`, but their lifetimes end at the same boundary.
+
+A full expression includes its nested operands and argument evaluations.
+Its boundary is defined by the enclosing construct:
+
+| Construct | Temporary cleanup boundary |
+|---|---|
+| Expression statement, including assignment | After the whole expression finishes, including any destination replacement, before the next statement |
+| Local declaration initializer | After the declared value is fully initialized, before the next statement |
+| `return expression;` | After binding the return value, before cleanup of the function's remaining locals and parameters |
+| `if`, `while`, or `for` condition | After computing and retaining the condition result, before entering the chosen branch/body or leaving the loop |
+| `for` initializer or step expression | After that expression finishes, before evaluating the condition |
+| Field initialization | After that field is initialized, before the next field initializer or the constructor body |
+
+Each evaluation of a loop condition or step has its own boundary. The field
+rule covers both declaration initializers evaluated during construction and
+explicit constructor initializer entries. All arguments of one entry belong
+to that entry's full expression; the field itself is not a temporary.
+
+Parentheses, nested calls, individual arguments, and operands of `&&`, `||`,
+and `?:` do not introduce earlier boundaries. Temporaries from evaluated
+operands stay alive until the enclosing full expression ends. Unevaluated
+operands create no values and require no cleanup. Calls made during an
+expression have their own local and temporary cleanup inside the callee;
+they do not end the lifetimes of the caller's unconsumed temporaries.
+
+For example, assume `make_text()` returns an Advanced `Text`, `view()`
+returns a non-owning `View` into it, and `print` uses the view only during
+the call:
+
+```huc
+print(make_text().view()); // Text stays alive through print, then is destroyed
+
+let view: View = make_text().view(); // Text is destroyed at this semicolon
+print(view); // undefined behavior: accesses the destroyed Text's storage
+```
+
+Giving the owning value a name makes its lifetime explicit:
+
+```huc
+let text: Text = make_text();
+let view: View = text.view();
+print(view); // text is still alive
+```
+
+There is no lifetime extension for a pointer or view stored in a local,
+returned, or passed to another function. The same applies to a view obtained
+from a condition temporary: keeping that view does not keep its source alive
+in the body. Raw-pointer lifetime mistakes remain unchecked.
+
+This rule does not postpone destructive relocation. When an Advanced
+temporary is transferred, its source becomes inactive immediately and
+receives no cleanup at the full-expression boundary. The destination follows
+its own lifetime. In particular, a value transferred into a by-value parameter
+is destroyed by the callee unless transferred onward; returning an observer
+of that parameter does not extend its lifetime.
+
+Direct construction in a named local, field, parameter, or return result
+creates no intermediate temporary. That destination follows its normal
+lifetime, not the surrounding expression's temporary cleanup boundary.
+An active discarded result, such as `make_text();`, is destroyed at the end
+of that statement. The existing rules for `&` are unchanged: it does not
+materialize a temporary or make `&make_text()` valid.
 
 ### 6.6 Explicit logical copying
 
@@ -876,6 +950,9 @@ Returning an Advanced local destructively relocates it into the caller's
 result location and makes the source inactive. Direct constructor results
 instead use guaranteed destination construction. Returning a Basic value
 copies it. Returning `T*` never transfers or extends the pointee's lifetime.
+The return value is bound before return-expression temporaries and active
+locals are destroyed (section 6.5.1). Returning an observer into either does
+not keep its source alive for the caller.
 
 ### 6.11 Value and pointer conversions
 

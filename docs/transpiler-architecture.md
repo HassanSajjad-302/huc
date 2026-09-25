@@ -1061,6 +1061,9 @@ Unreachable
 
 MIR semantics are sequenced. The C emitter must introduce temporaries when
 necessary to preserve HUC's left-to-right order.
+HIR and MIR retain the full-expression cleanup boundary of each materialized
+temporary (language specification section 6.5.1). An emitter-created C
+temporary or statement does not create a new HUC lifetime boundary.
 
 `Relocate` is the complete destructive-relocation operation, not one half of
 an operation that requires a later `Deactivate`. It transfers the whole
@@ -1171,6 +1174,9 @@ The pass adds cleanup before:
 - normal scope exit;
 - assignment over an active destination.
 
+It also adds temporary cleanup at every completed full-expression boundary,
+including condition and loop-step boundaries (section 12.5).
+
 There are no exception cleanup edges in 0.1.
 
 Explicit MIR cleanup is mandatory for the C backend:
@@ -1252,6 +1258,49 @@ layout, valid C storage access, source deactivation, and exactly-once cleanup.
 It may use bulk copies, loads/stores, registers, or elision when observably
 equivalent; the contract neither mandates a literal memory-copy instruction
 nor gives padding bytes semantic significance.
+
+### 12.5 Temporary cleanup boundaries
+
+Track the active temporaries belonging to each full expression. At its end,
+destroy the ones still active in reverse order of completed initialization.
+Temporaries consumed by `Relocate` are inactive and receive no cleanup there.
+Directly constructed locals, fields, parameters, and return results belong
+to their destination lifetimes, not the temporary list. Basic temporaries
+need no drop call, but any materialized storage must remain valid until the
+specified lifetime boundary if its address can be observed.
+
+Preserve these boundaries during lowering:
+
+- expression statements: after evaluating the entire expression;
+- local initializers: after the destination is initialized;
+- conditions: save the result, clean up temporaries, then branch on the saved
+  result; this applies to both outcomes and every loop-condition evaluation;
+- `for` initializer and step expressions: clean up before the condition;
+- field initializers: after the field is initialized, before the next field
+  or constructor body;
+- returns: bind the result, clean up return-expression temporaries, then
+  clean up remaining locals and parameters before returning to the caller.
+
+Nested expressions, call arguments, and short-circuit operands share their
+caller's enclosing full-expression boundary. Do not drop a receiver
+temporary immediately after its method returns, or an argument's helper
+temporary when parameter binding finishes. Calls still perform their own
+internal cleanup, including cleanup of active by-value parameters before
+returning; a consumed argument is not a caller-owned temporary anymore.
+
+For conditional evaluation, register cleanup only on paths that initialized
+the temporary. Branch-local cleanup paths or separate active flags may be
+used; no flag belongs inside the nominal type. In particular, lowering `?:`
+must not clean an arm's unconsumed temporaries before the enclosing expression
+ends, and unevaluated operands receive no initialization or cleanup.
+
+For `print(make_text().view())`, keep the caller's `Text` temporary active
+through the `print` call, then drop it. For
+`let view: View = make_text().view();`, drop that temporary after binding
+`view`. Its observer does not extend the lifetime. The C backend must preserve
+these HUC boundaries independently of generated C braces and statements.
+
+As elsewhere, a terminating `panic` need not run pending cleanup.
 
 ## 13. C17 lowering
 
@@ -1349,6 +1398,10 @@ Basic parameters use `Copy`, Advanced parameters use `Relocate`, observing
 parameters use the resolved observer value, and direct constructor/function
 results use their final destination place. The same call-frame lowering must
 preserve temporary and parameter destruction order.
+Unconsumed receiver and argument-helper temporaries belong to the enclosing
+full expression and stay alive through the call. Active by-value parameters
+are cleaned up by the callee before it returns; they are not dropped again
+by the caller's full-expression cleanup.
 
 Function results with observable destination identity also use an explicit
 result pointer supplied by the caller. Initializers write directly into that final
@@ -1385,7 +1438,8 @@ When static analysis cannot decide whether cleanup is needed, a separate
 boolean tracks whether the value is active. It is never a field of the C
 value type.
 HUC temporaries follow the same MIR rules. Cleanup calls or shared cleanup
-labels cover every normal exit and active destination replacement.
+labels cover every completed full expression, normal exit, and active
+destination replacement.
 
 HUC fixed-by-default permissions are enforced before emission. Do not add C
 `const` to physical storage when doing so would prevent permitted compiler
@@ -1644,6 +1698,10 @@ cleanup. Address-taking goldens distinguish `&inline_place` from
 Pointer-extraction goldens must evaluate the source address once, create an
 active destination, and emit no source clearing, alias-driven flag updates,
 or runtime ownership lookup. Inlining must preserve the source cleanup mode.
+Temporary-lifetime goldens must distinguish full-expression cleanup from
+parameter and local cleanup. Check that condition results and return values
+are retained before cleanup and that generated helper statements do not end
+HUC temporary lifetimes early.
 
 ### 17.3 Execute tests
 
@@ -1651,6 +1709,15 @@ Compile and run small programs that record:
 
 - argument evaluation and by-value parameter-binding order;
 - direct-construction `this` addresses for locals, fields, parameters, and results;
+- temporary receivers staying live through an outer observing call, followed
+  by reverse-order temporary destruction;
+- cleanup after discarded results, declaration initializers, condition
+  evaluations on both outcomes, `for` initializers/steps, and field initializers;
+- short-circuit and conditional expressions creating and destroying only
+  the temporaries on evaluated paths, at the enclosing expression boundary;
+- return-result binding before temporary, local, and parameter cleanup;
+- by-value parameter cleanup before call return, without double cleanup of
+  the transferred source at the caller's full-expression boundary;
 - destructive-relocation and clone counts;
 - copying fixed and writable raw pointers without modifying the source;
 - relocation of nested Advanced aggregates with cleanup only through the

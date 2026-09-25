@@ -1082,6 +1082,74 @@ the subsequent automatic field cleanup; leaving such a field inactive when
 There is no exception unwinding in HUC0. A terminating panic need not execute
 pending `drop` operations.
 
+### 9.1 When temporary values are destroyed
+
+An unconsumed temporary stays alive until its full expression finishes. In
+an ordinary statement, that usually means the semicolon. Remaining active
+temporaries are then destroyed in reverse order of completed initialization.
+
+Assume `make_text()` returns an Advanced `Text`, and `view()` returns a
+non-owning view of its characters:
+
+```huc
+print(make_text().view());
+```
+
+The temporary `Text` stays alive through `view()` and `print()`. It is
+destroyed after `print` returns. This works if `print` only uses the view
+during that call; storing the view for later does not keep the text alive.
+
+In contrast:
+
+```huc
+let view: View = make_text().view(); // temporary Text is destroyed here
+print(view); // undefined behavior: the view's source is no longer alive
+```
+
+The `view` local survives into the next statement, but the text does not.
+Keep the owning value in a local instead:
+
+```huc
+let text: Text = make_text(); // initializes text, not a discarded temporary
+let view: View = text.view();
+print(view);
+```
+
+Some boundaries are not semicolons:
+
+- A condition's temporaries are destroyed after its result is computed,
+  before the selected `if` branch or loop body starts. A loop cleans them up
+  on every condition evaluation, including the final false one.
+- A `for` initializer or step cleans up its temporaries before the next
+  condition evaluation.
+- A field initializer cleans up its temporaries after initializing that
+  field, before the next field or the constructor body.
+- A `return` binds its result, destroys the expression's remaining temporaries,
+  then cleans up the function's remaining locals and parameters.
+
+Individual arguments, nested calls, and short-circuit operands do not end
+the caller's full expression. Their unconsumed temporaries stay alive until
+that expression ends. An unevaluated operand creates nothing to destroy.
+
+Transfers still happen at the usual point. For example, a `Text` passed by
+value becomes the callee's parameter, not a caller-owned temporary waiting
+for the semicolon. The parameter is cleaned up before the call returns unless
+transferred onward. Consequently, this does not become valid:
+
+```huc
+fn bad_view(text: Text) -> View {
+    return text.view(); // text is destroyed before the caller resumes
+}
+
+print(bad_view(make_text())); // the returned view already dangles
+```
+
+A transferred temporary is inactive and is not destroyed a second time.
+Similarly, a value built directly in a local or return result follows that
+destination's lifetime. These rules add no hidden clone or lifetime extension.
+See [language specification section 6.5.1](language-specification.md#651-temporary-values)
+for the precise boundaries.
+
 ## 10. Parameters and argument order
 
 Parameters are passed by value. Their behavior follows their type:
@@ -1166,6 +1234,10 @@ The implementation may construct directly in caller-provided result storage.
 Copy elision may remove transfers, but it must not introduce or remove
 observable `clone` calls. `clone` runs exactly when required by an evaluated
 `copy` expression.
+
+The result is bound before return-expression temporary cleanup, which runs
+before cleanup of remaining locals and parameters. A returned owner survives
+in the caller; a returned pointer or view does not keep its source alive.
 
 Comparable C++20:
 

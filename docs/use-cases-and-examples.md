@@ -104,6 +104,7 @@ The examples below cover these use cases:
 | Runtime | Non-owning observation without lifetime tracking |
 | Runtime | Explicit inline address-taking with unary `&` |
 | Runtime | Deterministic cleanup of active values |
+| Runtime | Full-expression temporary lifetimes without observer lifetime extension |
 | Runtime | Consumption through an Advanced by-value parameter |
 | Runtime | Advanced-containing structures and destructive relocation |
 | Runtime | Ordinary copying of Basic values |
@@ -842,6 +843,34 @@ the transferring branch, or reinitialize `job` there. Each option makes the
 active paths clear without proving relationships between conditions.
 The compiler still arranges exactly-once cleanup, using control-flow knowledge
 or a separate drop flag when necessary.
+
+### 3.12.1 Temporary views and expression boundaries
+
+Assume `make_text()` returns an owning Advanced `Text`, and `view()` returns
+a non-owning `View` into its characters:
+
+```huc
+print(make_text().view()); // temporary Text survives print, then is destroyed
+
+let view: View = make_text().view(); // Text is destroyed at this semicolon
+print(view); // invalid: view no longer refers to live text
+```
+
+A view does not keep its source alive. Name the owning value when the view
+must remain usable across statements:
+
+```huc
+let text: Text = make_text();
+let view: View = text.view();
+print(view); // valid while text remains alive and unchanged
+```
+
+The whole call expression, not each argument or nested call, is the lifetime
+boundary for its unconsumed temporaries. A condition's temporaries are instead
+destroyed before its branch or loop body starts. Transferred values follow
+their destination lifetimes; the caller does not destroy a transferred
+temporary again at the semicolon. See
+[temporary lifetime rules](value-semantics.md#91-when-temporary-values-are-destroyed).
 
 ### 3.13 Probable file-processing application
 

@@ -4,6 +4,24 @@ module examples.value_semantics;
 import std.io as io;
 import std.memory as memory;
 
+let mod temporary_drop_order: i32 = 0;
+
+// Records destruction without allocation; view() observes inline storage.
+struct TemporaryProbe {
+    let id: i32;
+
+    fn init(id: i32) : id(id) {
+    }
+
+    fn view() -> i32* {
+        return &this->id;
+    }
+
+    fn drop() mod -> void {
+        temporary_drop_order = temporary_drop_order * 10 + this->id;
+    }
+}
+
 // Point is Basic: every field is Basic and it declares neither clone nor drop.
 struct Point {
     let x: i32;
@@ -162,11 +180,32 @@ fn demonstrate_address_stability() -> void {
     io::println(second_observer->self == observer);
 }
 
+fn show_temporary_views(first: i32*, second: i32*) -> void {
+    // Both TemporaryProbe receivers are still alive during this call.
+    io::println(*first, *second, temporary_drop_order); // values: 1, 2, 0
+}
+
+fn demonstrate_temporary_lifetimes() -> void {
+    temporary_drop_order = 0;
+    show_temporary_views(TemporaryProbe(1).view(), TemporaryProbe(2).view());
+    io::println(temporary_drop_order); // 21: reverse-order cleanup at semicolon
+
+    temporary_drop_order = 0;
+    if (*TemporaryProbe(3).view() == 3) {
+        // The condition result was saved, then its temporary was destroyed.
+        io::println(temporary_drop_order); // 3: cleanup precedes the body
+    }
+
+    TemporaryProbe(4); // a discarded result is destroyed at this semicolon
+    io::println(temporary_drop_order); // 34
+}
+
 fn main() -> i32 {
     demonstrate_copy_values();
     demonstrate_inline_relocation();
     demonstrate_observation_and_consumption();
     demonstrate_advanced_fields();
     demonstrate_address_stability();
+    demonstrate_temporary_lifetimes();
     return 0;
 }

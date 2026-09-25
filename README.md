@@ -32,6 +32,11 @@ value until reinitialized. The transfer does not run the source's `drop` or
 clean up its fields, and it does not require clearing the source bytes.
 The destination becomes responsible for cleanup.
 
+Unconsumed temporaries live until their full expression finishes, usually at
+the semicolon. A temporary used by `print(make_text().view())` stays alive
+through the call; saving only its view does not extend its lifetime. See
+[temporary lifetimes](docs/value-semantics.md#91-when-temporary-values-are-destroyed).
+
 Declarations use `name: Type`, with `mod` before a writable name. Conditions
 stay parenthesized, control-flow bodies require braces, and returning a value
 uses explicit `return`. Digit separators and trailing commas are optional. A small
