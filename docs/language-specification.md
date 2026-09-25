@@ -257,7 +257,7 @@ let second: i32 = add(1, 2,);
 
 An empty list has no comma: use `()`, not `(,)`. A trailing comma does not
 create another argument or an omitted item. Conditions, grouped expressions,
-subscripts, and the single type operand in `as<T>` and `ptr_as<T*>`
+subscripts, and the single type operands in casts and type queries
 are not comma-separated lists. Semicolons remain required where the grammar
 uses them; line breaks do not replace them.
 
@@ -296,6 +296,7 @@ never
 T
 T*
 mod T*
+raw_storage<T, N>
 ```
 
 `usize` and `isize` have the target pointer width. Integer widths are exact.
@@ -483,6 +484,8 @@ be assigned in the body.
 An omitted mutable scalar initializes to zero, a mutable raw pointer
 to null, and a mutable structure through its zero-argument constructor. Fixed
 fields without declaration initializers must be initialized by each constructor.
+A mutable `raw_storage<T, N>` field instead creates empty storage, without
+constructing elements (section 6.7.5).
 
 Methods receive an implicit non-owning `this`:
 

@@ -297,7 +297,8 @@ parameter-1       = [ "mod" ], identifier, ":", type-1 ;
    only where the language specification permits it, not an omitted type.
    Comma-separated lists allow one optional final comma after an item.
    An empty list has no comma. Conditions, grouped expressions, subscripts,
-   and the single type operand of as/ptr_as are not such lists. *)
+   and the single type operand of as/ptr_as/size_of/align_of/is_basic are
+   not such lists. raw_storage's type and count form a two-item list. *)
 
 block-0           = "{", { statement-0 }, "}" ;
 statement-0       = block-0

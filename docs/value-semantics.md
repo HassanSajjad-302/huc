@@ -116,13 +116,12 @@ Basic types are:
 
 - scalar arithmetic and boolean types;
 - raw pointers;
-- arrays whose element type is Basic;
 - structures whose fields are all Basic and which declare neither `clone` nor
   `drop`.
 
 Advanced types are:
 
-- arrays whose element type is Advanced;
+- built-in `raw_storage<T, N>`, irrespective of `T`'s category;
 - structures containing at least one Advanced field;
 - structures declaring `clone`;
 - structures declaring `drop`.
@@ -130,6 +129,8 @@ Advanced types are:
 Having `init()` alone does not make a structure Advanced. A raw `T*` is Basic
 even when `T` is Advanced; it copies only the observer address. In contrast,
 an inline Advanced field makes its containing structure Advanced too.
+Primitive arrays are deferred. Library array types follow the rules for
+their concrete generated structures, including any raw-storage field.
 
 Declaring `clone` intentionally makes an otherwise Basic structure Advanced.
 Otherwise ordinary binding could silently bypass the custom copy behavior:
@@ -612,7 +613,7 @@ For an Advanced value, relocation transfers its stored representation:
 The operation need not clear `source.payload`; that field is inactive,
 not a second live value. Neither it nor `source` may be used as a value before
 the whole source is reinitialized. No source `drop` body or source-field
-cleanup runs. Arrays in the Advanced category use the same whole-value rule.
+cleanup runs. Advanced library array structures use the same whole-value rule.
 The operation invokes no user code and cannot fail in the HUC type system.
 
 The rule is the same whether the structure is Advanced because of `clone`, `drop`,
@@ -1766,7 +1767,7 @@ The compiler must reject:
 - `construct_at` or `destruct_at` with incorrect arity, a non-pointer or
   read-only pointer operand, or an invalid/incomplete pointee type;
 - `construct_at` with an incompatible initializer or ineligible Advanced source;
-- attempts to overload either lifetime intrinsic or use it as a function value.
+- attempts to overload either lifetime intrinsic or use it as a function value;
 - invalid `raw_storage` element types, zero/nonconstant counts, or layout overflow;
 - `copy` of raw storage, or a `storage_ptr` operand that is not a pointer to it;
 - invalid type operands or value arguments for `size_of`, `align_of`, or `is_basic`.

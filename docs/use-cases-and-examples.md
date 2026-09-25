@@ -24,9 +24,11 @@ The following syntax and behavior describe language rules, not library proposals
 - `let`, `let1`, and `let2`;
 - `mod`;
 - inline values and raw `T*` pointers;
-- unary `&` for inline-place observation;
+- unary `&` for addressable data places, including pointer slots;
 - `slot_off` for unchecked, untyped slot addresses;
 - `construct_at` and `destruct_at` for manually managed value lifetimes;
+- `raw_storage<T, N>` and `storage_ptr` for typed inline backing storage;
+- `size_of<T>()`, `align_of<T>()`, and `is_basic<T>()` for layout and category queries;
 - `fn`, `fn1`, and `fn2`;
 - `struct`, `struct1`, and `struct2`;
 - `if1`, `for1`, and `while1`;
@@ -720,6 +722,103 @@ a live destination and destroys its old value before replacement.
 
 A future custom relocation hook should be considered only if real
 address-repair cases justify changing the fixed-transfer model.
+
+### 3.9a Raw storage for containers
+
+The core storage operations do not need a default or empty value of the
+element type. This concrete inline optional uses the `File` type from the
+value-semantics examples; `File(handle)` constructs one live file wrapper:
+
+```huc
+struct OptionalFile {
+    let mod storage: raw_storage<File, 1>;
+    let mod present: bool;
+
+    fn init() {
+        // storage has no live File; present starts false.
+    }
+
+    fn set(mod value: File) mod -> void {
+        let slot: mod File* = storage_ptr(&this->storage);
+        if (this->present) {
+            this->present = false;
+            destruct_at(slot);
+        }
+        construct_at(slot, value);
+        this->present = true;
+    }
+
+    // Precondition: present is true.
+    fn remove() mod -> File {
+        let mod result: File = *storage_ptr(&this->storage);
+        this->present = false;
+        return result;
+    }
+
+    fn drop() mod -> void {
+        if (this->present) {
+            this->present = false;
+            destruct_at(storage_ptr(&this->storage));
+        }
+    }
+}
+```
+
+Automatic cleanup of `storage` never repeats payload cleanup. Relocating the
+optional transfers the flag and storage together. An empty optional never
+constructs or destroys a `File`. A larger inline container uses a count rather
+than a presence flag and reserves several slots. Raw storage itself does not
+track either flag or count; it is always Advanced and cannot be cloned directly.
+
+For generic code, Basic sources remain live after binding. End their lifetimes
+before reusing those slots with `construct_at`. Advanced sources are already
+inactive, so do not destroy them again:
+
+```huc
+// data points to length live, manually managed values; length > 0.
+// length points to separate writable bookkeeping, outside the element region.
+fn1 pop_last(T: auto)(data: mod T*, length: mod usize*) -> T {
+    let last: usize = *length - 1;
+    let slot: mod T* = data + last;
+    let mod result: T = *slot;
+    if1 (is_basic<T>()) {
+        destruct_at(slot); // ends the Basic lifetime; no user cleanup call
+    }
+    *length = last;
+    return result;
+}
+```
+
+`is_basic` selects this branch during specialization; it creates no runtime
+category test. The same pattern works when growing a vector into a distinct
+allocation: `construct_at(new_data + index, *(old_data + index))`, then end
+the old Basic lifetime only. After transferring the live prefix, free the old
+allocation without dropping its inactive Advanced sources. Allocators must
+honor `align_of<T>()`, and `capacity * size_of<T>()` needs an overflow check.
+Zero capacity can use null; avoid pointer arithmetic on it.
+
+See [the complete raw-storage contract](language-specification.md#675-typed-raw-inline-storage)
+and the [standalone inline-buffer example](../examples/raw-storage.huc0).
+
+### 3.9b Conditional observation
+
+These are alternatives, with `first` and `second` initially live Advanced
+locals declared with binding `mod`:
+
+```huc
+(condition ? first : second).size(); // transfers and destroys the selected value
+// Later use of either original local is rejected: its state is MaybeActive.
+```
+
+For observation, select pointers or select the results of the calls:
+
+```huc
+(condition ? &first : &second)->size(); // preserves both values
+condition ? first.size() : second.size(); // preserves both; one call runs
+```
+
+The conditional always produces a value. Pointer results copy their address;
+Advanced results transfer ownership. No lifetime is extended by either form.
 
 ### 3.10 Left-to-right evaluation
 
@@ -1574,8 +1673,10 @@ output must already be valid HUC0.
 
 ## 8. Large case study: target-specialized small vector
 
-This forward-looking case study assumes the later `InlineArray<T, N>` library
-facility. The 0.1 core deliberately defers primitive fixed arrays.
+This case study uses `raw_storage<T, N>` for inline capacity and probable
+allocator APIs for heap capacity. `Inline` must be positive; a zero-capacity
+specialization would omit the inline-storage field. Primitive fixed arrays
+are still deferred.
 
 This example combines:
 
@@ -1586,9 +1687,12 @@ This example combines:
 - runtime destructive relocation and cleanup;
 - probable allocator APIs.
 
-For clarity, this bootstrap sketch assumes that `T` is Basic. A production
-standard-library version would state that requirement through the future
-compiler type-query API or add element-wise relocation/drop handling.
+The lifetime operations handle both Basic and Advanced elements. The probable
+`memory::checked_add` and `memory::growth_capacity<T>` helpers reject size
+overflow; the latter returns at least the requested capacity with a
+representable byte count. `allocate_raw_items<T>` supplies suitably aligned
+storage or terminates on allocation failure. These helper APIs remain library
+designs, not additional intrinsics.
 
 ```huc
 module case_studies.small_vector;
@@ -1616,7 +1720,7 @@ struct1 HeapArray(T: auto) {
 }
 
 struct1 SmallVector(T: auto, Inline: usize) {
-    let mod inline_values: InlineArray<T, Inline>;
+    let mod inline_values: raw_storage<T, Inline>;
     let mod heap_values: HeapArray<T>;
     let mod size: usize;
     let mod capacity: usize;
@@ -1636,7 +1740,7 @@ struct1 SmallVector(T: auto, Inline: usize) {
             return this->heap_values.values;
         }
 
-        return &this->inline_values[0];
+        return storage_ptr(&this->inline_values);
     }
 
     fn data_mut() mod -> mod T* {
@@ -1644,7 +1748,7 @@ struct1 SmallVector(T: auto, Inline: usize) {
             return this->heap_values.values;
         }
 
-        return &this->inline_values[0];
+        return storage_ptr(&this->inline_values);
     }
 
     fn reserve(requested: usize) mod -> void {
@@ -1652,17 +1756,19 @@ struct1 SmallVector(T: auto, Inline: usize) {
             return;
         }
 
-        let mod next_capacity: usize = this->capacity * 2;
-        if (next_capacity < requested) {
-            next_capacity = requested;
-        }
+        let next_capacity: usize =
+            memory::growth_capacity<T>(this->capacity, requested);
 
         let mod replacement: HeapArray<T> =
             HeapArray<T>(next_capacity);
 
         let mod index: usize = 0;
         while (index < this->size) {
-            replacement.values[index] = this->data_mut()[index];
+            let source: mod T* = this->data_mut() + index;
+            construct_at(replacement.values + index, *source);
+            if1 (is_basic<T>()) {
+                destruct_at(source); // copied Basic source is still live
+            }
             index += 1;
         }
 
@@ -1671,20 +1777,27 @@ struct1 SmallVector(T: auto, Inline: usize) {
     }
 
     fn push(mod value: T) mod -> void {
-        this->reserve(this->size + 1);
-        this->data_mut()[this->size] = value;
+        this->reserve(memory::checked_add(this->size, 1));
+        construct_at(this->data_mut() + this->size, value);
         this->size += 1;
     }
 
     fn get(index: usize) -> T* {
         // Bounds remain unchecked in the core language.
-        return &this->data()[index];
+        return this->data() + index;
     }
 
+    fn drop() mod -> void {
+        while (this->size > 0) {
+            this->size -= 1;
+            destruct_at(this->data_mut() + this->size);
+        }
+        // heap_values later frees its allocation; inline_values adds no drops.
+    }
 }
 
 struct1 SmallVector(T: auto, Inline: usize)<T*, Inline>(Inline <= 4) {
-    let mod values: InlineArray<T*, Inline>;
+    let mod values: raw_storage<T*, Inline>;
     let mod size: usize;
 
     fn init() {
@@ -1693,12 +1806,19 @@ struct1 SmallVector(T: auto, Inline: usize)<T*, Inline>(Inline <= 4) {
     fn push(value: T*) mod -> void {
         // This compact specialization deliberately has no spill path.
         // Writing past Inline is undefined in the unchecked profile.
-        this->values[this->size] = value;
+        construct_at(storage_ptr(&this->values) + this->size, value);
         this->size += 1;
     }
 
     fn get(index: usize) -> T* {
-        return this->values[index];
+        return *(storage_ptr(&this->values) + index);
+    }
+
+    fn drop() mod -> void {
+        while (this->size > 0) {
+            this->size -= 1;
+            destruct_at(storage_ptr(&this->values) + this->size);
+        }
     }
 }
 
@@ -1726,6 +1846,10 @@ This illustrates the design; it is not a finished, safety-checked container:
 - The pointer specialization is chosen structurally.
 - The predicate limits the compact form to capacities up to four.
 - The general form contains an inline resource-managing spill buffer.
+- Growth transfers live elements into inactive destination slots; Basic source
+  lifetimes are ended explicitly, and Advanced source cleanup is skipped.
+- Neither form caches pointers into its own inline region, so whole-container
+  relocation does not leave an internal pointer aimed at old storage.
 - HUC does not add bounds or dangling-pointer checks.
 - The backend sees only concrete HUC0 structures.
 

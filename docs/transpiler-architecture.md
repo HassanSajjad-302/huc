@@ -376,9 +376,11 @@ Do not retain the old declaration order or `T&` as compatibility spellings.
 
 `slot_off(place)`, `construct_at(pointer, value)`, and `destruct_at(pointer)`
 use ordinary call syntax with compiler-known, non-overloadable, unqualified
-names. Resolve them as intrinsics, not `std::` library calls. Only `as` and
-`ptr_as` use the HUC0
-type-operand call production. The old named address-taking intrinsic is
+names. Resolve them as intrinsics, not `std::` library calls. `storage_ptr`
+is another such ordinary call. `as`, `ptr_as`, `size_of`, `align_of`, and
+`is_basic` use the HUC0 type-operand call production. `raw_storage<T, N>` is a
+built-in type primary and may be followed by `()` for empty-storage creation;
+its HUC0 count must be an integer literal. The old named address-taking intrinsic is
 replaced by unary `&`.
 
 Important recovery points are:
@@ -585,7 +587,7 @@ Each concrete type records:
 `construct_at` requires exactly two operands and `destruct_at` one. Infer a
 complete runtime object type `T` from `mod T*`; reject read-only/non-pointer
 operands, invalid pointee types, and first-class or overload declarations for
-these intrinsics. Preserve the pointer-chain restriction. Neither operation
+these intrinsics. Pointer-slot pointees are allowed. Neither operation
 has a HUC0 angle-delimited type operand.
 
 Type-check the second operand of `construct_at` as an initializer for `T`,
@@ -593,6 +595,20 @@ not as an ordinary call parameter. Apply normal built-in conversions,
 Basic/Advanced classification, source permissions, and relocation-state
 checks. Its result is `mod T*`; `destruct_at` returns `void`. Storage lifetime,
 capacity, alignment, and active/inactive preconditions are unchecked.
+
+Intern `raw_storage<T, N>` by canonical element type and count. Require a
+complete runtime object type, positive count, and representable target layout.
+Its size is `N * size_of<T>()` and alignment is `align_of<T>()`. It is always
+Advanced, without `clone` or implicit element drop. Empty-storage creation
+establishes the wrapper without initializing its payload. `storage_ptr` accepts
+one pointer to that wrapper and produces the element pointer with matching
+access permissions; it does not load an element or register cleanup.
+
+Fold `size_of<T>()` and `align_of<T>()` to target `usize`, and `is_basic<T>()`
+to `bool`, with no runtime operands. HUC1 evaluation and HUC0 lowering must
+use the same target layout and classification rules; include target layout
+inputs in specialization cache keys. HUC1 resolves a storage count and prints
+an integer literal in residual HUC0. Runtime counts are not valid type operands.
 
 ### 6.3 HUC1 phase checking
 
@@ -1117,6 +1133,14 @@ destruction needs no runtime call but ends the pointee lifetime in HUC.
 Neither operation adds allocation/deallocation or source/pointer-clearing
 code. Invalid runtime preconditions are not required to be checked.
 
+Raw-storage initialization makes its wrapper Active while leaving its element
+region inactive. MIR need not track individual element states. Whole-wrapper
+relocation transfers live payloads and dormant bytes together, without reading
+inactive slots as typed values. Dropping the wrapper emits no element cleanup;
+the library's length or tag controls explicit `DestructAt` operations. Basic
+copy-and-retire paths may contain a `DestructAt` with no runtime instructions;
+do not erase its lifetime meaning before validation.
+
 ## 12. Lifetime and drop elaboration
 
 ### 12.1 Place state
@@ -1347,6 +1371,17 @@ library or external-call contract.
 Generated helper parameters may use C pointer chains internally; these have
 the same non-owning representation as HUC pointer chains.
 
+Lower `raw_storage<T, N>` to concrete C storage containing a typed `T[N]`
+array, with static assertions for its HUC size and alignment. Declaring that C
+array does not run HUC constructors or register HUC payload cleanup. Lower
+`storage_ptr` to the first element's address and preserve the contiguous region
+for pointer arithmetic. Use representation copying for raw-storage transfers,
+including inactive bytes; never generate typed reads of uninitialized elements.
+Do not implement this as a declared `unsigned char` array followed by arbitrary
+incompatible typed dereferences. Heap allocators must supply suitable storage
+with the C effective-type and alignment behavior required by the emitted
+construction operations. HUC, rather than C scope exit, controls payload lives.
+
 ### 13.2 Operation mapping
 
 | HUC operation | Generated C17 |
@@ -1357,6 +1392,9 @@ the same non-owning representation as HUC pointer chains.
 | `ptr_as<T*>(address)` for `usize` | target-supported integer-to-data-pointer reconstruction |
 | `construct_at(pointer, value)` | Initialize the retained indirect slot using the usual value operation, with no old-value drop or automatic cleanup registration; yield its address |
 | `destruct_at(pointer)` | Complete drop/field cleanup at the retained address without freeing the slot or updating aliased root flags |
+| `raw_storage<T, N>()` | Reserve typed aligned inline storage; no element initialization or implicit element cleanup |
+| `storage_ptr(pointer)` | Address of the first reserved element slot, without reading it |
+| `size_of<T>()` / `align_of<T>()` / `is_basic<T>()` | Target layout/category constants, validated before emission |
 | Advanced relocation | Transfer the whole representation without source clearing; update tracked root state, or leave indirect source cleanup to the programmer |
 | `copy value` for an Advanced type | Call the resolved clone function into a fresh result place |
 | Destruction | Call user `drop`, then reverse field cleanup, only for active values |
@@ -1682,12 +1720,14 @@ symbol hashes must be identical across processes for identical inputs.
 - rejection of old `T&`, type-first declarations, and colon-only `for1` headers;
 - Pratt precedence, ambiguous angle postfixes, and recovery;
 - prefix `&` versus binary `&` and `&&`, including postfix field/index binding;
-- non-composable pointer-suffix and forbidden pointer-slot address diagnostics;
+- pointer chains, alias-expanded chains, and typed pointer-slot addresses;
 - typed `&` addresses and `slot_off` integer addresses, each evaluating its
   place once without transferring its value;
 - slot addresses of fixed, inline, and raw-pointer slots;
 - invalid non-place slot operands and integer-to-pointer type checking;
 - canonical type interning;
+- raw-storage type interning, positive literal counts, layout overflow, and
+  recursive layout diagnostics; target layout/category query evaluation;
 - raw-pointer copying, including null, with no source changes or pointee cleanup;
 - raw-pointer inference for `auto` and permission-dropping conversions;
 - rejection of incompatible pointer types and added pointee `mod`;
@@ -1725,8 +1765,8 @@ nondeterministic numbering.
 Relocation goldens must show whole-value `Relocate`, including for nested
 Advanced aggregates, with no recursive source-field transfers or null stores.
 Replacement goldens must check exact self-relocation before destination
-cleanup. Address-taking goldens distinguish `&inline_place` from
-`slot_off(place)`; only the latter returns an integer and accepts pointer slots.
+cleanup. Address-taking goldens distinguish `&place` from
+`slot_off(place)`; both accept pointer slots, but only the latter returns an integer.
 Pointer-extraction goldens must evaluate the source address once, create an
 active destination, and emit no source clearing, alias-driven flag updates,
 or runtime ownership lookup. Inlining must preserve the source cleanup mode.
@@ -1738,6 +1778,10 @@ Manual-storage goldens must show pointer-before-initializer sequencing, direct
 construction at the supplied address, and complete manual destruction without
 deallocation. Verify that direct Advanced sources become Inactive but aliased
 destination roots keep their existing tracked state.
+Raw-storage goldens must show typed contiguous C backing storage, no element
+construction on wrapper creation, no implicit payload destruction, and no
+per-element flags. Test payload transfer inside a relocated container and
+`storage_ptr` on empty storage without reading uninitialized bytes.
 
 ### 17.3 Execute tests
 
