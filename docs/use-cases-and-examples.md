@@ -24,7 +24,7 @@ The following syntax and behavior describe language rules, not library proposals
 - `let`, `let1`, and `let2`;
 - `mod`;
 - inline values and raw `T*` pointers;
-- unary `&` for addressable data places, including pointer slots;
+- unary `&` for taking the address of any addressable data slot;
 - `ptr_as` for explicit raw-pointer and integer-address casts;
 - `construct_at` and `destruct_at` for manually managed value lifetimes;
 - `raw_storage<T, N>` and `storage_ptr` for typed inline backing storage;
@@ -105,7 +105,7 @@ The examples below cover these use cases:
 | Runtime | Fixed-by-default local and field storage |
 | Runtime | Mutable scalar, pointer slot, and pointee permissions |
 | Runtime | Non-owning observation without lifetime tracking |
-| Runtime | Explicit inline address-taking with unary `&` |
+| Runtime | Explicit address-taking with unary `&` |
 | Runtime | Deterministic cleanup of active values |
 | Runtime | Full-expression temporary lifetimes without observer lifetime extension |
 | Runtime | Consumption through an Advanced by-value parameter |
@@ -234,7 +234,10 @@ Important distinctions:
 - Taking an inline value's address does not relocate it.
 - None of the raw pointers keep the `Counter` alive.
 
-Address-taking for inline storage is explicit and never overloadable:
+Address-taking is explicit and never overloadable. Unary `&` works with any
+addressable data slot, regardless of the type stored there. Variables, fields,
+elements, and dereferenced storage all follow the same rule; pointer slots
+are not a special case. The normal lifetime and access rules still apply.
 
 ```huc
 fn inline_address_example() -> i32 {
