@@ -25,7 +25,7 @@ The following syntax and behavior describe language rules, not library proposals
 - `mod`;
 - inline values and raw `T*` pointers;
 - unary `&` for addressable data places, including pointer slots;
-- `slot_off` for unchecked, untyped slot addresses;
+- `ptr_as` for explicit raw-pointer and integer-address casts;
 - `construct_at` and `destruct_at` for manually managed value lifetimes;
 - `raw_storage<T, N>` and `storage_ptr` for typed inline backing storage;
 - `size_of<T>()`, `align_of<T>()`, and `is_basic<T>()` for layout and category queries;
@@ -251,25 +251,27 @@ Unary `&` adds one pointer level when applied to a pointer slot. Prefix `&`
 takes an address; binary `&` remains bitwise AND. Neither operation depends on
 spacing.
 
-Untyped slot addresses are a separate, unchecked facility:
+Pointer slots use the same address-taking operator. Integer addresses, when
+needed, use an explicit cast:
 
 ```huc
 fn pointer_slot_address_example() -> void {
     let mod counter: Counter = Counter();
     let mod pointer: Counter* = &counter;
-    let address: usize = slot_off(pointer);
-    let bytes: mod u8* = ptr_as<mod u8*>(address);
-    // bytes addresses the pointer slot, not the Counter.
-    // Taking these addresses does not transfer a value.
+    let slot: mod Counter** = &pointer;
+    let address: usize = ptr_as<usize>(slot);
+    let restored: mod Counter** = ptr_as<mod Counter**>(address);
+    *restored = null; // changes pointer, not counter
+    // No address-taking or cast here transfers a Counter.
 }
 ```
 
-An ordinary function can receive `address`, but it receives no typed slot
-reference or automatic lifecycle handling. Taking a fixed slot's address is
-also permitted; writing actually fixed storage remains undefined behavior.
-The caller is responsible for storage lifetime, alignment, valid access, and
-cleanup. Pointer chains remain ordinary non-owning pointer types; this does
-not add ownership or automatic cleanup.
+An ordinary function can receive `slot` directly; the integer round trip is
+optional. Its integer form carries no access permissions or lifetime metadata.
+Taking a fixed slot's address is also permitted, but writing actually fixed
+storage remains undefined behavior after a cast. The caller is responsible
+for storage lifetime, alignment, valid access, and cleanup. Pointer chains
+remain ordinary non-owning pointer types.
 
 Copying a raw pointer leaves its source unchanged, including when null. It
 does not transfer or extend the pointee's lifetime.

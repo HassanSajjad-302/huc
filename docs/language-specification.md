@@ -264,20 +264,19 @@ uses them; line breaks do not replace them.
 ### 3.4 Core intrinsic names
 
 HUC intrinsics use unqualified compiler-known names, not `std::` names.
-`slot_off(place)`, `construct_at(pointer, value)`, and `destruct_at(pointer)`
+`construct_at(pointer, value)` and `destruct_at(pointer)`
 use ordinary call syntax but cannot be overloaded or used as first-class
 function values. Semantic analysis checks their operands and argument counts.
-`as<T>` and `ptr_as<T*>` retain their explicit type operands.
+`as<T>` and `ptr_as<Target>` retain their explicit type operands. `ptr_as`
+converts between raw-pointer types or between a raw pointer and `usize`.
 `size_of<T>()` and `align_of<T>()` are target-layout queries with one type
 operand and no value operands. `raw_storage<T, N>` is a built-in storage type,
 not a phase family; `storage_ptr(pointer)` exposes its element storage.
 `is_basic<T>()` queries the existing Basic/Advanced category at compile time.
 These names likewise cannot be overloaded or used as function values.
 
-Address-taking uses unary `&`, not a named intrinsic call. The former
-`addressof` and `std::slot_of` spellings are not aliases for
-the new operations. Section 6.7 specifies the manual-storage lifetime
-operations `construct_at` and `destruct_at`.
+Address-taking uses unary `&`, not a named intrinsic call. Section 6.7
+specifies the manual-storage lifetime operations `construct_at` and `destruct_at`.
 
 ## 4. Type system
 
@@ -399,34 +398,17 @@ let mod writable: Widget = Widget(9);
 let writable_observer: mod Widget* = &writable;
 ```
 
-The separate compiler-known, non-overloadable intrinsic
-`slot_off(place) -> usize` returns the untyped address of the storage slot
-designated by `place`. It accepts addressable locals, parameters, fields,
-elements, and dereferenced data storage, including raw-pointer slots. A pointer
-operand designates its pointer slot, not its pointee. Forming a place through
-an invalid pointer does not become valid merely because the intrinsic
-returns an integer.
+`&` accepts addressable locals, parameters, fields, elements, and dereferenced
+data storage, including raw-pointer slots. `&pointer` addresses the pointer
+slot, not its pointee. If an integer address is needed, write
+`ptr_as<usize>(&place)` (section 5.5). This still evaluates the place once
+and applies the normal address-taking checks before casting the pointer.
 
-The expression identifying the slot is evaluated exactly once. The intrinsic
-does not load, copy, relocate, or destroy the stored value, allocate or create a
-temporary, extend storage lifetime, or change activation or cleanup state.
-Literals, non-place results, types, and function symbols are not valid operands.
-The returned integer may be passed to an ordinary function and converted to a
-raw pointer using `ptr_as` (section 5.5). `usize` is target-pointer-sized;
-the value is a data-storage address, not a portable serialized address.
-
-Both fixed and writable slots may have their addresses taken this way. The
-compiler does not track mutation permissions through the integer and cast or
-insert permission checks. Correct alignment, storage lifetime, access type,
-valid representation, resource management, and cleanup remain the programmer's
-responsibility. Writing an actually fixed slot is undefined behavior, even if
-the reconstructed pointer has leading `mod`. Raw representation access does
-not automatically destroy a replaced value or update compiler-maintained
-cleanup state. It does not make inactive storage readable or permit duplicate
-cleanup of a resource.
-
-`slot_off` is an untyped escape hatch, not a typed reference. It does not
-change ordinary typed `mod` checks.
+In particular, taking the address of a named Advanced root, or a field path
+through it, requires its tracked state to be Active (section 6.12). To manually
+reuse storage after a direct transfer, retain its pointer before the transfer,
+or use `raw_storage`. Neither obtaining nor casting an address creates a live
+value, extends storage lifetime, or changes automatic cleanup state.
 
 Each `mod` keeps its own meaning inside a structure. A fixed structure
 prevents assignment to its fields and mutation of values stored inline in
@@ -629,23 +611,33 @@ HUC 0.1 provides explicit casts:
 ```huc
 as<T>(value) // checked by static conversion rules
 ptr_as<T*>(pointer_or_address) // raw pointer or usize address reinterpretation
+ptr_as<usize>(pointer) // raw data pointer to target-sized integer address
 ```
 
-`ptr_as` accepts a raw pointer or a `usize` data address and produces the
-specified raw pointer type, including a leading `mod` where spelled. It may
-produce a composed pointer type. A `usize` obtained
-from `slot_off(place)` can be converted back to a pointer addressing that
-same storage while the storage remains valid. Targets must support this
-data-address round trip. Arbitrary integer values do not establish valid
-storage or access rights.
+`ptr_as<Target>(value)` takes one value operand and evaluates it once. When
+`Target` is a raw-pointer type, it accepts a raw pointer or a `usize` data
+address. The target can include pointer chains and spelled `mod` permissions.
+When `Target` is `usize`, the source must be a raw data pointer. Other target
+types and other source/target combinations are rejected.
+
+An unchanged `usize` obtained from `ptr_as<usize>(pointer)` can be converted
+back to the original pointer type to recover the same address while the
+storage remains valid. Targets must support this data-address round trip.
+An integer address is not a portable serialized address. Arbitrary integers
+or arithmetic on an address do not by themselves establish valid storage or
+access rights. Neither direction transfers a pointee or changes cleanup state.
 
 `ptr_as` is unchecked: the cast does not validate alignment, lifetime,
 representation, mutation permissions, or access-type compatibility. For
 example, casting a pointer slot's address to `Widget*` does not make that slot
 a `Widget`; its bytes represent a pointer, not the pointed-to object. Byte
 views through `u8*` or `c8*` follow section 5.3. No function-address conversion
-is provided by this rule. Numeric narrowing is explicit. Representation
-reinterpretation of values (`bit_as`) is deferred from 0.1.
+is provided by this rule. The integer carries no mutation permission or
+lifetime metadata. Writing actually fixed storage remains undefined behavior,
+even after casting to a writable pointer. Byte access does not construct a
+value, destroy a replaced resource, or cancel automatic cleanup. Numeric
+narrowing is explicit. Representation reinterpretation of values (`bit_as`)
+is deferred from 0.1.
 
 ## 6. Value transfer, copying, and destruction
 
@@ -741,8 +733,8 @@ transfer entirely, as long as behavior, source inactivity, and cleanup stay
 the same.
 
 Using a local or parameter whose tracked state is Inactive or MaybeActive
-is a compile-time error. Whole-value assignment and `slot_off` do not read
-the old value and are permitted subject to section 6.12. This check does
+is a compile-time error. Whole-value assignment does not read the old value
+and is permitted subject to section 6.12. This check does
 not track lifetime changes through raw-pointer aliases. Accessing inactive
 storage outside the checked cases remains undefined behavior.
 
@@ -1330,11 +1322,13 @@ The following are not uses and are permitted in any state:
   `x = rebuild(x)` is valid when `x` starts Active: the right-hand side
   transfers `x`, and the store reactivates it without destroying an old value;
 - compiler-inserted destruction at scope exit, which likewise destroys only a
-  live value;
-- `slot_off` applied to the place or a path through its inline fields, which
-  produces an untyped storage address without reading the value. Operations
-  needed to find a slot still count as uses when they read a value: for
-  example, `slot_off(x.next->field)` must read `x.next` first.
+  live value.
+
+`ptr_as<usize>(&x)` still uses `x` through `&` and does not bypass this check.
+A pointer saved before a transfer remains an address, but accessing an inactive
+pointee through it is undefined behavior. It may be used to construct a new
+value in suitable inactive storage; this does not reactivate the original
+name or register automatic cleanup (section 6.7.3).
 
 Fixed locals and parameters cannot be relocation sources (section 6.1), so
 their tracked state stays Active after initialization. This does not prove
@@ -1398,7 +1392,8 @@ calls that could pass a pointer to a root that their arguments transfer:
   value or to a field path of it: `f(&x, x)`, `f(&x.payload, x)`, and
   `f(&x, wrap(x))`. Parentheses and `ptr_as<...>(...)` around the earlier
   argument are looked through, and either arm of a `?:` counts, so
-  `f(ptr_as<u8*>(&x), x)` and `f(c ? &x : &y, x)` are ill-formed too.
+  `f(ptr_as<u8*>(&x), x)`, `f(ptr_as<usize>(&x), x)`, and
+  `f(c ? &x : &y, x)` are ill-formed too.
 
 The root of a receiver or assignment destination is found by removing
 parentheses and field selections and by treating `(&r)->f` as `r.f` and
@@ -1435,8 +1430,8 @@ it can reject code whose unsafe path never runs, because it does not prove
 runtime condition results or relationships between conditions.
 
 Raw-pointer access is still unchecked. Accessing an inactive value through a
-raw pointer or an address obtained from `slot_off` is undefined behavior
-(sections 8.1 and 14). Pointer extraction (section 6.4) does not update an
+raw pointer, including one reconstructed from an integer address, is undefined
+behavior (sections 8.1 and 14). Pointer extraction (section 6.4) does not update an
 aliased local's tracked state, so even a later use of that local by name can
 escape this check and have undefined behavior. The check is not a borrow
 checker and does not make HUC memory-safe.
@@ -1636,9 +1631,10 @@ compiler metadata handle. Ordinary `import` declarations remain. The HUC1
 translator writes one HUC0 module for every residual runtime module before the
 HUC0-to-C17 translator begins.
 
-The built-in HUC0 forms `as<T>` and `ptr_as<T*>` use an angle-delimited type
-operand but are not phase-family requests. No nominal type or ordinary function
-application with phase arguments survives into HUC0.
+Built-in casts such as `as<T>` and `ptr_as<Target>`, type queries, and
+`raw_storage<T, N>` use angle operands without being phase-family requests.
+No nominal type or ordinary function application with phase arguments survives
+into HUC0.
 
 ### 9.2 Uniform phase-1 families
 
@@ -2375,7 +2371,7 @@ The following list is representative rather than exhaustive:
 - signed overflow, invalid shifts, and integer division by zero;
 - data races;
 - accessing a value through an incompatible pointer type;
-- writing actually fixed storage through an untyped slot address;
+- writing actually fixed storage through a cast pointer or integer-address round trip;
 - raw slot manipulation that violates ownership or cleanup obligations;
 - `construct_at` into a live slot, or `destruct_at` on an inactive slot;
 - reading uninitialized storage;
@@ -2417,7 +2413,7 @@ The closest C++ equivalents are conceptual, not emitted C17 declarations:
 | `T*` | `const T*` for a non-pointer `T` |
 | `mod T*` | `T*` for a non-pointer `T` |
 | `&value` | `std::addressof(value)` or `&value` |
-| `slot_off(place)` | a data-slot address converted to `std::uintptr_t` |
+| `ptr_as<usize>(pointer)` | A raw data pointer converted to `std::uintptr_t` |
 | `copy a` | clone/copy construction, explicitly selected |
 | Advanced binding from `*p` | Move construction from `std::move(*p)`, except HUC ends the source lifetime and requires manual source cleanup management |
 | `construct_at(p, value)` / `destruct_at(p)` | `std::construct_at` / `std::destroy_at`, with HUC initialization and cleanup rules |

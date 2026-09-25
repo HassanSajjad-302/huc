@@ -49,24 +49,21 @@ pointer slot adds one pointer level, so `&p` where `p` has type `T*` produces
 without transferring a value, creating a temporary, extending storage
 lifetime, or changing cleanup state. Binary `&` remains bitwise AND.
 
-The separate non-overloadable intrinsic `slot_off(place) -> usize` exposes
-the address of an addressable storage slot, including a raw-pointer slot.
-For a pointer, this is the address of its slot, not its pointee.
-`usize` is target-pointer-sized. The operation evaluates the place once
-without loading or transferring its value. It does not clone, destroy,
-allocate, extend a lifetime, or change cleanup state.
+`&pointer` addresses the pointer slot, not its pointee. Ordinary functions
+can receive this typed pointer directly. If an integer address is needed,
+use `ptr_as<usize>(&place)`; convert it back with `ptr_as<T*>(address)`, using
+the appropriate pointer type. The cast evaluates its operand once and
+does not transfer a value, extend a lifetime, or change cleanup state.
 
-An ordinary function may receive this integer and reconstruct a raw pointer
-with `ptr_as<T*>(address)`, including a pointer-chain type. This gives low-level access to the stored bytes,
-not a new reference type or permission to use inactive storage. Byte access
-through `u8*` or `c8*` does not itself perform lifetime operations or
-establish another valid cleanup obligation for a resource.
+The integer carries no access permissions or lifetime metadata. The programmer
+must respect alignment, access type, valid representation, and cleanup.
+Writing actually fixed storage remains undefined behavior after a cast. Byte
+access through `u8*` or `c8*` performs no lifetime or cleanup operations.
 
-Taking a fixed slot's address is allowed. The compiler does not track mutation
-permissions through these integers and casts or insert permission checks.
-The programmer must respect storage permissions, lifetime, alignment, access
-type, valid representation, and cleanup. Writing fixed storage remains
-undefined behavior; ordinary typed `mod` rules are unchanged.
+`&` still requires a named Advanced root to be tracked Active, even when its
+result is cast to an integer. Manual-storage code can retain a pointer before
+transferring the value or use `raw_storage`; taking a pointer does not keep
+the old value alive. Section 7.5 defines the checked-use boundary.
 
 Declarations use `name: Type`. `mod` before the name controls the slot;
 `mod` inside a pointer type controls the pointee:
@@ -99,9 +96,6 @@ consume(make_widget(7));
 Direct constructor initialization, described in section 4, creates no
 intermediate source place. Copying a raw pointer leaves it unchanged, even
 when null, and never transfers or extends the pointee's lifetime.
-
-`slot_off` is a compiler-known unqualified intrinsic, not a `std::`
-library function.
 
 ## 2. Basic and Advanced types
 
@@ -924,8 +918,9 @@ after the right-hand side has run, so `x.count = consume_and_count(x)` is
 rejected. Assigning a whole new value does not use the old value. It makes
 the place Active again, with a drop flag if needed to decide whether the old
 value needs destruction. Uses on the right-hand side are still checked.
-Scope-exit cleanup and taking an untyped slot address with `slot_off` do not
-read the value either; any separate reads needed to find a slot still count.
+Scope-exit cleanup does not read an inactive value either; it skips that value.
+`ptr_as<usize>(&value)` still performs the checked `&value` operation and is
+rejected when the named root is Inactive or MaybeActive.
 
 In these examples, `Job` and `Document` are Advanced types, for example
 because they declare `drop`:
@@ -1763,7 +1758,8 @@ The compiler must reject:
   relocates a local or parameter after an earlier argument that is `&`
   applied to it or to one of its fields;
 - unary `&` applied to a non-place result, literal, type, or function symbol;
-- `slot_off` applied to a non-place, such as a literal or function symbol;
+- `ptr_as` with a source/target pair other than raw-pointer to raw-pointer,
+  raw-pointer to `usize`, or `usize` to raw-pointer;
 - `construct_at` or `destruct_at` with incorrect arity, a non-pointer or
   read-only pointer operand, or an invalid/incomplete pointee type;
 - `construct_at` with an incompatible initializer or ineligible Advanced source;

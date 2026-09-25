@@ -120,7 +120,7 @@ HUC0 contains:
 - `let` declarations;
 - `mod` permissions;
 - raw pointers `T*`;
-- unary `&`, `slot_off`, `construct_at`, `destruct_at`, and the core
+- unary `&`, `construct_at`, `destruct_at`, and the core
   type-operand intrinsics;
 - typed `raw_storage<T, N>`, `storage_ptr`, and compile-time `size_of`,
   `align_of`, and `is_basic` queries;
@@ -137,7 +137,7 @@ HUC0 does not contain:
 - raw generation operations;
 - unresolved `auto` parameters or inferred function results.
 
-The angle operands in `as<T>`, `ptr_as<T*>`, `size_of<T>()`, `align_of<T>()`,
+The angle operands in `as<T>`, `ptr_as<Target>`, `size_of<T>()`, `align_of<T>()`,
 and `is_basic<T>()` are built-in type operands, not phase-family requests.
 `raw_storage<T, N>` is a built-in type form with a positive integer-literal
 count in HUC0. These are the only angle forms accepted by HUC0.
@@ -234,19 +234,20 @@ level for pointer slots and rejects non-place results, literals, types, and
 function symbols.
 Binary `&` remains bitwise AND.
 
-The non-overloadable `slot_off(place) -> usize` intrinsic separately exposes
-the untyped address of any addressable data slot, including raw-pointer slots.
-It evaluates the place once without loading or transferring its value and
-does not extend storage lifetime or update cleanup state. Fixed slots are
-accepted, but rvalues are not materialized. `usize` is target-pointer-sized;
-`ptr_as<T*>(address)` can reconstruct a raw pointer, including a pointer-chain
-type. Byte views
-use `u8*` or `c8*`; the integer does not make incompatible typed access valid.
+An ordinary function can receive a slot's typed address from `&place`,
+including a pointer to a pointer slot. `ptr_as<usize>(pointer)` converts a raw
+data pointer to an integer address, and `ptr_as<T*>(address)` reconstructs a
+raw pointer, including a pointer-chain type. Require exactly one operand;
+permit pointer-to-pointer, pointer-to-`usize`, and `usize`-to-pointer casts,
+and reject other pairs. Preserve the unchanged-address round trip for the target.
+Byte views use `u8*` or `c8*`; casts do not make incompatible typed access valid.
 
-Mutation permissions are not tracked through the integer and cast. The
-programmer must preserve storage lifetime, alignment, actual permissions,
-valid representation, and cleanup obligations. Writing actually fixed storage
-remains undefined behavior. Ordinary typed `mod` checks remain unchanged.
+Taking `&` of an Inactive or MaybeActive named root remains a diagnostic,
+including when nested in a cast. Manual-storage code retains a pointer before
+transfer or uses `raw_storage`. Casts do not preserve permission metadata or
+update activation and cleanup state. The programmer must preserve storage
+lifetime, alignment, actual permissions, valid representation, and cleanup
+obligations. Writing actually fixed storage remains undefined behavior.
 
 Copying a raw pointer, including a null pointer, leaves the source unchanged.
 It never transfers, destroys, or extends the lifetime of its pointee.
@@ -313,8 +314,9 @@ ordinary indirect assignment assumes a live destination.
 
 Using an Advanced local or parameter whose tracked state is Inactive or
 MaybeActive is a required diagnostic in every compilation mode. The existing
-drop-state analysis supplies that state. Whole-value assignment and `slot_off`
-do not use the old value, although reads in their operands are still checked.
+drop-state analysis supplies that state. Whole-value assignment does not use
+the old value, although reads in its operands are still checked. Scope-exit
+cleanup skips inactive values. `&` is a checked use, including inside `ptr_as`.
 
 The checker follows operations inside conditions without predicting their
 results: every runtime branch outcome counts as possible. It follows
@@ -1173,7 +1175,7 @@ HIR records:
 - unary `&` of an eligible data place, including pointer slots;
 - raw-storage creation, element-address calculation, and folded target layout
   and category queries;
-- untyped `slot_off` and explicit `usize`-to-raw-pointer reconstruction;
+- explicit raw-pointer/`usize` casts in both directions;
 - source origin;
 - explicit conversion selected by HUC.
 
@@ -1514,13 +1516,14 @@ Include:
 - Advanced extraction through a read-only pointer;
 - direct relocation from a field or array element;
 - unary `&` applied to a non-place result, literal, type, or function symbol;
-- `slot_off` applied to a literal, temporary value, or function symbol;
+- taking `&` of an Inactive or MaybeActive root, including inside a cast;
 - wrong arity, non-pointer/read-only operands, or invalid pointee types for
   `construct_at` and `destruct_at`;
 - invalid initializers and ineligible Advanced sources in `construct_at`;
 - overloads or first-class uses of either lifetime intrinsic;
 - attempts to use former address-taking or `std::` intrinsic spellings;
-- `ptr_as` with an invalid source type or non-pointer target;
+- `ptr_as` with incorrect arity or a source/target pair outside the three
+  supported pointer/pointer and pointer/`usize` cases;
 - zero or invalid raw-storage counts, layout overflow, recursive inline layout,
   `copy` of raw storage, and invalid `storage_ptr` operands;
 - incorrect query arity and incomplete/non-runtime query types;
@@ -1541,8 +1544,8 @@ Include:
 
 Compile generated C17 and test:
 
-- typed address-taking and untyped `slot_off` addresses with side-effecting
-  place expressions evaluated once;
+- typed address-taking and explicit integer-address casts with side-effecting
+  operands evaluated once;
 - scalar computation;
 - argument side-effect ordering;
 - temporary receivers surviving an outer observing call and then dropping

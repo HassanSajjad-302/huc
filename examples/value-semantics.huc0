@@ -219,10 +219,11 @@ fn demonstrate_manual_lifetimes() -> void {
     temporary_drop_order = 0;
     {
         let mod storage: TemporaryProbe = TemporaryProbe(1);
+        // Retain the typed storage address while storage is still Active.
+        let slot: mod TemporaryProbe* = &storage;
         let original: TemporaryProbe = storage;
-        // storage is tracked as Inactive. slot_off can still expose its storage.
-        let slot: mod TemporaryProbe* =
-            ptr_as<mod TemporaryProbe*>(slot_off(storage));
+        // storage is now Inactive; taking &storage again would be rejected.
+        // slot still addresses the storage, but no live value may be read there.
 
         let initialized: mod TemporaryProbe* = construct_at(slot, TemporaryProbe(2));
         let mod extracted: TemporaryProbe = *initialized;

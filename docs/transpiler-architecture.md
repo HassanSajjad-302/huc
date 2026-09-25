@@ -374,14 +374,13 @@ flow parses braced bodies, with an `else if` alternative for chained
 conditionals; phase-control bodies still use the deferred-body scanner.
 Do not retain the old declaration order or `T&` as compatibility spellings.
 
-`slot_off(place)`, `construct_at(pointer, value)`, and `destruct_at(pointer)`
+`construct_at(pointer, value)` and `destruct_at(pointer)`
 use ordinary call syntax with compiler-known, non-overloadable, unqualified
 names. Resolve them as intrinsics, not `std::` library calls. `storage_ptr`
 is another such ordinary call. `as`, `ptr_as`, `size_of`, `align_of`, and
 `is_basic` use the HUC0 type-operand call production. `raw_storage<T, N>` is a
 built-in type primary and may be followed by `()` for empty-storage creation;
-its HUC0 count must be an integer literal. The old named address-taking intrinsic is
-replaced by unary `&`.
+its HUC0 count must be an integer literal. Address-taking uses unary `&`.
 
 Important recovery points are:
 
@@ -555,15 +554,18 @@ and lowers to an address calculation. Evaluate the place once; do not
 materialize a temporary, transfer its value, extend its lifetime, or update
 cleanup state. Reject non-place operands, including function symbols.
 
-`slot_off` accepts any addressable data place, including a raw-pointer
-slot, and lowers to its address converted to `usize`. It does not load the
-value or invoke relocation or cleanup. Reject non-place operands rather than
-materializing temporaries. An explicit `ptr_as` from `usize` reconstructs
-a raw pointer, including a composed pointer type; it never changes the
-pointer's ownership or lifetime meaning.
-Permissions and lifetime preconditions remain the caller's responsibility;
-the integer carries no permission or liveness metadata. Escape and alias
-analysis must account for the exposed address.
+`ptr_as<Target>` accepts exactly one value operand and permits raw-pointer to
+raw-pointer, raw-pointer to `usize`, and `usize` to raw-pointer conversions.
+Reject other pairs. Integer conversions preserve the target's unchanged-address
+round trip. Evaluate the operand once and never invoke pointee relocation or
+cleanup. The integer carries no permission or liveness metadata; the caller
+must preserve access rights and lifetime preconditions. Escape and alias
+analysis must account for exposed and reconstructed addresses.
+
+Address-taking is still subject to the named-root activation check, including
+inside `ptr_as<usize>(&place)`. Do not let a cast bypass that check. A pointer
+retained before a direct transfer may address storage for manual reconstruction,
+but using it does not reactivate the original name or register cleanup.
 
 Raw-pointer initialization, assignment, arguments, and returns copy the
 address without modifying the source or touching the pointee's lifetime.
@@ -1388,7 +1390,7 @@ construction operations. HUC, rather than C scope exit, controls payload lives.
 |---|---|
 | `T*` / `mod T*` | Typed C pointers with HUC access permissions checked before emission |
 | `&value` | Address of the corresponding typed storage place |
-| `slot_off(place)` | the slot's data-storage address converted to target `usize` |
+| `ptr_as<usize>(pointer)` | Raw data pointer converted to target `usize` |
 | `ptr_as<T*>(address)` for `usize` | target-supported integer-to-data-pointer reconstruction |
 | `construct_at(pointer, value)` | Initialize the retained indirect slot using the usual value operation, with no old-value drop or automatic cleanup registration; yield its address |
 | `destruct_at(pointer)` | Complete drop/field cleanup at the retained address without freeing the slot or updating aliased root flags |
@@ -1721,10 +1723,11 @@ symbol hashes must be identical across processes for identical inputs.
 - Pratt precedence, ambiguous angle postfixes, and recovery;
 - prefix `&` versus binary `&` and `&&`, including postfix field/index binding;
 - pointer chains, alias-expanded chains, and typed pointer-slot addresses;
-- typed `&` addresses and `slot_off` integer addresses, each evaluating its
-  place once without transferring its value;
+- typed `&` addresses and explicit pointer/integer casts, each evaluating its
+  operand once without transferring a pointee;
 - slot addresses of fixed, inline, and raw-pointer slots;
-- invalid non-place slot operands and integer-to-pointer type checking;
+- invalid non-place address operands and pointer/`usize` cast type checking;
+- Inactive/MaybeActive root address rejection even inside integer casts;
 - canonical type interning;
 - raw-storage type interning, positive literal counts, layout overflow, and
   recursive layout diagnostics; target layout/category query evaluation;
@@ -1765,8 +1768,9 @@ nondeterministic numbering.
 Relocation goldens must show whole-value `Relocate`, including for nested
 Advanced aggregates, with no recursive source-field transfers or null stores.
 Replacement goldens must check exact self-relocation before destination
-cleanup. Address-taking goldens distinguish `&place` from
-`slot_off(place)`; both accept pointer slots, but only the latter returns an integer.
+cleanup. Address-taking goldens include `&place` for pointer slots and
+`ptr_as<usize>(&place)` for integer conversion. The latter must reuse the
+ordinary address calculation and its permission and activation checks.
 Pointer-extraction goldens must evaluate the source address once, create an
 active destination, and emit no source clearing, alias-driven flag updates,
 or runtime ownership lookup. Inlining must preserve the source cleanup mode.
