@@ -694,20 +694,28 @@ This preserves the final `this` address for constructors and avoids an observabl
 relocation. A call that returns a structure uses an explicit result place so
 the callee can construct directly there.
 
-HIR records whether a place is named storage or a fresh unnamed Advanced
-result. Transferring from named storage requires `mod` before its name. A fresh
+HIR records whether a source is a tracked root, a pointer dereference, or a
+direct subobject. Transferring from a named root requires `mod` before its
+name; extraction through a pointer requires pointee `mod` instead. A fresh
 function result, explicit `copy`/clone result, or
 unavoidable constructor temporary can be transferred once without a source
 declaration marked `mod`. Direct construction in the destination remains
 preferred and creates no such temporary.
 
-The metadata also distinguishes compiler-trackable root places from
-subobjects and indirect places. An explicit source-level relocation of a
-Advanced value is accepted only from a whole tracked local, parameter,
-temporary, or result. It is rejected from `value.field`, `array[i]`,
-`*pointer`, and `pointer->field`: the enclosing cleanup would otherwise need
-hidden state inside the object to track which parts remain active. Transferring
-a whole root value includes all subobjects without separate field transfers.
+Relocation accepts a whole tracked local, parameter, temporary, or result, or
+an explicit dereference `*pointer` through `mod T*`. Both forms transfer the
+whole source value. HIR records the cleanup mode: a tracked root updates
+compiler-managed source state, while pointer extraction relies on the
+programmer to prevent cleanup of the inactive source slot. Evaluate the source
+pointer once without changing its address value.
+
+Relocation remains rejected from `value.field`, `array[i]`, and
+`pointer->field`. HUC does not track partially inactive aggregates. Explicit
+dereference of a writable pointer to one of those slots uses programmer-managed
+cleanup; it does not suppress the enclosing object's field/element cleanup.
+Neither pointer provenance nor stack/heap allocation selects the cleanup mode.
+In particular, `*(&local)` does not acquire the direct local's cleanup behavior.
+Preserve this distinction through inlining and other optimizations.
 
 Indirect destinations may be replaced when their validity and activity
 preconditions hold; the restriction above concerns sources. Containers manage
@@ -1060,6 +1068,13 @@ value's representation and makes the source and all its subobjects
 inactive as part of that operation. It never calls source `drop`, performs
 source component cleanup, or requires source fields to be cleared.
 
+The source operand retains the HIR cleanup mode. A tracked root updates its
+active-state metadata. A pointer source ends the pointee lifetime but does
+not search for or alter cleanup metadata of aliased roots or enclosing
+objects. This needs no ownership registry, hidden pointer metadata, or
+per-element flags. The destination is active in either case. Backend
+temporaries for the source address must not create a second owning value.
+
 The two-place MIR operations require different source and destination storage.
 Relocation assignment emits a static no-op or a runtime address-equality
 branch before reaching `Relocate` when source and destination might alias.
@@ -1075,7 +1090,8 @@ for the backend.
 
 ### 12.1 Place state
 
-The pass tracks whether each place of an Advanced-classified type is:
+The pass tracks whether each compiler-managed root place of an
+Advanced-classified type is:
 
 ```text
 Inactive
@@ -1083,8 +1099,14 @@ Active
 MaybeActive
 ```
 
-This analysis ensures exactly-once destruction; it does not make HUC
-memory-safe. The compiler must reject a use it knows is `Inactive`. A
+This analysis arranges exactly-once destruction for tracked roots, provided
+unchecked pointer operations respect their cleanup contracts. Pointer
+extraction does not update root state through aliases; programmer-managed
+storage uses its own initialized-range or equivalent bookkeeping. Attempting
+cleanup of an inactive extracted slot is undefined behavior, not a request
+to discover and suppress that cleanup at runtime.
+
+The compiler must reject a use it knows is `Inactive`. A
 `MaybeActive` use remains allowed in unchecked mode, but executing it on a
 path where the value is inactive is undefined behavior. The compiler may
 warn, or a strict lint mode may reject it.
@@ -1093,7 +1115,9 @@ warn, or a strict lint mode may reject it.
 
 - No flag is needed when static control flow proves a place active or inactive.
 - `MaybeActive` values receive a hidden boolean only when necessary.
-- `Relocate` makes its source inactive.
+- `Relocate` from a tracked root marks that root inactive.
+- `Relocate` through a pointer does not update aliased roots' drop flags;
+  the programmer prevents cleanup of the now-inactive pointee slot.
 - successful construction or reinitialization marks the destination active.
 
 A conditional flag belongs to one MIR storage place. It is stored separately,
@@ -1139,9 +1163,12 @@ Elaboration handles the operations as follows:
 - copying `T*` copies only the observer address and permits null;
 - binding from an Advanced value becomes one fixed representation-transfer
   `Relocate`, which intrinsically makes the source and all subobjects inactive
-  without requiring source-field clearing;
+  without requiring source-field clearing; tracked roots update their cleanup
+  state, while pointer sources leave source cleanup to the programmer;
 - a fresh unnamed Advanced result can be transferred directly;
-  relocation from named storage requires `mod` before its name;
+  relocation from named root storage requires `mod` before its name;
+- extraction through `*pointer` requires `mod T*`, not a writable pointer
+  binding, and does not modify the pointer's address value;
 - relocation assignment first proves distinctness or compares source and
   destination storage addresses at runtime when aliasing is possible; exact
   self-relocation is a no-op, while a distinct active destination is dropped
@@ -1156,14 +1183,17 @@ objects reached only through raw observers. This is a semantic contract the
 unchecked compiler cannot prove.
 
 Field fixedness affects source-level assignment, not this compiler operation.
-Once an allowed whole root source has the required writable slot permission,
+Once an eligible source has the required writable storage permission,
 `Relocate` transfers the whole representation, including its fixed fields.
 
 The source of a successful relocation contains no active HUC value.
-Its representation may retain old bits, but the compiler never calls its
-`drop` method or cleans its fields. Reinitializing that place starts a new
-active lifetime. This is destructive relocation, not a C++-style move
-construction that leaves behind a destructible moved-from object.
+Its representation may retain old bits, but they are not a usable value.
+Tracked source cleanup is suppressed; pointer extraction instead requires
+the programmer to prevent later source cleanup. Reinitializing an inactive
+place starts a new lifetime without first dropping it. Ordinary indirect
+assignment requires a live destination; it does not construct into an
+inactive slot or correct stale automatic cleanup state. This is destructive
+relocation, not a C++-style move that leaves a destructible moved-from object.
 
 No HIR or MIR operation performs overload resolution for relocation. A C
 relocation helper emitted for backend convenience is compiler machinery, not
@@ -1210,7 +1240,7 @@ not add pointer-chain types to HUC.
 | `&value` | Address of the corresponding typed storage place |
 | `slot_off(place)` | the slot's data-storage address converted to target `usize` |
 | `ptr_as<T*>(address)` for `usize` | target-supported integer-to-data-pointer reconstruction |
-| Advanced relocation | Transfer the whole representation and deactivate the source and its subobjects without requiring source-byte clearing |
+| Advanced relocation | Transfer the whole representation without source clearing; update tracked root state, or leave indirect source cleanup to the programmer |
 | `copy value` for an Advanced type | Call the resolved clone function into a fresh result place |
 | Destruction | Call user `drop`, then reverse field cleanup, only for active values |
 | `T(values)` initializing a final place | Generated initializer with an explicit final-destination pointer |
@@ -1306,9 +1336,12 @@ inline code for:
 - explicit logical cloning when supported;
 - explicit library calls for resource allocation and deallocation.
 
-MIR emits drop calls only for active HUC places. A destructively relocated raw
-handle may retain its old bits, but the source never receives a HUC drop call.
-No automatic C cleanup must be neutralized.
+MIR emits automatic drop calls according to tracked root state. A directly
+relocated source may retain old handle bits but receives no HUC drop call.
+Pointer extraction does not update cleanup state through aliases: user code
+must prevent cleanup of the inactive slot, such as by reducing a container's
+initialized length. Automatic cleanup reaching that slot is undefined
+behavior. No automatic C cleanup must be neutralized.
 
 When static analysis cannot decide whether cleanup is needed, a separate
 boolean tracks whether the value is active. It is never a field of the C
@@ -1545,7 +1578,8 @@ symbol hashes must be identical across processes for identical inputs.
 - evaluator arithmetic and resource limits;
 - deferred-body delimiter scanning;
 - raw-generation cursor inheritance;
-- root/subobject/indirect relocation-source eligibility;
+- tracked-root versus pointer-extraction cleanup modes;
+- rejection of direct field/array-element and read-only pointer sources;
 - drop-state analysis and definite-inactive diagnostics.
 
 ### 17.2 Golden tests
@@ -1566,6 +1600,9 @@ Advanced aggregates, with no recursive source-field transfers or null stores.
 Replacement goldens must check exact self-relocation before destination
 cleanup. Address-taking goldens distinguish `&inline_place` from
 `slot_off(place)`; only the latter returns an integer and accepts pointer slots.
+Pointer-extraction goldens must evaluate the source address once, create an
+active destination, and emit no source clearing, alias-driven flag updates,
+or runtime ownership lookup. Inlining must preserve the source cleanup mode.
 
 ### 17.3 Execute tests
 
@@ -1577,6 +1614,10 @@ Compile and run small programs that record:
 - copying fixed and writable raw pointers without modifying the source;
 - relocation of nested Advanced aggregates with cleanup only through the
   active destination;
+- extraction from manually managed slots followed by initialized-range
+  updates, including a pop-style return with exactly one destination cleanup;
+- extraction through a fixed `mod T*` binding without changing its address;
+- Basic pointee copying and explicit pointee cloning leaving sources active;
 
 - exact self-relocation behavior;
 - destruction order;

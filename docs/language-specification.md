@@ -54,7 +54,8 @@ Other recurring terms:
 - **Reseating** a pointer means replacing the address stored in its slot.
 - A **binding** gives a value to a destination, such as a local or parameter.
 - An **active** slot holds a live value. An **inactive** slot must be
-  reinitialized before it can be used as a value again and receives no cleanup.
+  reinitialized before it can be used as a value again. Attempting to destroy
+  an inactive value is invalid; section 6.4 explains who prevents that cleanup.
 - **Residual** code is the runtime code left after compile-time work.
   **Residualization** produces that code; **materialization** writes a
   compiler-known value as valid HUC0 runtime syntax.
@@ -619,9 +620,11 @@ Advanced value is supplied to a destination that stores that value:
 Taking a value's address or calling a method does not transfer it. To observe
 an inline value through a raw-pointer parameter, pass `&value` explicitly.
 
-Whenever relocation from a named place is otherwise permitted, its source
+Whenever relocation from a named root is otherwise permitted, its source
 storage must be writable, expressed by `mod` before the binding name.
-Section 6.4 further restricts subobject sources. Fresh unnamed results can
+Relocation through `*pointer` instead requires `mod T*`; the pointer binding
+itself need not be writable. Section 6.4 defines the source cleanup rules and
+further restricts direct subobject sources. Fresh unnamed results can
 be transferred directly: function results, evaluated `copy` results, and
 other temporary Advanced values need no binding `mod`. Direct
 `T(arguments)` destination construction has no temporary source place.
@@ -673,8 +676,9 @@ compiler from relocating that field as part of a writable containing source.
 Ending the source lifetime does not invoke its `drop` method and does not
 destroy or otherwise clean up its source fields. Cleanup belongs to the
 destination, which is now the one active value. The inactive bytes need not be
-cleared or replaced with a valid “empty” value. Initializing or
-assigning a new value into the source storage starts a new lifetime there.
+cleared or replaced with a valid “empty” value. Constructing a new value in
+the source storage starts a new lifetime there. Ordinary assignment can do
+this for a root tracked as inactive, but not for an inactive indirect slot.
 
 For relocation assignment, the compiler first checks for exact
 self-relocation. If source and destination are the same storage, the operation
@@ -693,28 +697,53 @@ Using inactive storage before reactivation is undefined behavior. A compiler
 should diagnose an obvious straight-line use, but HUC does not promise
 flow-sensitive use-after-relocation prevention.
 
-The implementation must still arrange exactly-once destruction. It may use
-static control-flow facts or hidden drop flags at joins where a value is only
-conditionally active. Such flags are an implementation detail, not runtime
-lifetime checking. Straight-line relocations require no flag.
+Relocation has two source forms:
 
-An explicit Advanced source must be a whole value whose active state
-the compiler tracks directly: a named local or parameter, or a fresh temporary
-or result. These are called root places.
-Whole-value relocation includes subobjects in the same transfer. HUC0
-rejects moving an Advanced value out through a pointer dereference,
-field selection, or array indexing. Otherwise the containing object
-could remain active and later try to clean an inactive subobject without
-storing extra state to track which parts are still active.
+- A whole named local or parameter, or a fresh temporary or result. These
+  are **root places**. The compiler tracks their active state and suppresses
+  cleanup after a direct transfer. It may use static control-flow facts or
+  separate drop flags at joins. Straight-line transfers require no flag.
+- A dereference `*pointer` of type `T`, reached through `mod T*`. This
+  transfers a live Advanced pointee and makes its old slot inactive. The
+  programmer manages source cleanup: the operation does not find or update
+  automatic cleanup state through aliases, including aliases of locals or
+  their fields. No runtime ownership lookup or per-element flags are added.
 
-An eligible root source may replace a valid indirect destination; if it may
-alias that destination, exact storage identity is checked before destruction.
-`copy *pointer` is valid when the pointee is live and supports cloning; it
-leaves that pointee active. Containers manage backing storage and initialized
-element ranges explicitly. The deferred raw-storage lifetime intrinsics are
-limited to `construct_at` and `destruct_at`, with interfaces and detailed
-semantics to be designed later; they do not broaden ordinary relocation-source
-eligibility.
+In both cases, the whole source value and all its fields become inactive.
+No source destructor runs, no source bytes are cleared or initialized to a
+replacement, and the destination receives the cleanup obligation. A source
+pointer is evaluated once and its address value is not changed by extraction.
+The pointee must be live, correctly aligned, and writable; null or otherwise
+invalid pointers do not become valid relocation sources.
+
+For example, a container can extract its last element with
+`let result: File = *element_pointer;` and reduce its initialized length so
+that the old slot receives no later cleanup. This rule depends on who manages
+cleanup, not whether the allocation is on the stack or heap.
+
+Passing `&local` to a function that extracts through its pointer does not
+cancel the caller's automatic cleanup of `local`. Allowing cleanup to reach
+that inactive storage is undefined behavior. The same applies to an extracted
+field when its enclosing object is later destroyed. Any such slot must have
+a new live value before pending cleanup reaches it. Ordinary assignment
+through a pointer assumes a live destination and cannot be used to construct
+into an inactive slot: it would first destroy the old value. Assignment to a
+named local whose cleanup state was not updated has the same problem.
+Construction into inactive manual storage is a separate operation.
+
+Direct relocation from `value.field`, `pointer->field`, or `array[index]`
+remains rejected. HUC does not track partially inactive aggregates. Explicitly
+dereferencing a writable pointer to such a slot uses the programmer-managed
+rule above, not automatic partial-lifetime tracking. `copy *pointer` remains
+valid for a live pointee that supports cloning and leaves it active; ordinary
+binding of a Basic pointee copies it instead of ending its lifetime.
+
+Either eligible source form may replace a valid indirect destination. If
+source and destination may alias, exact storage identity is checked before
+destruction; exact self-relocation remains a no-op. The only deferred
+raw-storage lifetime intrinsics are `construct_at` and `destruct_at`, with
+interfaces and detailed semantics to be designed later. Pointer extraction
+uses ordinary dereference syntax and needs no separate intrinsic.
 
 Inline values whose correctness depends on a stable address are an unchecked
 boundary of this model. For example, destructive relocation does not repair a
@@ -797,6 +826,11 @@ Copying a raw pointer does not create cleanup responsibility. Structures that
 manage resources must release them in `drop`; raw-pointer fields do not
 destroy or deallocate their pointees.
 
+An Advanced value can be extracted with `*pointer` through `mod T*`, under
+the programmer-managed cleanup rules in section 6.4. The old slot is inactive,
+not an empty live value, and must be excluded from destruction until a new
+value is constructed there. This operation does not deallocate the storage.
+
 The planned `construct_at` and `destruct_at` operations will address object
 lifetimes in manually managed storage. Their interfaces remain deferred.
 HUC 0.1 has no built-in allocating constructor expression.
@@ -822,6 +856,9 @@ Pass `&widget` to observe an inline value. An Advanced by-value parameter
 receives the transferred value and its cleanup obligation. An ordinary
 `mod Widget*` can also let a function replace a caller's writable value,
 subject to the usual source, destination, and lifetime rules.
+It can also extract the pointee. Such a function must document that it leaves
+the slot inactive and requires the caller to manage source cleanup; the
+pointer parameter does not carry the caller's automatic cleanup state.
 
 ### 6.10 Return values
 
@@ -834,8 +871,10 @@ copies it. Returning `T*` never transfers or extends the pointee's lifetime.
 
 Values and pointers do not implicitly convert to each other. Use `&value`
 to observe addressable inline storage and `*pointer` to access a live
-pointee. Ordinary Advanced move-out through dereferencing is rejected;
-explicit `copy *pointer` may clone a copyable pointee.
+pointee. Binding from `*pointer` copies a Basic value or relocates an Advanced
+value. Advanced extraction requires `mod T*` and programmer-managed source
+cleanup as described in section 6.4. Explicit `copy *pointer` may clone a
+copyable pointee without making it inactive.
 
 ## 7. Functions and control flow
 
@@ -1755,6 +1794,8 @@ The following list is representative rather than exhaustive:
 
 - invalid raw-pointer dereference or arithmetic;
 - use of inactive Advanced storage;
+- destroying an inactive slot after pointer extraction, including through
+  automatic local or enclosing-object cleanup that extraction did not cancel;
 - violation of an external function's contract;
 - out-of-range unchecked indexing;
 - signed overflow, invalid shifts, and integer division by zero;

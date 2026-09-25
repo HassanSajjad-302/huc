@@ -17,7 +17,8 @@ A few terms used throughout:
 - **Pointee**: the object a pointer points to.
 - **Binding**: giving a value to a destination, such as a new local or parameter.
 - **Active**: the slot contains a live value. An **inactive** slot must be
-  reinitialized before it can be used as a value again; it receives no cleanup.
+  reinitialized before it can be used as a value again. It must not be
+  destroyed; section 7.3 explains who prevents that cleanup.
 
 ## 1. Values and raw pointers
 
@@ -603,9 +604,11 @@ part of a whole value. The containing source must be writable. For example,
 transferring a writable structure also transfers its fixed Advanced fields.
 
 The bytes of an inactive source need not be cleared and need not form a valid
-representation of `T`. The compiler tracks whether the *storage place* is
-active. Assigning a new value to an inactive place begins a new lifetime there.
-Using it as a value before reinitialization is undefined behavior.
+representation of `T`. For directly named locals and parameters, the compiler
+tracks whether the *storage place* is active. Assigning a new value to a place
+tracked as inactive begins a new lifetime there without dropping an old value.
+Pointer extraction instead leaves source cleanup to the programmer, as
+section 7.3 explains. Using inactive storage as a value is undefined behavior.
 
 C++ move construction has a different lifetime model: it constructs a
 destination object while the source object remains alive and is destroyed
@@ -724,40 +727,68 @@ compiler is not required to prove address independence.
 
 ### 7.3 Where a transfer may take its value from
 
-Transferring an Advanced value requires a whole value whose active
-state the compiler tracks directly:
+An Advanced value can be transferred from either kind of source:
 
-- a named local or parameter with the required `mod` before its name;
-- a fresh temporary or function-result place.
+| Source | Who prevents later cleanup of the old value? |
+|---|---|
+| A whole local or parameter with binding `mod`, or a fresh temporary/result | The compiler updates that place's active state. |
+| `*pointer` through `mod T*` | The programmer manages cleanup of the old slot. |
 
-Transferring a whole structure or array includes all its fields or elements.
-It does not remove them one at a time while leaving the containing value active.
-
-HUC0 rejects explicit Advanced move-out from a pointee or subobject:
+Both forms transfer the whole value, including its fields. The source becomes
+inactive, the destination takes responsibility for cleanup, and no source
+destructor, nulling, or replacement initialization occurs. The old bytes are
+not a usable second value. The pointer expression is evaluated once; extraction
+does not change the pointer's address value. Its binding can be fixed, but its
+pointee must be writable, live, and correctly aligned.
 
 ```huc
-let value: File = *file_pointer; // error: indirect Advanced source
-let lease: Lease = session.lease; // error: Advanced subobject source
-let packet: Packet = packets[index]; // error: Advanced element source
+// file_pointer has type mod File* and points to a live, manually managed File.
+let value: File = *file_pointer; // allowed; the old slot is now inactive
+// The storage manager must exclude that slot from cleanup.
 ```
 
-Otherwise a containing object or array could remain active even though a
-value it must later destroy is already inactive. A raw pointer also carries
-no information about the pointee's cleanup scope. HUC0 does not track such
-partial lifetimes for ordinary relocation.
+A raw pointer does not carry the pointee's automatic cleanup state. Extraction
+does not cancel cleanup of an aliased local or enclosing object, even when the
+pointer was obtained with `&`. For example:
 
-This restriction does not affect:
+```huc
+fn extract(file_pointer: mod File*) -> File {
+    return *file_pointer;
+}
 
-- Basic values, which are copied rather than consumed;
-- `copy *file_pointer`, which clones while leaving the pointee active;
-- replacement of a valid indirect destination from an otherwise eligible
-  source.
+fn incorrect() -> void {
+    let mod file: File = File(probable_os_open("input.dat"));
+    let value: File = extract(&file);
+    // Incorrect: file's automatic cleanup has not been cancelled.
+} // Reaching cleanup of the inactive file is undefined behavior.
+```
 
-Exact self-assignment remains a no-op. When an eligible root source and an
-indirect destination can alias, the backend compares their storage addresses
-before destroying the destination. Container and manual-storage implementations
-manage backing storage and initialized element ranges explicitly; this does
-not extend ordinary relocation-source eligibility.
+The correct direct-local form is `let value: File = file;`: it lets the
+compiler suppress `file`'s cleanup. Pointer extraction is useful when code
+manages its own live slots, such as a vector that reduces its initialized
+length after extracting the last element. This distinction is about cleanup
+responsibility, not stack versus heap allocation. No per-element flags or
+runtime ownership lookup are required.
+
+Direct field and array-element moves remain rejected:
+
+```huc
+let lease: Lease = session.lease; // error: direct Advanced field source
+let other: Lease = session_pointer->lease; // error: direct field source
+let packet: Packet = packets[index]; // error: direct Advanced element source
+```
+
+HUC does not track partially inactive aggregates. Explicit extraction through
+a writable pointer to a field or element is allowed, but leaves the same
+cleanup obligation with the programmer. The enclosing object must not later
+try to destroy that inactive slot. Taking a pointer is not a way to cancel
+automatic field cleanup.
+
+Basic pointees are still copied, not consumed. `copy *file_pointer` clones a
+live, copyable pointee and leaves it active; it does not require pointee `mod`.
+Either eligible source form may replace a valid indirect destination. Exact
+self-assignment remains a no-op; when source and destination can alias, the
+backend compares their storage addresses before destroying the destination.
 
 ### 7.4 Native handle example
 
@@ -864,8 +895,8 @@ Using source and destination storage that overlaps but is not identical is
 undefined behavior.
 The compiler should diagnose obvious cases.
 
-Assignment to an already inactive destination skips destination destruction
-and begins a new active lifetime:
+Assignment to a destination the compiler tracks as inactive skips destination
+destruction and begins a new active lifetime:
 
 ```huc
 let mod first: File = File(probable_os_open("a.dat"));
@@ -873,6 +904,14 @@ let mod second: File = first; // destructive relocation; first inactive
 
 first = File(probable_os_open("b.dat")); // first active again
 ```
+
+This does not apply to a slot made inactive through pointer extraction.
+Extraction did not update any aliased local's cleanup state. Ordinary
+assignment through a pointer, or through a local still tracked as active,
+would try to destroy the old value. Inactive manual storage instead needs
+construction without old-value destruction; the planned `construct_at`
+interface will cover that operation. The new value must be live before any
+pending automatic cleanup reaches the slot.
 
 ## 9. Destruction with `drop`
 
@@ -931,8 +970,10 @@ Destruction order is:
 3. destruction of the inline `log` field.
 
 `drop` must not manually destroy Advanced fields that normal field cleanup
-will destroy. HUC0's source-place rule forbids relocating an Advanced field
-out of the still-addressable object, even from `drop`.
+will destroy. Direct relocation from an Advanced field remains rejected,
+even inside `drop`. Extracting through a writable pointer does not suppress
+the subsequent automatic field cleanup; leaving such a field inactive when
+`drop` returns is undefined behavior.
 
 There is no exception unwinding in HUC0. A terminating panic need not execute
 pending `drop` operations.
@@ -1084,10 +1125,32 @@ A reallocation of `Vector<T>`:
 
 The container is responsible for its backing storage and initialized element
 range. It must ensure that old slots whose values were transferred receive
-no element cleanup. The only additional raw-storage lifetime intrinsics
-planned are `construct_at` and `destruct_at`; their interfaces and detailed
-semantics will be designed later. Ordinary relocation-source restrictions and
-the absence of user-defined relocation hooks remain unchanged.
+no element cleanup. Extraction through a writable pointer provides the
+transfer itself. For example, with the `File` type above:
+
+```huc
+// Preconditions: storage holds *length live Files, *length > 0,
+// and length points to separate writable container bookkeeping.
+// The container, not automatic element cleanup, manages these slots.
+fn pop_file(storage: mod File*, length: mod usize*) -> File {
+    let last: usize = *length - 1;
+    let mod result: File = *(storage + last);
+    *length = last; // exclude the inactive slot from later element cleanup
+    return result; // direct local transfer; result's cleanup is suppressed
+}
+```
+
+The returned `File` is responsible for closing the handle. The old slot has
+no live `File` and receives no destructor call; neither its bytes nor the
+source pointer need clearing. The backing allocation stays allocated.
+The container must construct a new value before including that slot in its
+initialized range again. No clone, replacement value, or per-element flag
+is needed to pop.
+
+The only additional raw-storage lifetime intrinsics planned are `construct_at`
+and `destruct_at`; their interfaces and detailed semantics will be designed
+later. Extraction needs no separate intrinsic. Direct field/array-element
+move restrictions and the absence of user-defined relocation hooks remain.
 
 If `Vector<T>` itself supports logical copying, its library implementation can
 declare `clone` and explicitly copy each element. Copying a vector of Advanced
@@ -1306,8 +1369,8 @@ member, reference category, allocator hook, or overload pattern exists in HUC.
 The compiler must reject:
 
 - relocating from a fixed source slot;
-- explicit relocation of an Advanced value from a pointee, field
-  subobject, or array element;
+- extraction of an Advanced value through a read-only `T*`;
+- direct relocation of an Advanced value from a field or array element;
 - copying an Advanced structure that has no valid `clone`;
 - a `clone` with parameters, a writable receiver, or the wrong return type;
 - more than one `clone` in a structure;
@@ -1343,7 +1406,8 @@ inheriting C defaults:
 3. Relocation transfers the representation, makes the whole source inactive,
    and requires no clearing of source bytes; it is non-failing and independent
    of user overloads.
-4. Inactive values are not dropped.
+4. Directly tracked inactive values are not dropped. Pointer extraction
+   leaves prevention of source cleanup to the programmer, not alias tracking.
 5. Exact self-relocation assignment is a no-op.
 6. `drop` runs before reverse field cleanup.
 7. Arguments and parameter initialization are left-to-right.
@@ -1351,10 +1415,12 @@ inheriting C defaults:
    customization points.
 9. Active/inactive state belongs to a storage place and must not add a hidden
    field to nominal `T`.
-10. Cleanup covers every normal exit and active replacement. An inactive
-    source receives no cleanup merely because its physical C storage leaves scope.
-11. Relocation sources satisfy the root-place restriction; a possibly aliasing
-    indirect destination is checked before replacement.
+10. Automatic cleanup follows tracked root state on every normal exit and
+    replacement. Programmer-managed extraction must respect that state; C
+    scope exit alone never performs HUC cleanup.
+11. Relocation accepts writable whole root sources and writable pointer
+    dereferences, with distinct source-cleanup responsibilities. Possibly
+    aliasing source/destination storage is checked before replacement.
 12. Raw-pointer copying leaves the source unchanged and never cleans up or
     extends the lifetime of a pointee.
 

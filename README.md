@@ -99,16 +99,23 @@ source and destination are distinct slots:
 ### Explicit access and copying
 
 `&value` returns a raw pointer and does not extend the value's lifetime.
-To read a pointee into an inline `T`, use `*pointer` when `T` is Basic.
-For an Advanced `T`, ordinary move-out through dereferencing is rejected;
-use `copy *pointer` if `T` supports cloning. The pointee must be live and
-accessible. Explicit copying leaves it unchanged.
+To bind a pointee into an inline `T`, use `*pointer`. This copies a Basic
+value or transfers an Advanced value. An Advanced transfer requires a
+`mod T*` and leaves the old slot inactive without clearing its bytes.
+The programmer must prevent cleanup of that old slot; the compiler does not
+cancel automatic cleanup through pointer aliases. For example, a container
+can remove the extracted slot from its initialized range.
+
+Use `copy *pointer` to clone an Advanced value that supports cloning while
+leaving it active. The pointee must be live and accessible in either case.
 
 ### Permissions and cleanup
 
 - Relocating a named Advanced value requires a writable source slot
-  (`mod` before its name). Sources must be whole locals, parameters, or fresh
-  results, not individual fields, elements, or pointees.
+  (`mod` before its name). The compiler manages source cleanup for whole
+  locals, parameters, and fresh results. Extraction through `*pointer` uses
+  programmer-managed source cleanup instead. Direct field and array-element
+  moves remain rejected; HUC does not track partially inactive objects.
 - Copying a raw pointer does not clear it. Pointee `mod` may be dropped but
   never gained by ordinary pointer conversion.
 - Replacing an existing value requires a writable destination. An active

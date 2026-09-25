@@ -692,10 +692,22 @@ representation. Mutable address-dependent values have the same requirement:
 do not relocate them while their address-dependent invariants are needed.
 
 Contiguous containers manage backing storage and initialized element ranges
-explicitly, including preventing cleanup of retired source slots. Ordinary
-Advanced move-out through indexing or dereferencing remains prohibited.
+explicitly, including preventing cleanup of retired source slots. They can
+extract an Advanced element with `let mod value: T = *(data + index);` through
+a `mod T*`, then update their bookkeeping to exclude that inactive slot from
+cleanup. Extraction does not clear the source bytes or change the pointer
+address. The returned value takes responsibility for the resource.
+
+The compiler does not cancel automatic local or field cleanup through pointer
+aliases. Passing `&local` to an extracting function and then letting that
+inactive local receive automatic cleanup is undefined behavior. Direct
+Advanced moves from fields or array indexing remain rejected; the explicit
+pointer form leaves source cleanup to the programmer instead of tracking
+partial lifetimes.
+
 The planned `construct_at` and `destruct_at` interfaces will be designed
-separately.
+separately. In particular, ordinary indirect assignment assumes a live
+destination, so it cannot construct a new value in the extracted slot.
 
 A future custom relocation hook should be considered only if real
 address-repair cases justify changing the fixed-transfer model.
@@ -909,8 +921,10 @@ The standard-library API is not settled, but the intended value behavior is:
 - buffers and errors use ordinary value semantics.
 
 The illustrative result-extraction methods must manage their initialized
-payload state explicitly. They depend on the separately planned manual-storage
-lifetime operations; they do not permit ordinary transfer out of an Advanced field.
+payload state explicitly. Pointer extraction can transfer a manually managed
+payload, but it does not disable automatic field cleanup. Payload construction
+and destruction still depend on the separately planned manual-storage lifetime
+operations; direct moves from Advanced fields remain rejected.
 
 ## 4. HUC1 control-flow examples
 

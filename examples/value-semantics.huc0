@@ -84,6 +84,22 @@ fn receive(buffer: NativeBuffer) -> u8 {
     return buffer.first();
 } // buffer is dropped here
 
+// A helper for future manually managed container storage, not automatic arrays.
+// Preconditions: data holds *length live NativeBuffers, *length > 0,
+// and length points to separate writable container bookkeeping.
+// The caller must destroy only the remaining initialized prefix afterward.
+// Pointer extraction does not cancel automatic cleanup through aliases.
+// Do not use this helper on an automatic local and then let that inactive
+// local be destroyed. Raw-storage construction/destruction APIs are deferred,
+// so main does not allocate backing storage for this helper yet.
+fn pop_last_buffer(data: mod NativeBuffer*, length: mod usize*) -> NativeBuffer {
+    let last: usize = *length - 1;
+    let mod result: NativeBuffer = *(data + last);
+    // The old slot is inactive. Extraction neither clears it nor changes data.
+    *length = last;
+    return result; // direct local transfer suppresses result's cleanup here
+}
+
 fn demonstrate_copy_values() -> void {
     let first: Point = Point(10, 20);
     let second: Point = first; // implicit fieldwise copy

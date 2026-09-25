@@ -246,7 +246,9 @@ Resource-managing structures use ordinary `drop` and Advanced relocation.
 Allocation and deallocation are explicit library or external operations;
 HUC0 has no built-in allocating constructor expression.
 
-Relocating a named Advanced source requires binding `mod`. Fresh unnamed
+Relocating a named Advanced root requires binding `mod`. Extraction through
+`*pointer` requires pointee `mod` and programmer-managed source cleanup;
+the pointer binding itself can be fixed. Fresh unnamed
 function results, evaluated `copy` results, and other temporary Advanced
 values can transfer without it. Direct `T(arguments)` construction in the
 destination has no temporary source place.
@@ -296,7 +298,9 @@ A fixed field cannot be assigned to directly, but it can be transferred as
 part of a whole writable source value.
 
 The bytes of an inactive source need not be cleared or form a valid `T`.
-Assigning a new value begins a new active lifetime there.
+Assigning to a root tracked as inactive begins a new active lifetime there.
+Inactive manual storage requires construction without old-value destruction;
+ordinary indirect assignment assumes a live destination.
 
 Obvious invalid use should be diagnosed, but HUC does not promise complete
 flow-sensitive use-after-relocation prevention.
@@ -335,26 +339,40 @@ bytes a defined meaning. The backend may copy memory, use loads and stores or
 registers, or remove the transfer when the program still behaves the same.
 The source must become inactive, and cleanup must still happen exactly once.
 
-Explicit relocation is restricted to whole values tracked directly
-by the compiler: named locals and parameters, and fresh temporaries or results.
-Moving a whole aggregate includes its subobjects in the same operation; it does not
-move them individually out of an otherwise active object. HUC0 rejects
-moving an Advanced value out through `*pointer`, `pointer->field`,
-`value.field`, or `array[index]`. Leaving such a subobject inactive while its
-containing object remains active would make later cleanup invalid
-without extra state to track which parts are still active.
+Relocation accepts two source forms:
+
+- A whole named local or parameter, or a fresh temporary/result. The compiler
+  updates that root place's active state and suppresses source cleanup.
+- `*pointer` through `mod T*`. The source pointee becomes inactive, but the
+  programmer must prevent later cleanup of its slot. The pointer expression
+  is evaluated once; extraction does not change the pointer address, clear
+  source bytes, or install a replacement value.
+
+Pointer extraction never finds and cancels automatic cleanup through aliases,
+including aliases of locals or their fields. Its semantics must not depend on
+inlining or whether the compiler can recognize `&local`. Cleanup reaching an
+inactive extracted slot is undefined behavior. Stack versus heap allocation
+does not determine cleanup responsibility.
+
+HUC0 still rejects direct moves from `pointer->field`, `value.field`, or
+`array[index]`; it does not track partially inactive aggregates. Explicit
+dereference of a writable pointer to such a slot uses programmer-managed
+cleanup and does not disable automatic enclosing-object cleanup.
 
 Copying/cloning an indirectly reached value remains valid when it is live
-and supports logical copying. An eligible root source may replace an indirect
-destination; if the two can alias, exact storage identity is checked before
-destination destruction. No general indirect relocation operation is part of
-HUC0.
+and supports logical copying. Either eligible source form may replace a valid
+indirect destination; if the two can alias, exact storage identity is checked
+before destination destruction. Basic pointee binding still copies, leaving
+the source active.
 
-Container implementations are responsible for backing storage and initialized
-element ranges. The only additional raw-storage lifetime intrinsics planned
-are `construct_at` and `destruct_at`; their interfaces and detailed
-semantics are deferred to later standard-library design. This does not change
-ordinary relocation-source eligibility.
+Container implementations manage backing storage and initialized element
+ranges. For example, a pop implementation extracts its last element through
+a writable pointer and reduces the length, excluding that inactive slot from
+later cleanup. No replacement value, per-element flag, or extraction intrinsic
+is required. The only additional raw-storage lifetime intrinsics planned are
+`construct_at` and `destruct_at`; their interfaces and detailed semantics are
+deferred to later standard-library design. Ordinary assignment is not a
+substitute for construction into an inactive slot.
 
 ### 5.5 Construction and initialization
 
@@ -1030,7 +1048,8 @@ Acceptance:
 - `mod` cannot be gained implicitly;
 - fixed storage cannot be assigned through ordinary typed operations;
 - fixed Advanced values cannot be relocated;
-- Advanced subobjects cannot be explicit relocation sources;
+- direct Advanced field/array-element moves are rejected;
+- pointer extraction requires `mod T*` and accepts a fixed pointer binding;
 - all constructor field obligations are checked.
 - every accepted C-linkage signature has a documented target ABI mapping.
 
@@ -1054,7 +1073,8 @@ MIR records:
 - active/inactive Advanced state;
 - cleanup edges;
 - conditional drop flags only where control flow requires them;
-- whole-source deactivation without clearing source bytes.
+- whole-source deactivation without clearing source bytes;
+- tracked-root versus programmer-managed indirect source cleanup.
 
 No semantic decision is deferred to the C compiler or its ABI lowering.
 
@@ -1062,7 +1082,8 @@ Acceptance:
 
 - HIR/MIR dumps expose every relocation and observation;
 - argument and operand sequencing is explicit;
-- cleanup is exactly once on every normal control-flow exit.
+- tracked-root cleanup is exactly once on every normal exit when user code
+  respects indirect extraction and other unchecked lifetime contracts.
 
 ### 10.6 Increment E: scalar C17 backend
 
@@ -1096,9 +1117,11 @@ Acceptance:
 ### 10.7 Increment F: value transfer and lifecycle
 
 MIR determines cleanup edges, active/inactive value state, and conditional
-drop flags. Emit cleanup on normal exits, early returns, loop exits, and
-replacement of active destinations. An inactive source receives no cleanup
-and need not be cleared. C scope exit does not perform HUC cleanup.
+drop flags for compiler-managed roots. Emit cleanup on normal exits, early
+returns, loop exits, and replacement of active destinations. A directly
+relocated root receives no cleanup and need not be cleared. Pointer extraction
+does not update automatic cleanup through aliases; programmers prevent
+cleanup of the old slot. C scope exit does not perform HUC cleanup.
 
 Implement:
 
@@ -1120,7 +1143,9 @@ Acceptance:
   field transfers or source clearing;
 - copying fixed or writable raw pointers leaves their addresses unchanged;
 - `auto` from a raw pointer stays raw, with no cleanup of its pointee;
-- indirect Advanced move-out is rejected;
+- extraction through writable pointers is accepted without source clearing
+  or alias-driven changes to automatic cleanup state;
+- direct field/array-element moves and read-only pointer extraction are rejected;
 - ordinary binding never invokes `clone`;
 - sanitizers find no backend double destruction;
 - optimized operation counts match equivalent explicit C resource-management code.
@@ -1354,7 +1379,8 @@ Include:
 - malformed but skipped code;
 - phase leaks;
 - relocation from fixed storage;
-- relocation from a pointee, field, or array element;
+- Advanced extraction through a read-only pointer;
+- direct relocation from a field or array element;
 - unary `&` applied to a pointer slot, non-place result, or function symbol;
 - `slot_off` applied to a literal, temporary value, or function symbol;
 - attempts to use former address-taking or `std::` intrinsic spellings;
@@ -1391,6 +1417,10 @@ Compile generated C17 and test:
 - bitwise relocation, whole-source deactivation, and self-relocation;
 - relocation of nested Advanced aggregates with exactly-once destination
   cleanup and no inactive-source cleanup;
+- extraction from manually managed slots with initialized-range bookkeeping,
+  including a pop-style return without cloning or a replacement value;
+- single evaluation of pointer sources with unchanged pointer addresses and
+  no source clearing or per-element flags;
 - user `drop` and reverse field cleanup;
 - module imports;
 - full HUC1-to-program examples.
