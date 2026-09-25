@@ -69,7 +69,7 @@ HUC is not a memory-safe Rust alternative. It deliberately permits:
 - dangling and invalid raw pointers;
 - null dereferences;
 - unchecked indexing and pointer arithmetic;
-- use of inactive source storage after relocation;
+- access to relocated storage through raw pointers or untyped addresses;
 - data races;
 - signed overflow and other specified undefined behavior.
 
@@ -302,8 +302,25 @@ Assigning to a root tracked as inactive begins a new active lifetime there.
 Inactive manual storage requires construction without old-value destruction;
 ordinary indirect assignment assumes a live destination.
 
-Obvious invalid use should be diagnosed, but HUC does not promise complete
-flow-sensitive use-after-relocation prevention.
+Using an Advanced local or parameter whose tracked state is Inactive or
+MaybeActive is a required diagnostic in every compilation mode. The existing
+drop-state analysis supplies that state. Whole-value assignment and `slot_off`
+do not use the old value, although reads in their operands are still checked.
+
+The checker follows operations inside conditions without predicting their
+results: every runtime branch outcome counts as possible. It follows
+left-to-right argument binding, rejecting `f(x, x.size())`. A field store is
+checked both before and after its right-hand side, rejecting
+`x.count = consume_and_count(x)`.
+
+Two additional checks recognize direct receiver and pointer-argument forms.
+A call is rejected if argument evaluation transfers the root of its receiver
+(`x.absorb(x)`), or transfers a root after an earlier argument took its address
+or the address of one of its inline fields (`f(&x, x)`, `f(&x.payload, x)`).
+The recognized spellings are defined in language specification section 6.12;
+this is not general alias tracking. Pointer extraction does not update the
+tracked state of aliased locals, and raw-pointer lifetime checks remain the
+programmer's responsibility.
 
 `copy expression` explicitly requests logical duplication:
 
@@ -1138,6 +1155,9 @@ Acceptance:
 
 - straight-line relocations require no hidden state;
 - conditional relocations use flags only when necessary;
+- every named use of an `Inactive` or `MaybeActive` root is rejected, including
+  uses in later arguments of the same call and self-receiver or earlier-`&`
+  relocations, while reinitialization of such a root is accepted;
 - raw-handle `drop` types relocate without duplicate cleanup;
 - Advanced aggregates lower to whole-value `Relocate` without recursive
   field transfers or source clearing;
@@ -1379,6 +1399,13 @@ Include:
 - malformed but skipped code;
 - phase leaks;
 - relocation from fixed storage;
+- use of an Advanced local or parameter after an unconditional relocation;
+- use after a relocation in one branch, in a short-circuit operand, in a `?:`
+  arm, or in a loop body without reinitialization;
+- `f(x, x.size())`, passing one local by value twice, `x.absorb(x)`,
+  `x.absorb(wrap(x))`, `f(&x, x)`, and `x.count = consume_and_count(x)`,
+  alongside accepted near-misses such as `f(x.size(), x)`,
+  `f(length_of(&x), x)`, and `x = rebuild(x)`;
 - Advanced extraction through a read-only pointer;
 - direct relocation from a field or array element;
 - unary `&` applied to a pointer slot, non-place result, or function symbol;

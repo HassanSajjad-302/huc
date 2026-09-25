@@ -75,9 +75,14 @@ fn main() -> i32 {
 ```
 
 HUC intentionally permits dangling raw pointers, null dereferences, unchecked
-pointer arithmetic, use of inactive storage after relocation, data races, and
-other forms of undefined behavior. Its goal is lower language complexity and
-low runtime cost, not static memory safety.
+pointer arithmetic, access to relocated storage through raw pointers, data
+races, and other forms of undefined behavior. Its goal is lower language
+complexity and low runtime cost, not static memory safety. HUC does require
+one compile-time check: a directly tracked local or parameter cannot be used
+after it may have been transferred, even if the transfer happens in only one
+branch. Assigning it a new value makes it usable again. Pointer extraction
+does not update that tracked state; its lifetime and cleanup obligations
+remain the programmer's responsibility.
 
 ## Value and pointer assignment
 

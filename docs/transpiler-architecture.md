@@ -1106,10 +1106,48 @@ storage uses its own initialized-range or equivalent bookkeeping. Attempting
 cleanup of an inactive extracted slot is undefined behavior, not a request
 to discover and suppress that cleanup at runtime.
 
-The compiler must reject a use it knows is `Inactive`. A
-`MaybeActive` use remains allowed in unchecked mode, but executing it on a
-path where the value is inactive is undefined behavior. The compiler may
-warn, or a strict lint mode may reject it.
+The same state drives the required relocation-state check (language
+specification section 6.12). Any MIR use of a tracked root that is `Inactive`
+or `MaybeActive` at that point is a diagnostic in every compilation mode. A
+use is any `Copy`, `Clone`, `Relocate`, `AddressOf`, field projection,
+method-receiver formation, or store into a field of the root. A field store
+is checked both when its destination is formed and when the store occurs,
+after evaluation of its source operand. Storing a whole new value, scope-exit
+`Drop`, and `SlotAddress` are not uses of the old value. Computing their
+operands may still read values and must be checked. Field projections used
+only to form `SlotAddress` through inline fields do not read the root.
+MIR is already sequenced in HUC evaluation order, so later arguments are
+checked against the state left by earlier parameter bindings.
+
+The pass also rejects a `Relocate` from a root that happens during a call's
+argument evaluation, including in a nested expression, in two cases. The
+first is when the root is the root of the call's receiver place. The second
+is when an earlier argument of that call is an `AddressOf` of the root or of
+one of its fields. An address formed inside an earlier argument that does
+not itself become an argument does not count. Constructor expressions and
+initializer entries count as calls. Receiver roots, destination roots, and
+earlier `AddressOf` arguments are recognized as specification section 6.12
+describes.
+HIR records the source spellings needed for this: parentheses, field
+projections, `(&r)->f`, `*&r`, `ptr_as`, and either arm of `?:`. That
+recognition does not change the cleanup mode of `*&r` (section 7).
+
+The pass reports each diagnostic at the HIR source origin of the offending
+use, together with the relocation that made the root inactive.
+
+The checker processes operations in conditions but does not fold their
+results or infer relationships between them. Every `Branch` and `Switch`
+successor is considered possible. Loop back edges join with loop entry;
+iterate until the states stop changing before reporting use diagnostics.
+Each `break` edge joins the loop exit. A call whose result type is `never`
+has no successor. Unreachable code is exempt from this state check, not from
+ordinary parsing, name resolution, or type checking.
+
+Run the check on each concrete HUC0 function, including every residual
+specialization produced by HUC1, before runtime constant folding removes
+branches. Drop flags remain a cleanup mechanism: no runtime test of a flag
+is added to permit a use of an Inactive or MaybeActive root. This guarantee
+covers tracked state, not lifetime changes through unchecked pointer aliases.
 
 ### 12.2 Drop flags
 
@@ -1580,7 +1618,10 @@ symbol hashes must be identical across processes for identical inputs.
 - raw-generation cursor inheritance;
 - tracked-root versus pointer-extraction cleanup modes;
 - rejection of direct field/array-element and read-only pointer sources;
-- drop-state analysis and definite-inactive diagnostics.
+- drop-state analysis and relocation-state diagnostics for both `Inactive`
+  and `MaybeActive` uses, covering branches, short-circuit operators, `?:`,
+  loops, later arguments of the same call, and receiver or `&` arguments
+  followed by relocation of the same root.
 
 ### 17.2 Golden tests
 
@@ -1749,6 +1790,9 @@ The following should be enforced in code review and tests:
 8. Backend output preserves HUC left-to-right argument evaluation and
    by-value parameter initialization.
 9. Source inactivity and cleanup state do not add fields to nominal value types.
-10. Diagnostics retain source and expansion chains across both translators.
-11. A future C++ or native-code backend can consume MIR without recreating
+10. No checked use of a root whose tracked state is `Inactive` or
+    `MaybeActive` is accepted; this diagnostic is never optional. Lifetime
+    changes through raw-pointer aliases remain outside that guarantee.
+11. Diagnostics retain source and expansion chains across both translators.
+12. A future C++ or native-code backend can consume MIR without recreating
     semantic analysis.

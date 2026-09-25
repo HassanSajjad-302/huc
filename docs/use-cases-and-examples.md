@@ -118,7 +118,7 @@ The examples below cover these use cases:
 | Runtime | User `drop` plus automatic reverse field cleanup |
 | Runtime | Direct correspondence with common C++20 RAII value types |
 | Runtime | Left-to-right calls and expressions |
-| Runtime | Conditional relocation without a borrow checker |
+| Runtime | Checked conditional relocation without a borrow checker |
 | Runtime | File, socket, and graphics-resource wrappers |
 | HUC1 | Global declaration selection |
 | HUC1 | Compile-time selection of structure layout |
@@ -314,8 +314,10 @@ fn run(native: i32) -> bool {
 Advanced value and its cleanup obligation. The caller's source slot requires
 binding `mod`.
 
-HUC does not prevent saving the raw pointer from `inspect`; using it after
-the source is transferred would access inactive storage.
+Using `file` after `consume(file)` is a compile-time error. HUC does not
+prevent saving the raw pointer from `inspect`, though. Using that pointer after
+the source is transferred would access inactive storage, which is undefined
+behavior.
 
 ### 3.4 Advanced-containing structures
 
@@ -610,8 +612,10 @@ deep copying, and deterministic cleanup, but the lifetime models differ.
 A C++ move constructor constructs a destination while leaving a live source
 whose destructor will run later; the example must therefore exchange the
 source handle with `-1`. HUC destructive relocation ends the source lifetime
-and skips source cleanup. Using the inactive HUC source is undefined
-behavior.
+and skips source cleanup. Using this directly transferred local again before
+reinitializing it is a compile-time error. Access through a raw pointer or an
+untyped address is still unchecked and is undefined when it accesses the
+inactive value.
 
 HUC makes the potentially expensive copy explicit and fixes relocation
 behavior instead of selecting user code through C++ value categories. The
@@ -780,10 +784,11 @@ fn run() -> i32 {
 ```
 
 The result is `14`. The first argument clones the value before the second
-argument transfers it. `take(item, item)` would instead use an inactive
-source on its second binding; there is no implicit empty value after transfer.
+argument transfers it. `take(item, item)` and `take(item, copy item)` are
+compile-time errors: the first binding leaves `item` inactive before the
+second argument names it. There is no implicit empty value after transfer.
 
-### 3.12 Conditional relocation remains unchecked
+### 3.12 Conditional relocation is checked
 
 ```huc
 module examples.conditional_relocation;
@@ -812,10 +817,31 @@ fn run(transfer: bool) -> i32 {
 }
 ```
 
-The branching explicitly avoids reading an inactive value. Reading `job`
-after a taken transfer branch would be undefined behavior, not a null test.
-The compiler must still arrange exactly-once cleanup, using control-flow
-knowledge or a separate drop flag when necessary.
+Every path that reaches `return job.id` still holds an active `job`, because
+the transferring path has already returned. The compiler accepts this.
+Without the early return, `job` would be MaybeActive after the `if`, and
+reading it there is a compile-time error rather than undefined behavior:
+
+```huc
+fn run_incorrectly(transfer: bool) -> i32 {
+    let mod job: Job = Job(9);
+
+    if (transfer) {
+        consume(job);
+    }
+
+    return job.id; // error: job is MaybeActive here
+}
+```
+
+The checker does not predict condition results or connect separate conditions.
+It considers both outcomes even if other reasoning could prove that
+`transfer` is false. Adding a separate `if (!transfer)` around the read is
+therefore not enough; use the `else` branch of the original `if`, return from
+the transferring branch, or reinitialize `job` there. Each option makes the
+active paths clear without proving relationships between conditions.
+The compiler still arranges exactly-once cleanup, using control-flow knowledge
+or a separate drop flag when necessary.
 
 ### 3.13 Probable file-processing application
 
@@ -1913,7 +1939,7 @@ fn command_test(arguments: text::Text) -> i32 {
 fn2 emit_dispatcher() -> void {
     compiler::emit_huc_module(
         "fn dispatch(name: text::Text, "
-        "arguments: text::Text) -> i32 {"
+        "mod arguments: text::Text) -> i32 {"
         "  if (name == \"build\") { return command_build(arguments); }"
         "  if (name == \"clean\") { return command_clean(arguments); }"
         "  if (name == \"test\") { return command_test(arguments); }"

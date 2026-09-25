@@ -607,8 +607,11 @@ The bytes of an inactive source need not be cleared and need not form a valid
 representation of `T`. For directly named locals and parameters, the compiler
 tracks whether the *storage place* is active. Assigning a new value to a place
 tracked as inactive begins a new lifetime there without dropping an old value.
-Pointer extraction instead leaves source cleanup to the programmer, as
-section 7.3 explains. Using inactive storage as a value is undefined behavior.
+Using a place whose tracked state is Inactive or MaybeActive is a
+compile-time error (section 7.5). Pointer extraction does not update an
+aliased local's tracked state and leaves source cleanup to the programmer
+(section 7.3). Accessing inactive storage outside this check is undefined
+behavior, whether through a pointer or a name whose tracked state is stale.
 
 C++ move construction has a different lifetime model: it constructs a
 destination object while the source object remains alive and is destroyed
@@ -862,7 +865,104 @@ The C++ source must write a sentinel because `source` remains a live `File`
 whose destructor later runs. HUC does not have that requirement. Its backend
 uses compile-time knowledge of whether the value is active where possible.
 Where control-flow paths join and that state is uncertain, it uses a separate
-flag if needed; it must not add a hidden field to `File`.
+flag if needed; it must not add a hidden field to `File`. That flag only
+controls cleanup: section 7.5 rejects any use of the value in the uncertain
+state.
+
+### 7.5 Checked use after transfer
+
+The rule is simple: **a local must be Active before it is used**.
+
+For every Advanced local and by-value parameter, the compiler tracks whether
+the value is live on all paths (Active), has been transferred on all paths
+(Inactive), or differs between paths (MaybeActive). It already needs this
+information to arrange cleanup. A use in either of the last two states is a
+compile-time error in every compilation mode, not an optional warning.
+
+The check follows direct transfers, not changes through arbitrary pointer
+aliases. It also checks operations inside conditions without predicting
+their true/false results. This keeps the rule conservative: some rejected
+programs would never take the invalid path at runtime.
+
+A use is anything that reads or observes the value: relocating it, `copy`,
+a method call, field selection, or `&` applied to it or one of its fields.
+Storing into a field is a use too, checked when the store happens. That is
+after the right-hand side has run, so `x.count = consume_and_count(x)` is
+rejected. Assigning a whole new value does not use the old value. It makes
+the place Active again, with a drop flag if needed to decide whether the old
+value needs destruction. Uses on the right-hand side are still checked.
+Scope-exit cleanup and taking an untyped slot address with `slot_off` do not
+read the value either; any separate reads needed to find a slot still count.
+
+In these examples, `Job` and `Document` are Advanced types, for example
+because they declare `drop`:
+
+```huc
+fn submit_if(ready: bool) -> void {
+    let mod job: Job = Job(7);
+
+    if (ready) {
+        submit(job); // job is Inactive on this path
+    }
+
+    inspect(&job); // error: job is MaybeActive
+}
+```
+
+The analysis considers every branch possible, including branches whose
+conditions happen to be correlated. Code that needs the value afterward must
+make that visible to the compiler:
+
+```huc
+fn submit_if(ready: bool) -> void {
+    let mod job: Job = Job(7);
+
+    if (ready) {
+        submit(job);
+        return; // this path ends; job needs no cleanup
+    }
+
+    inspect(&job); // valid: Active on every path that reaches here
+}
+```
+
+The same rule covers loops. `submit(job)` inside a `while` body is rejected
+if `job` was declared outside the loop and a path can reach the next
+iteration without reinitializing it. A `break` or `return` ends that path
+instead of returning to the loop head.
+
+The analysis follows HUC's left-to-right evaluation order within a call as
+well, with the receiver before the arguments. This makes these calls
+ill-formed:
+
+```huc
+merge(document, document.size()); // error: document already relocated
+compare_versions(document, copy document); // error: same reason
+document.absorb(document); // error: relocates the call's own receiver
+attach(&document, document); // error: earlier argument points at document
+```
+
+In the last two calls, `this` or the pointer argument would refer to storage
+whose value has already moved. The same holds when the transfer happens
+inside a nested argument, as in `document.absorb(wrap(document))`.
+
+These additional checks recognize a limited set of receiver and pointer
+argument forms; they do not follow pointers through arbitrary functions.
+For example, `merge(length_of(&document), document)` is allowed when
+`length_of` returns a number: the observation finishes before the transfer.
+By contrast, `attach(identity(&document), document)` escapes this check but
+is invalid if `attach` accesses the inactive document through that pointer.
+
+To fix the first example, obtain the size before transferring the document
+and pass that saved number to `merge`. For `compare_versions`, clone the
+first argument before transferring the original into the second.
+
+The check does not prove pointer lifetimes. An existing raw observer is not
+updated when a value moves. Extraction through `mod T*` also leaves an
+aliased local's tracked state unchanged, so a later invalid use by name can
+escape the check as well (section 7.3). See
+[language specification section 6.12](language-specification.md#612-checked-use-of-relocated-roots)
+for the complete rule.
 
 ## 8. Assignment by transfer, including self-assignment
 
@@ -904,6 +1004,10 @@ let mod second: File = first; // destructive relocation; first inactive
 
 first = File(probable_os_open("b.dat")); // first active again
 ```
+
+Assignment is also allowed when the destination is MaybeActive. The compiler
+uses a drop flag to destroy the old value only on paths where it is still
+live. The destination is Active afterward.
 
 This does not apply to a slot made inactive through pointer extraction.
 Extraction did not update any aliased local's cleanup state. Ordinary
@@ -1015,9 +1119,9 @@ consume(document); // relocation; caller's document becomes inactive
 ```
 
 Argument expressions and their corresponding parameter initializations occur
-strictly left-to-right. This is not a memory-safety mechanism. It makes
-relocations, allocation, I/O, device access, counters, and temporary
-construction follow source reading order.
+strictly left-to-right. It makes relocations, allocation, I/O, device access,
+counters, and temporary construction follow source reading order. It also
+gives the section 7.5 check one fixed order to follow.
 
 ```huc
 fn compare_versions(left: Document, right: Document) -> i32;
@@ -1027,8 +1131,9 @@ let ordering: i32 = compare_versions(copy document, document);
 ```
 
 HUC clones `document` for `left`, then relocates the original into `right`.
-Reversing the arguments would try to clone an already inactive source.
-Likewise, passing `document` by value twice does not create two active values.
+Reversing the arguments is a compile-time error: `document` is already
+inactive when `copy document` runs. Passing `document` by value twice is
+rejected for the same reason.
 
 C17 does not provide this argument-order guarantee. The backend must finish
 initializing each argument's **parameter value** before starting the next
@@ -1358,7 +1463,7 @@ relocation behavior, C++ references, or C++ value-category overloads.
 | `fn clone() -> T` | Copy constructor, often clone function | Invoked only by explicit logical copying |
 | `fn drop() mod -> void` | Destructor body | HUC destroys fields after `drop` |
 | Fixed HUC destructive relocation | Move constructor/assignment | HUC ends the source lifetime and has no user hook |
-| Inactive source storage after relocation | Valid-but-unspecified moved-from object | HUC source contains no live object until reinitialized |
+| Inactive source storage after relocation | Valid-but-unspecified moved-from object | HUC source has no live object until reinitialized; uses of roots tracked as Inactive or MaybeActive are compile-time errors |
 
 “Comparable with C++” therefore means that ordinary C++ RAII and value-oriented
 designs have direct HUC representations. It does not mean every C++ special
@@ -1381,7 +1486,12 @@ The compiler must reject:
 - direct calls to `drop`;
 - attempts to declare a special move, relocation-constructor, or
   move-assignment hook;
-- ordinary use of inactive storage when detected;
+- any named use of an Advanced local or by-value parameter that is Inactive
+  or MaybeActive at that point, including a later argument of the same call
+  (section 7.5);
+- a call whose argument evaluation relocates the root of its receiver, or
+  relocates a local or parameter after an earlier argument that is `&`
+  applied to it or to one of its fields;
 - any chained pointer form, including one hidden by an alias;
 - unary `&` applied to a pointer slot or non-place result;
 - `slot_off` applied to a non-place, such as a literal or function symbol.

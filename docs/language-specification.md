@@ -70,6 +70,8 @@ HUC 0.1 makes these promises:
 - Relocating an Advanced value transfers its representation and makes the
   whole source inactive, without source cleanup or required byte clearing.
 - Destruction is deterministic and occurs at statically defined scope exits.
+- A directly tracked local or parameter that may have been relocated cannot
+  be used again until it is reinitialized; the compiler rejects such uses.
 - Function arguments and subexpressions evaluate from left to right.
 - An Advanced transfer is fixed, compiler-defined destructive relocation,
   never an overload-selected user call.
@@ -82,7 +84,8 @@ HUC 0.1 makes these promises:
 HUC does not promise:
 
 - prevention of dangling pointers, null access, invalid casts, buffer
-  overflows, use of inactive storage after relocation, or data races;
+  overflows, access to relocated storage through raw pointers or untyped
+  addresses, or data races;
 - runtime performance better than equivalent optimized C or C++;
 - source or binary compatibility with C++;
 - that arbitrary compile-time programs terminate.
@@ -548,10 +551,13 @@ complete before evaluation of the next operand begins.
 
 For example, `combine(first(), second())` finishes evaluating and binding
 `first()` before evaluating `second()`. Passing the same Advanced local by
-value twice uses an inactive source on the second binding; evaluation order
-does not make that valid.
+value twice is therefore ill-formed. The first binding relocates the local,
+so the second argument names an inactive value (section 6.12). For the same
+reason, `f(x, x.size())` is ill-formed while `f(x.size(), x)` is valid.
 
 `&&` and `||` short-circuit. Only the selected operand of `?:` is evaluated.
+`?:` yields a value, not a place: an arm that names an Advanced local or
+parameter relocates it into the result on that arm's path.
 
 ### 5.2 Arithmetic
 
@@ -652,6 +658,8 @@ For an Advanced `T`, `destination = source`:
 5. transfers the source representation and makes the source inactive.
 
 Exact self-relocation is a defined no-op. Assignment cannot be overloaded.
+An assignment to an Advanced destination has type `void`, so it cannot be
+used as an operand or argument.
 Named methods express domain-specific operations such as merge, append, swap,
 or replace.
 
@@ -693,9 +701,11 @@ The backend may use bulk copies, loads and stores, or registers, or remove the
 transfer entirely, as long as behavior, source inactivity, and cleanup stay
 the same.
 
-Using inactive storage before reactivation is undefined behavior. A compiler
-should diagnose an obvious straight-line use, but HUC does not promise
-flow-sensitive use-after-relocation prevention.
+Using a local or parameter whose tracked state is Inactive or MaybeActive
+is a compile-time error. Whole-value assignment and `slot_off` do not read
+the old value and are permitted subject to section 6.12. This check does
+not track lifetime changes through raw-pointer aliases. Accessing inactive
+storage outside the checked cases remains undefined behavior.
 
 Relocation has two source forms:
 
@@ -876,6 +886,200 @@ value. Advanced extraction requires `mod T*` and programmer-managed source
 cleanup as described in section 6.4. Explicit `copy *pointer` may clone a
 copyable pointee without making it inactive.
 
+### 6.12 Checked use of relocated roots
+
+Before an Advanced local or by-value parameter is used, its tracked state
+must be Active. This is a required compile-time check in every compilation
+mode, not an optional warning. It follows direct transfers and control flow;
+it does not track lifetime changes through raw-pointer aliases.
+
+#### Tracked state
+
+The compiler tracks the state of every Advanced local and by-value parameter
+at each point of a runtime function. For a constructor, this includes its
+initializer entries, which run in field declaration order before the block.
+`this` is a raw pointer and is not tracked; relocating `*this` is pointer
+extraction (section 6.4). Based on the transfers it tracks, the analysis assigns
+one of these states:
+
+- **Active**: the value is live on every path considered;
+- **Inactive**: the value has been transferred away on every path considered;
+- **MaybeActive**: some paths leave the value live and others transfer it away.
+
+Initialization, parameter binding, and assignment of a whole new value make
+the place Active. Direct relocation from the place makes it Inactive. If the
+destination of that relocation is indirect and may be the place's own
+storage, the identity check of section 6.3 can skip the transfer at run
+time, so the place is MaybeActive afterward. Where control-flow paths with
+different states meet, the place is MaybeActive.
+
+The analysis follows the evaluation order of section 5.1, including inside
+expressions. Operands and arguments are processed left to right, and a
+method receiver is processed before the arguments. Each by-value parameter
+is bound before the next argument starts. An assignment evaluates its
+destination first and stores after its right-hand side (section 6.3). In
+this section, a *call* is a function or method call, a constructor
+expression `T(arguments)`, or a constructor initializer entry
+`field(arguments)`.
+
+#### Control flow
+
+The checker follows the operations inside runtime conditions, including any
+transfers, but does not predict whether a condition is true or false. Both
+outcomes of every `if`, loop condition, `&&`, `||`, and `?:` are considered
+possible, even for a constant condition. States are combined where paths meet.
+An arm of `?:` that names an Advanced local or parameter transfers it only on
+that arm's path. Short-circuit operands are likewise checked on the paths
+that evaluate them.
+
+Loops use the same rule, including paths back to an earlier point:
+
+- The loop head combines entry state, after any `for` initializer, with the
+  state returning from the body and from each `continue`. In a `for`, both
+  returning paths run the step before reaching the head.
+- The condition is checked at the head. Its resulting state feeds the body
+  and the condition-false exit. A `for` without a condition has no
+  condition-false exit, but can still be left with `break` or `return`.
+- After the loop, the state combines the condition-false exit, if present,
+  with every `break` that leaves that loop.
+
+The analysis repeats around loop back edges until the states stop changing,
+then checks uses against those states. A path ends at `return`, after its
+operand is evaluated, or at a call whose result type is `never`, including
+`panic`. Code unreachable by this analysis is not subject to this
+relocation-state check; ordinary parsing, name resolution, and type checking
+still apply.
+
+#### Uses and reinitialization
+
+A use of a tracked place whose state is Inactive or MaybeActive is
+ill-formed, and the compiler must issue a diagnostic. A use is any operation
+that reads or observes the value: relocating it, `copy`, calling a method on
+it, selecting a field, or applying `&` to it or to a field path of it.
+Storing into a field is checked twice. Selecting the field is a use when the
+destination is evaluated, and the store is a use after the right-hand side
+has been evaluated. So `x.count = consume_and_count(x)` is ill-formed.
+
+The following are not uses and are permitted in any state:
+
+- assigning a whole new value to the place. When the store happens, after
+  the right-hand side has been evaluated, the old value is destroyed if it is
+  still live, using a drop flag when the state is MaybeActive, and the place
+  becomes Active. Uses on the right-hand side are still checked.
+  `x = rebuild(x)` is valid when `x` starts Active: the right-hand side
+  transfers `x`, and the store reactivates it without destroying an old value;
+- compiler-inserted destruction at scope exit, which likewise destroys only a
+  live value;
+- `slot_off` applied to the place or a path through its inline fields, which
+  produces an untyped storage address without reading the value. Operations
+  needed to find a slot still count as uses when they read a value: for
+  example, `slot_off(x.next->field)` must read `x.next` first.
+
+Fixed locals and parameters cannot be relocation sources (section 6.1), so
+their tracked state stays Active after initialization. This does not prove
+that unchecked pointer operations have preserved the actual value.
+
+In the following examples, `Widget` and `Job` are Advanced types, for example
+because they declare `drop`:
+
+```huc
+let mod widget: Widget = Widget();
+
+if (condition) {
+    receive(widget);
+}
+
+inspect(&widget); // error: widget is MaybeActive here
+```
+
+Reinitialize the value on the path that transferred it, or keep the use on
+paths where the value is still live:
+
+```huc
+if (condition) {
+    receive(widget);
+    widget = Widget(); // Active again on this path
+}
+
+inspect(&widget); // valid: Active on every path
+```
+
+A transfer inside a loop is checked by the same rules. Here the next
+iteration could try to submit a value that was already transferred:
+
+```huc
+let mod job: Job = Job(1);
+
+while (more_work()) {
+    submit(job); // error: job may have been transferred in an earlier iteration
+}
+```
+
+Declaring `job` inside the loop body, or assigning a new `Job` after
+`submit(job)`, makes each use Active. A transfer followed by `break` leaves
+the value Inactive on that break path. After the loop it may be MaybeActive
+if another exit, such as a zero-iteration path, leaves it Active. Transfers
+in the condition also affect exit state; short-circuit paths may differ.
+
+#### Checks within one call
+
+Within one call, the checks above follow the argument order. `f(x, x.size())`
+is ill-formed because `x` is relocated into the first parameter before
+`x.size()` runs; `f(x.size(), x)` is valid. Passing the same Advanced local by
+value twice is ill-formed for the same reason. Two additional checks reject
+calls that could pass a pointer to a root that their arguments transfer:
+
+- relocating the root of the call's receiver while the call's arguments are
+  evaluated or bound, directly or inside a nested expression: `x.absorb(x)`,
+  `x.absorb(wrap(x))`, and `x.part.absorb(x)`;
+- relocating a local or parameter while a later argument is evaluated or
+  bound, when an earlier argument of the same call is `&` applied to that
+  value or to a field path of it: `f(&x, x)`, `f(&x.payload, x)`, and
+  `f(&x, wrap(x))`. Parentheses and `ptr_as<...>(...)` around the earlier
+  argument are looked through, and either arm of a `?:` counts, so
+  `f(ptr_as<u8*>(&x), x)` and `f(c ? &x : &y, x)` are ill-formed too.
+
+The root of a receiver or assignment destination is found by removing
+parentheses and field selections and by treating `(&r)->f` as `r.f` and
+`*&r` as `r`. An assignment whose destination has root `r`, other than `r`
+itself, is checked like a field store. So `(&x)->absorb(x)`,
+`(&x)->count = consume_and_count(x)`, and `*(&x) = rebuild(x)` are
+ill-formed. This recognition only widens what is rejected. It does not give
+`*&r` the cleanup behavior of `r` (section 6.4). A receiver or destination
+reached through any other pointer, a call result, or a `copy` result has no
+tracked root for these additional checks. Thus `(copy x).absorb(x)` and
+`x.next->absorb(x)` are not rejected by them. This does not prove that a raw
+pointee remains valid; for example, `x.next` might point into `x` itself.
+
+Only these direct forms are recognized. A pointer formed and used up inside
+an argument is not rejected: `f(length_of(&x), x)` is valid. A pointer that
+reaches the callee through another call or a constructor is not detected
+either, as in `f(identity(&x), x)`. If the callee uses such a pointer, the
+behavior is undefined when that use accesses the inactive source value.
+Merely passing this check is not a lifetime guarantee for pointer arguments.
+
+#### Staging and unchecked boundaries
+
+The check applies to each runtime function after phase-1 expansion,
+including each residual `fn1` specialization. `if1`, `for1`, and `while1` are
+resolved first and are not branches. A `fn1` body can therefore be valid for
+one specialization and ill-formed for another. For example, a body that
+passes the same argument by value twice is valid when `T` is Basic and
+ill-formed when `T` is Advanced. The diagnostic names the specialization and
+its expansion chain.
+
+The analysis needs no general alias tracking. It follows whole named locals
+and parameters, plus the limited source forms listed above. It is conservative:
+it can reject code whose unsafe path never runs, because it does not prove
+runtime condition results or relationships between conditions.
+
+Raw-pointer access is still unchecked. Accessing an inactive value through a
+raw pointer or an address obtained from `slot_off` is undefined behavior
+(sections 8.1 and 14). Pointer extraction (section 6.4) does not update an
+aliased local's tracked state, so even a later use of that local by name can
+escape this check and have undefined behavior. The check is not a borrow
+checker and does not make HUC memory-safe.
+
 ## 7. Functions and control flow
 
 ### 7.1 Runtime functions
@@ -889,6 +1093,9 @@ fn add(left: i32, right: i32) -> i32 {
 Parameters are by value. Raw pointer parameters observe. Advanced
 parameters consume. There is no C++-style lvalue reference, rvalue reference,
 reference collapsing, or perfect forwarding.
+
+A function whose result type is `never` does not return. Its body must not
+reach a `return` or its closing brace. `panic` has result type `never`.
 
 ### 7.2 Local declarations
 
@@ -999,13 +1206,14 @@ if (condition) {
     receive(widget);
 }
 
-// widget must not be read if the branch transferred it.
+inspect(&widget); // error: widget may have been transferred
 ```
 
-The source is inactive if the branch was taken, and active otherwise. Using
-an inactive value is undefined behavior. Cleanup must still occur exactly
-once, using static control-flow knowledge or a drop flag where needed.
-Assigning a new value to the source begins a new lifetime there.
+The source is inactive if the branch was taken, and active otherwise. After
+the `if` it is MaybeActive, so using it there is a compile-time error
+(section 6.12). Assigning a new value to it begins a new lifetime, after
+which it may be used again. Cleanup still occurs exactly once, using static
+control-flow knowledge or a drop flag where needed.
 
 ### 8.3 Data races
 
@@ -1017,9 +1225,12 @@ platform's atomic memory model.
 ### 8.4 Optional diagnostics and sanitizers
 
 Implementations may warn about likely dangling pointers, null dereferences, or
-inactive-value use. Debug modes may insert checks. These facilities must not be
-presented as a language guarantee and their absence must not change the meaning
-of a well-defined program.
+access to inactive storage through raw pointers. Debug modes may insert
+checks. These facilities must not be presented as a language guarantee and
+their absence must not change the meaning of a well-defined program.
+
+The section 6.12 check on named locals and parameters is not one of these
+optional facilities. It is required in every compilation mode.
 
 ## 9. Numbered phase semantics
 
@@ -1793,7 +2004,9 @@ directly consumable in 0.1. The compiler itself is implemented in C++20.
 The following list is representative rather than exhaustive:
 
 - invalid raw-pointer dereference or arithmetic;
-- use of inactive Advanced storage;
+- access to inactive Advanced storage outside the section 6.12 check,
+  including through raw pointers or untyped addresses, or by name after
+  pointer extraction that did not update an aliased local's tracked state;
 - destroying an inactive slot after pointer extraction, including through
   automatic local or enclosing-object cleanup that extraction did not cancel;
 - violation of an external function's contract;
