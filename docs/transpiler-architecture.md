@@ -285,7 +285,7 @@ This is required for useful staging diagnostics.
 The lexer should:
 
 - recognize numbered keywords as dedicated tokens;
-- recognize `in` as a reserved keyword;
+- treat `in` as an ordinary identifier;
 - preserve comments and trivia when formatter support is enabled;
 - diagnose unsupported phase spellings such as `fn3`;
 - use `&` for prefix address-taking and binary bitwise AND, separate from
@@ -319,7 +319,6 @@ typedef enum HucTokenKind {
     HUC_TOKEN_KW_IF1,
     HUC_TOKEN_KW_FOR,
     HUC_TOKEN_KW_FOR1,
-    HUC_TOKEN_KW_IN,
     HUC_TOKEN_KW_WHILE,
     HUC_TOKEN_KW_WHILE1,
     HUC_TOKEN_KW_LET,
@@ -364,8 +363,10 @@ Variable and parameter parsers read an optional binding `mod`, then the name,
 colon, and type. A `mod` inside that type is a separate pointee permission.
 `let` and `let2` precede variable declarations but not parameters. Phase binders
 also use `name: Type` or `name: auto`; they have no binding `mod`. All phase
-families, including `let1`, put their name before their binder list. The
-`for1` parser reads `let2 [mod] name: Type in expression` inside parentheses.
+families, including `let1`, put their name before their binder list. Both
+`for` and `for1` read three optional expressions separated by semicolons;
+`for1` requires compiler-only clauses and retains a deferred body. There is
+no range-based loop production.
 
 Use a shared list parser that accepts one optional trailing comma, including
 for constructor initializer entries. Do not make acceptance depend on whether
@@ -824,7 +825,8 @@ Operations behave as follows:
   source that the residualizer can print as HUC0;
 - `if1` requires a concrete boolean and selects one branch;
 - ordinary `if` with a symbolic condition creates residual branches;
-- `for1` iterates a concrete compile-time sequence;
+- `for1` evaluates its initialization, condition, and step at compile time,
+  expanding its body once per iteration;
 - raw generation calls append text to their defined HUC0 output cursor.
 
 This is a small partial evaluator, not C++ template substitution. It has no
@@ -1713,13 +1715,14 @@ symbol hashes must be identical across processes for identical inputs.
 
 ### 17.1 Unit tests
 
-- tokenization, including `&`, `<`, `>`, `@`, `in`, and numbered keywords;
+- tokenization, including `&`, `<`, `>`, `@`, and numbered keywords;
+- `in` accepted as an ordinary identifier;
 - valid and invalid numeric separator positions in all supported bases;
 - name-first declarations, independent binding/type `mod`, and `let1` headers;
 - optional trailing commas in nonempty single/multiline lists, and rejection
   of a comma in an empty list;
-- required control-flow braces, `else if`, and `for1 (... in ...)`;
-- rejection of old `T&`, type-first declarations, and colon-only `for1` headers;
+- required control-flow braces, `else if`, and three-part `for`/`for1` headers;
+- rejection of old `T&`, type-first declarations, and range-based loop headers;
 - Pratt precedence, ambiguous angle postfixes, and recovery;
 - prefix `&` versus binary `&` and `&&`, including postfix field/index binding;
 - pointer chains, alias-expanded chains, and typed pointer-slot addresses;
@@ -1821,7 +1824,8 @@ Compile and run small programs that record:
 - early-return cleanup;
 - conditional relocation;
 - `if1` branch removal;
-- `for1` unrolling;
+- `for1` unrolling, initialization/condition/step order, omitted clauses,
+  zero-iteration body skipping, and rejection of runtime-dependent clauses;
 - forced `@` evaluation;
 - raw generation at local, type-body, and module insertion points;
 - HUC0 rejection of numbered syntax emitted as raw text;
@@ -1879,7 +1883,7 @@ Implement in this order:
 1. staged module indexing, `import2`, opaque deferred-body spans, phase-free
    pass-through, per-module HUC0 buffers, and origin maps;
 2. the deterministic phase-2 interpreter with resource and effect limits;
-3. `if1`, finite `for1`, bounded `while1`, selected-body parsing, and
+3. `if1`, three-part `for1`, bounded phase loops, selected-body parsing, and
    module/type/function/block insertion contexts;
 4. `struct1`, `fn1`, and `let1` primary/partial/full family selection with
    angle patterns, deduction, predicates, and recursion states;

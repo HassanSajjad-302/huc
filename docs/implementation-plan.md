@@ -811,12 +811,13 @@ Their operands must be compiler-available and the statements erase. The
 selected-body parser uses the inherited module, type, function, or block
 context; skipped bodies remain opaque.
 
-`for1` spells its header `for1 (let2 item: Type in values)`. The binding may
-use `mod` before its name or `: auto` for inference. The keyword `in` is
-reserved for this role; it adds no runtime range-loop or membership operation.
-`for1` requires a finite compiler iterable. `while1` reevaluates a compiler
-boolean and is bounded by interpreter resource limits. A zero-iteration body
-remains opaque.
+`for1` uses the same three-part expression header as ordinary `for`:
+`for1 (initialization; condition; step)`. Its clauses execute at compile time;
+an omitted condition means `true`. Declare a compiler-only loop variable with
+`let2` before the loop. `while1` reevaluates a compiler boolean. Both phase
+loops are bounded by interpreter resource limits, and a zero-iteration body
+remains opaque. Neither `for` nor `for1` has a range-based form; `in` is not
+reserved.
 
 Inside `fn2`, ordinary `if`, `for`, and `while` already execute in compiler
 phase. HUC therefore has no `if2`, `for2`, or `while2`.
@@ -1326,7 +1327,7 @@ Values include:
 - booleans and integers;
 - floating values if required by phase expressions;
 - immutable UTF-8 text;
-- lists/tuples needed by `for1`;
+- indexed lists/tuples for compiler-only computations;
 - phase-2 structures;
 - canonical type and stable semantic IDs as implementation values;
 - symbolic runtime expressions for `fn1`.
@@ -1353,7 +1354,7 @@ Acceptance:
 Implement:
 
 - `if1`;
-- finite `for1`;
+- three-part, resource-limited `for1`;
 - resource-limited `while1`;
 - module, type-body, function, and block insertion contexts;
 - phase-only statements in declaration staging blocks;

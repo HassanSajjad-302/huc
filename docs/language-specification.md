@@ -197,8 +197,8 @@ families use `let1`, and compiler-only variables use `let2`. The numbers
 classify availability; they do not request an arbitrary number of compiler
 passes. Section 9 defines their exact meaning.
 
-`in` is a reserved keyword used between a `for1` binding and its iterable.
-It does not add an ordinary runtime range loop or a membership operator.
+`in` is an ordinary identifier, not a reserved keyword. Neither `for` nor
+`for1` has a range-based form; both use three-part, semicolon-separated headers.
 
 ### 3.2 Literals
 
@@ -1898,22 +1898,28 @@ fn run() -> void {
 ```
 
 An `if1` condition must be a compiler `bool`. Only its selected branch is
-parsed. A `for1` iterates a finite compiler iterable and inserts one expansion
-of its body per element. A `while1` reevaluates a compiler `bool` and is bounded
-by the evaluator's resource limits. A loop with zero iterations leaves its body
-opaque.
+parsed. A `for1` uses `for1 (initialization; condition; step)`: initialization
+executes once, the condition is checked before each iteration, and the step
+executes after each completed iteration. All three clauses use compiler-only
+values. Like ordinary `for`, each clause is an optional expression; an omitted
+condition means `true`. Declare compiler-only loop variables with `let2` before
+the loop.
 
-The loop header uses `in`, not a second colon. For example, given a finite
-compiler iterable `values` of integers:
+A `while1` reevaluates a compiler `bool`. Both phase loops insert one expansion
+of their body per iteration and are bounded by the evaluator's resource
+limits. A loop with zero iterations leaves its body opaque.
+
+For example:
 
 ```huc
-for1 (let2 item: i32 in values) {
-    io::println(item);
+let2 mod index: usize = 0;
+for1 (; index < 3; index += 1) {
+    io::println(index);
 }
 ```
 
-Use `let2 mod item: i32` for a writable iteration binding or `let2 item: auto`
-to infer its type from the elements. This adds no runtime range-loop syntax.
+The index and loop control disappear during expansion. The output contains
+three calls with the arguments `0`, `1`, and `2`, not a runtime loop.
 
 There are no `if2`, `for2`, or `while2` keywords. Inside a `fn2`, predicate, or
 existing compile-time evaluation island, ordinary `if`, `for`, and `while`

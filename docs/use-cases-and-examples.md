@@ -1277,8 +1277,9 @@ module examples.sum_constants;
 fn1 sum_constants(Values: i32...)() -> i32 {
     let mod result: i32 = 0;
 
-    for1 (let2 value: i32 in Values) {
-        result += value;
+    let2 mod index: usize = 0;
+    for1 (; index < pack_size<Values>(); index += 1) {
+        result += Values[index];
     }
 
     return result;
@@ -1305,7 +1306,8 @@ fn run() -> i32 {
 }
 ```
 
-Pack syntax is planned but should be implemented after fixed-arity families.
+Pack syntax, indexing, and `pack_size` are planned but should be implemented
+after fixed-arity families. The loop uses the three-part `for1` header.
 
 ## 5. Family specialization examples
 
@@ -2218,7 +2220,10 @@ fn2 report_environment() -> void {
     compiler::log(environment.target().triple());
     compiler::log(environment.language_revision());
 
-    for1 (let2 module: compiler::Module in environment.modules()) {
+    let2 modules: auto = environment.modules();
+    let2 mod index: usize = 0;
+    for1 (; index < modules.size(); index += 1) {
+        let2 module: compiler::Module = modules[index];
         compiler::log(module.qualified_name());
     }
 }
@@ -2244,7 +2249,10 @@ fn2 generate_serializer(type: compiler::Type) -> void {
     let2 record: compiler::Class = type.as_class();
     let2 mod body: compiler::Code = compiler::Code();
 
-    for1 (let2 field: compiler::Field in record.fields()) {
+    let2 fields: auto = record.fields();
+    let2 mod index: usize = 0;
+    for1 (; index < fields.size(); index += 1) {
+        let2 field: compiler::Field = fields[index];
         if1 (!field.attributes().contains("skip")) {
             body.append(
                 compiler::statement(

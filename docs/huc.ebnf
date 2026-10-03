@@ -202,8 +202,8 @@ phase-control-item
 
 phase-if-item     = "if1", "(", expression-1, ")", deferred-body,
                     [ "else", deferred-body ] ;
-phase-for-item    = "for1", "(", "let2", [ "mod" ], identifier,
-                    ":", ( type-1 | "auto" ), "in", expression-1, ")",
+phase-for-item    = "for1", "(", [ expression-1 ], ";",
+                    [ expression-1 ], ";", [ expression-1 ], ")",
                     deferred-body ;
 phase-while-item  = "while1", "(", expression-1, ")", deferred-body ;
 
