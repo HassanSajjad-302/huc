@@ -631,7 +631,8 @@ Examples of rejected edges:
 
 - a runtime value used as an `if1` condition;
 - a `struct2` stored in runtime memory;
-- an ordinary `fn` called by the compile-time evaluator;
+- a runtime-only argument passed to an ordinary `fn` during compiler execution,
+  or an ordinary call outside the scalar evaluator subset;
 - a `fn2` referenced as a residual runtime symbol.
 - reserved future `@this` contextual reflection in bootstrap HUC1.
 
@@ -766,7 +767,8 @@ tracked source consumed by `Relocate` still updates its own state normally.
 
 ### 8.1 Initial strategy
 
-Interpret typed HUC1 phase AST in-process. Do not:
+Interpret typed HUC1 phase AST and supported scalar ordinary-function bodies
+in-process. Do not:
 
 - generate and compile a temporary C++ program for every `fn2` call;
 - execute arbitrary host C++ plugins;
@@ -842,6 +844,46 @@ A normal `fn1` call requests or calls a concrete runtime specialization.
 Prefixing that call with `@` instead requires complete compile-time evaluation,
 and only a result that can be written as a HUC0 value may leave the island
 for runtime code.
+
+Completing a `fn1` body for evaluation is separate from emitting it. A
+compile-time-only request does not mark the specialization for HUC0 emission.
+A retained runtime reference does, even when that specialization was evaluated
+earlier. Ordinary `fn` declarations in retained modules are still emitted
+without demand filtering.
+
+#### 8.4.1 Ordinary-function calls
+
+An active compiler evaluation, including a `fn2`, may call an ordinary `fn`
+without another `@`. An explicit `@` can also enter this evaluation from runtime
+source. Resolve the call normally, require its HUC definition, and evaluate its
+expanded, checked body under specification section 12.1. Local variables keep
+their ordinary `let` spelling; their storage is evaluator-owned for this call.
+
+Initially accept only boolean and integer parameters/results, with `void`
+results also allowed. Check aliases canonically and apply the same subset to
+locals and intermediate values actually created. Reject pointers, `c8`, floats,
+structures, strings, and raw storage. These restrictions do not narrow existing
+`fn2` compiler-only value kinds or compiler intrinsics.
+
+Support local mutation, control flow, and nested calls with shared instruction
+and recursion budgets. Propagate the restricted mode into callees, including
+concrete `fn1` bodies. Check executed operations, not merely the outer
+signature. An untaken ordinary branch may contain an unsupported operation,
+but must still pass ordinary syntax and type checking. Never invoke arbitrary
+native or foreign code. Reject accesses to runtime storage, mutable shared
+compiler state, and untracked external inputs. Immutable compiler-known scalar
+constants are readable and become dependencies.
+
+Use target-width integer operations: unsigned overflow wraps, while signed
+overflow, division by zero, and invalid shifts produce diagnostics with the
+evaluation call stack. Unsupported operations and exhausted budgets also
+diagnose; no forced call falls back to runtime execution.
+
+Expand definition-owned phase work before evaluating the ordinary function;
+do not replay it at the evaluating caller's insertion cursor. A body containing
+an opaque raw fragment is not evaluable in the bootstrap because HUC1 has not
+parsed that fragment. Ordinary-function evaluation does not change the raw-text
+boundary or provide a native-code escape hatch.
 
 ### 8.5 Resource control
 
@@ -928,10 +970,13 @@ rank, and declaration order never resolves a tie.
 
 The primary must precede its specializations, and 0.1 requires every
 specialization in the defining module. Only the selected body is parsed.
-Every statically requested concrete specialization is printed at its family
-declaration site. A function-local `let1` result therefore initializes on each
-runtime execution that reaches that declaration; staging never inserts a lazy
-runtime flag.
+Concrete `struct1` and `let1` specializations are printed as required by their
+retained declarations; a `fn1` specialization is printed only when retained
+runtime code requires its definition. Print these at their family declaration
+sites. A function-local `let1` result therefore initializes on each runtime
+execution that reaches that declaration; staging never inserts a lazy runtime
+flag. Merely evaluating a `fn1` at compile time does not require its runtime
+definition.
 
 ### 9.1 Keys
 
@@ -965,6 +1010,15 @@ indirection makes its size finite is an infinite-size diagnostic.
 
 Failed entries retain diagnostics for the duration of the compilation so the
 same bad specialization is not repeatedly evaluated.
+
+Track `runtime_needed` independently of body/evaluation state. An evaluation
+request can complete without setting it; a retained runtime reference sets it
+and adds the specialization's runtime dependencies to the emission worklist.
+This also applies when the evaluation result was a cache hit. Requests found
+only while executing compiler code do not become runtime roots. Ordinary `fn`
+declarations remain runtime roots in retained modules, even if uncalled; their
+retained bodies can therefore require `fn1` definitions. Do not treat an
+unexecuted ordinary runtime branch as an erased phase branch.
 
 ### 9.3 Naming
 
@@ -1666,7 +1720,8 @@ not timestamps.
 Initial cacheable units:
 
 - HUC1 indexed module and selected-body parse;
-- pure HUC1 family specialization and pure `fn2` result;
+- pure HUC1 family specialization, pure `fn2` result, and restricted
+  ordinary-function evaluation result;
 - emitted per-module HUC0 text plus its origin map;
 - HUC0 lexed/parsed module and runtime interface;
 - concrete HUC0 HIR/MIR;
@@ -1675,6 +1730,13 @@ Initial cacheable units:
 Even on a cache hit, `build` materializes the HUC0 module files before invoking
 the HUC0 translator. A cached private AST is not a substitute for the textual
 boundary.
+
+Ordinary-function evaluation caches record argument values, expanded-body and
+expansion-dependency fingerprints, transitively evaluated callees, immutable
+constants read, and target settings. Validate those dependencies before reuse;
+coarse invalidation by module/import closure is acceptable initially. Do not
+put ambient compiler state or evaluation-result dependencies into symbol names.
+Evaluation-cache hits never decide whether a runtime definition must be emitted.
 
 The phase checker classifies transitive compiler execution as pure or
 effectful. A normal family specialization is constructed once per key; its
@@ -1827,6 +1889,17 @@ Compile and run small programs that record:
 - `for1` unrolling, initialization/condition/step order, omitted clauses,
   zero-iteration body skipping, and rejection of runtime-dependent clauses;
 - forced `@` evaluation;
+- ordinary scalar `fn` calls from `fn2`, nested calls, local mutation, bounded
+  recursion, and direct `@` entry;
+- target-width integer arithmetic, unsigned wrapping, and diagnostics for
+  signed overflow, division by zero, and invalid shifts;
+- rejection of unsupported scalar-call signatures/aliases, pointers, foreign
+  calls, runtime-storage access, shared mutable state, and opaque raw bodies;
+- unsupported operations skipped by ordinary branches versus reached operations,
+  while both branches still receive normal syntax/type checks;
+- evaluation-cache invalidation after a constant or evaluated callee changes;
+- compile-time-only `fn1` calls omitted from HUC0, later runtime demand causing
+  emission, transitive runtime dependencies, and uncalled ordinary `fn` retention;
 - raw generation at local, type-body, and module insertion points;
 - HUC0 rejection of numbered syntax emitted as raw text;
 - acceptance of every successful staged module by the standalone HUC0

@@ -88,9 +88,15 @@ struct2 BuildRecord {
     let2 used_raw_generation: bool;
 }
 
-fn2 add_at_compile_time(left: i32, right: i32) -> i32 {
-    let2 sum: i32 = left + right;
+// An ordinary scalar function can also run in the compiler evaluator.
+// Its runtime definition still remains in HUC0 even if only used by fn2.
+fn add_values(left: i32, right: i32) -> i32 {
+    let sum: i32 = left + right;
     return sum;
+}
+
+fn2 add_at_compile_time(left: i32, right: i32) -> i32 {
+    return add_values(left, right); // Already in compiler execution: no extra @.
 }
 
 // This compiler helper writes code where it is called, not here beside its
@@ -147,6 +153,8 @@ fn main() -> i32 {
 
     // @ runs the whole call at compile time and inserts the result as a literal.
     let folded: i32 = @add_at_compile_time(20, 22);
+    // This specialization is compile-time-only, unlike choose<i32, true> above.
+    // Its body is checked and evaluated, but no runtime definition is needed.
     let smaller: i32 = @choose<i32, false>(3, 5);
     io::println(folded + smaller);
 

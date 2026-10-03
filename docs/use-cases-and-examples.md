@@ -134,6 +134,7 @@ The examples below cover these use cases:
 | HUC1 | Compile-time predicates |
 | HUC1 | Family argument deduction |
 | HUC1 | Runtime residualization versus forced execution |
+| HUC1 | Restricted ordinary-function calls from compiler execution |
 | HUC1 | Compiler-only helper functions and state |
 | HUC1 | Call-site and module-scope raw generation |
 | Pipeline | Per-module HUC1-to-HUC0 expansion |
@@ -1545,7 +1546,7 @@ fn runtime_case(left: i32, right: i32) -> i32 {
 }
 
 fn compile_case() -> i32 {
-    return @biased_add<5>(10, 20);
+    return @biased_add<9>(10, 20);
 }
 ```
 
@@ -1561,13 +1562,19 @@ fn runtime_case(left: i32, right: i32) -> i32 {
 }
 
 fn compile_case() -> i32 {
-    return 35;
+    return 39;
 }
 ```
 
 The normal call produces a specialized runtime function and calls it at
 runtime. `@` runs the call completely at compile time and writes its result
 as a HUC0 value.
+
+Only `biased_add<5>` needs a runtime definition here. The compiler expands and
+checks `biased_add<9>` to evaluate it, but does not emit that specialization.
+A later runtime reference would require its definition too. Both ordinary
+functions, `runtime_case` and `compile_case`, remain in HUC0 even if nothing
+calls them. Function families that are never requested remain deferred.
 
 ### 6.2 Phase-2 helper and evaluation island
 
@@ -1601,6 +1608,58 @@ The outer `@` starts compiler execution. Calls made inside
 
 The HUC0 structure has a concrete capacity of `256`; no compiler-only binding
 survives.
+
+### 6.3 Reusing an ordinary function at compile time
+
+```huc
+module examples.scalar_evaluation;
+
+fn count_digits(mod value: u32) -> u32 {
+    let mod count: u32 = 1;
+    while (value >= 10) {
+        value /= 10;
+        count += 1;
+    }
+    return count;
+}
+
+fn2 field_width(value: u32) -> u32 {
+    return count_digits(value);
+}
+
+fn fixed_width() -> u32 {
+    return @field_width(12345);
+}
+```
+
+`count_digits` needs no special marker and its local variables remain `let`
+variables. During the call from `field_width`, they live in the evaluator.
+The HUC0 output keeps the ordinary `count_digits` definition unchanged and
+reduces `fixed_width` to:
+
+```huc
+fn fixed_width() -> u32 {
+    return 5;
+}
+```
+
+The `fn2` definition disappears. Calling `count_digits` only at compile time
+does not suppress its ordinary runtime definition. Writing
+`@count_digits(12345)` directly would use the same restricted evaluator.
+
+The initial subset accepts booleans and integers, `void` results, local
+mutation, and bounded loops/calls. It excludes pointers, floating-point values,
+structures, runtime-storage access, mutable shared state, and arbitrary foreign
+calls. Basic does not mean eligible: a raw pointer is Basic but is not part of
+this subset. Immutable compiler-known scalar constants are permitted and are
+tracked as dependencies.
+
+For example, a runtime-valid scalar function may conditionally call an external
+logging function. A compile-time call that skips the logging branch can succeed;
+one that reaches it is rejected. Both branches still undergo normal parsing and
+type checking. Signed overflow, division by zero, invalid shifts, and exceeded
+evaluation limits are also compile-time diagnostics, with no runtime fallback.
+The full rules are in specification section 12.1.
 
 ## 7. Raw generation examples
 

@@ -1767,11 +1767,16 @@ its block. The HUC0 printer assigns deterministic concrete names where multiple
 specializations would otherwise collide and rewrites their requests to those
 names. No unresolved family request may remain in HUC0.
 
+For `fn1`, completing a specialization for compile-time evaluation does not
+by itself require emitting its runtime definition. Only specializations needed
+by retained runtime code are written to HUC0; section 9.7 separates these two
+steps. Ordinary `fn` declarations are not subject to this demand-driven rule.
+
 Any phase-1 family may be requested through an ordinary import from another
-module. Its generated concrete declaration is emitted in the defining module,
-and the requesting module's residual reference stays qualified through that
-preserved import. Generated concrete names remain deterministic implementation
-details.
+module. When the request requires a runtime definition, its generated concrete
+declaration is emitted in the defining module, and the requesting module's
+residual reference stays qualified through that preserved import. Generated
+concrete names remain deterministic implementation details.
 
 This uniform model deliberately permits function-family partial
 specialization. It does not use C++ substitution failure, and a failure while
@@ -1969,6 +1974,24 @@ executes in the phase evaluator, and the call must produce a result that can be
 materialized as HUC0 at its use site. Failure to finish evaluation is a
 diagnostic; it does not fall back to a runtime specialization.
 
+Expansion and HUC0 emission are separate:
+
+- A `fn1` used only in forced evaluation must have its selected body expanded
+  and checked, but its runtime definition is not emitted merely for that call.
+- A specialization referenced by retained runtime code is emitted in its
+  defining module, together with the specializations that runtime body needs.
+- A later runtime request for a specialization already used at compile time
+  requires its runtime definition too. A cached compile-time result does not
+  satisfy that emission requirement.
+- A never-requested family body remains deferred. Ordinary unnumbered `if`
+  branches in retained runtime code still count as runtime code; only removed
+  phase branches and other erased compiler execution remove that demand.
+
+Ordinary `fn` declarations in retained modules continue to pass through into
+HUC0, even if they are called only at compile time or never called. Calling one
+from `fn2` under section 12.1 does not make its emission demand-driven. Later
+optimization may remove unused runtime functions.
+
 ### 9.8 Phase-2 declarations
 
 `fn2`, `struct2`, and `let2` are meta-only:
@@ -2000,6 +2023,11 @@ runtime function ABI, or emitted HUC0. A phase-2 value may be used by phase
 control, predicates, family selection, forced evaluation, reflection, and
 generation. The phase checker must reject every path by which it could leak
 into runtime code.
+
+A `fn2` may also call an ordinary `fn` using the restricted scalar evaluator
+in section 12.1. Such a nested call needs no extra `@` or declaration marker.
+The ordinary function remains runtime-capable and keeps its normal `let`
+locals; the evaluator supplies storage for them during the compile-time call.
 
 ### 9.9 The `@` evaluation-island operator
 
@@ -2097,7 +2125,9 @@ requests within one program produce one concrete specialization.
 The translator discovers specialization requests across the complete module
 graph with a deterministic worklist and expands them to a fixpoint. Each
 defining module's generated HUC0 depends on the sorted closure of concrete keys
-assigned to it, including requests first discovered in importing modules.
+needed by retained runtime code and assigned to it, including requests first
+discovered in importing modules. Compile-time-only evaluation requests do not
+by themselves enter that runtime emission closure.
 In 0.1, every type named by a cross-module request must already be nameable
 through the defining module's own import closure. A requester-local type that
 would introduce a reverse dependency is rejected; requester-side specialization
@@ -2328,9 +2358,99 @@ Compile-time values have HUC value semantics. Raw addresses into the compiler
 process are not materializable and must not be used as persistent cache keys.
 
 A `fn2` may call `fn1` in forced-evaluation mode. A `fn1` specialization may
-call `fn2` for metadata computation. A `fn2` cannot call a runtime `fn` unless
-that function is exposed as a compiler intrinsic with separately specified
-translation-time behavior.
+call `fn2` for metadata computation. Ordinary `fn` calls are also allowed in
+compiler execution under the following initial restrictions. These restrictions
+apply to ordinary-function evaluation, not to the existing compiler-only types
+and operations of `fn2`.
+
+### 12.1 Ordinary functions in compiler execution
+
+The evaluator may call an ordinary `fn` whose HUC definition is available.
+Arguments must be compiler-available values; it cannot read a runtime value
+merely because that value's type is supported. Within `fn2` or another active
+compiler evaluation, use normal call syntax. From otherwise runtime source,
+`@` requests complete evaluation under the same rules. No new function marker
+or alternative declaration is required.
+
+The initial value subset is `bool`, `i8`, `i16`, `i32`, `i64`, `isize`, `u8`,
+`u16`, `u32`, `u64`, and `usize`; `void` is also allowed as a result. Aliases
+are checked after resolving their underlying types. Parameters and results
+must use this subset, as must locals and intermediate values actually created
+during evaluation. Pointers, `c8`, floating-point values, structures, strings,
+and manually managed storage are outside this initial subset. Being Basic is
+not sufficient: raw pointers and many structures are Basic too.
+
+Within that subset:
+
+- Local `let` variables and parameters may be changed where `mod` permits it.
+  Ordinary conditions, loops, and recursive calls execute in the evaluator.
+- The restrictions follow the evaluated call chain, including ordinary and
+  concrete `fn1` callees; an unsupported operation cannot be hidden in a helper.
+  A call through a declaration without an available HUC body is rejected.
+  Arbitrary foreign calls and execution of native host code are not allowed;
+  compiler intrinsics have only their separately specified translation-time
+  behavior.
+- Immutable scalar constants with compiler-known values may be read without
+  accessing runtime storage. Reading or writing runtime storage, or accessing
+  mutable shared compiler state, is rejected. Local working variables remain
+  mutable; this rule does not prohibit `let2 mod` elsewhere in compiler code.
+- There is no untracked access to files, environment variables, clocks,
+  randomness, processes, networks, or other external state. This is broader
+  than a ban on direct system calls. Future tracked compiler APIs remain a
+  separate facility, not permission to execute arbitrary runtime APIs.
+- Arithmetic follows HUC's target widths and rules, not the host compiler's
+  native arithmetic. Unsigned arithmetic wraps as usual. Executed signed
+  overflow, division by zero, invalid shifts, and other undefined operations
+  must produce compile-time diagnostics instead of host undefined behavior.
+
+Eligibility is checked along the executed path. An unsupported operation in
+an untaken ordinary branch does not prevent evaluation. That branch must still
+be valid HUC and undergo normal parsing and type checking; it does not receive
+the opaque-body exemption of an unselected `if1`. Reaching an unsupported
+operation or exceeding an evaluator resource limit is a diagnostic with the
+call stack. There is no fallback to a runtime call.
+
+For example:
+
+```huc
+fn count_digits(mod value: u32) -> u32 {
+    let mod count: u32 = 1;
+    while (value >= 10) {
+        value /= 10;
+        count += 1;
+    }
+    return count;
+}
+
+fn2 field_width(value: u32) -> u32 {
+    return count_digits(value);
+}
+
+let2 width: u32 = @field_width(12345); // 5
+```
+
+The evaluator uses the function's expanded, checked body. Entering it from a
+`fn2` does not rerun its definition's generation at the caller's cursor.
+Bootstrap raw fragments are still parsed only by HUC0 (section 11.3), so an
+ordinary function whose body contains such an opaque fragment is not eligible
+for this evaluator. This change does not add on-the-spot parsing of generated
+text. A surrounding `fn2` may still use the existing raw-generation operations.
+
+### 12.2 Dependencies and runtime emission
+
+A cached ordinary-function evaluation depends on its arguments, the expanded
+function definition and its expansion dependencies, transitively evaluated
+callees, immutable constants read, and relevant target settings. These are
+cache dependencies, not additional name-mangling inputs. Coarse invalidation
+of the relevant modules and their dependencies is allowed; stale results are
+not. Instruction and call-depth limits apply across the complete nested call
+chain, including recursive ordinary-function calls.
+
+Evaluating an ordinary function does not suppress its HUC0 definition. A
+`fn1` specialization used only at compile time need not emit a runtime
+definition; a retained runtime reference requires one even if the evaluator
+has already completed the same specialization. Section 9.7 defines these
+emission rules independently of evaluator caching.
 
 ## 13. Foreign interfaces
 

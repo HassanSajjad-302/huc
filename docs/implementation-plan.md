@@ -830,6 +830,19 @@ function and omit `let2`.
 
 `fn2`, `struct2`, and `let2` never survive in HUC0.
 
+A `fn2` can call an ordinary `fn` without another `@` when the call meets
+specification section 12.1. Start with available HUC bodies, boolean and integer
+values, `void` results, local mutation, bounded control flow/calls, and immutable
+compiler-known scalar constants. Pointers and Basic structures are not
+included merely because they are Basic. Locals in the ordinary function retain
+their `let` spelling and use evaluator-owned storage during the call.
+
+Check executed operations transitively. Untaken ordinary branches remain
+normally parsed and type-checked, but do not execute unsupported operations.
+Reject runtime-storage access, shared mutable compiler state, arbitrary foreign
+calls, and external effects. Target arithmetic and evaluator limits determine
+results and diagnostics; failed evaluation never falls back to runtime.
+
 ### 6.9 The `@` operator
 
 `@` starts compile-time evaluation of an expression. This is called an
@@ -856,6 +869,19 @@ the insertion cursor at that exact call site.
 A normal `fn1` call produces or calls a concrete runtime specialization. An
 `@fn1_call(...)` requires complete compile-time evaluation and may embed only a
 result that can be written as a HUC0 value (a materializable result).
+
+Completing a `fn1` for compiler execution does not require emitting its runtime
+definition. Track runtime demand separately and emit the specialization when
+retained runtime code needs it, including a later request after compile-time
+evaluation. A never-requested family body stays deferred. Ordinary `fn`
+declarations in retained modules still pass through even when only evaluated
+at compile time or never called; unused-function removal is a later optimization.
+
+The same scalar ordinary-function evaluator is available through explicit `@`
+entry. It evaluates an expanded body rather than replaying its definition's
+phase effects at the caller. An ordinary body containing opaque raw generated
+text is not eligible until a separate design allows HUC1 to parse that text.
+This feature leaves the existing raw-generation boundary unchanged.
 
 ### 6.10 Imports
 
@@ -1346,6 +1372,15 @@ Enforce:
 Acceptance:
 
 - `let2`, `fn2`, and `struct2` run deterministically;
+- scalar ordinary `fn` calls from compiler execution use available checked HUC
+  bodies, target-width arithmetic, local mutation, and shared call/instruction
+  limits;
+- unsupported signatures and reached operations fail; an untaken ordinary
+  branch is still checked as HUC but its unsupported operations are not executed;
+- mutable globals, runtime memory, arbitrary foreign calls, and opaque raw
+  bodies cannot be evaluated through an ordinary function;
+- cached evaluations are invalidated by relevant constant, body, callee, or
+  target changes; conservative dependency invalidation is sufficient initially;
 - failure includes the phase call stack;
 - no host pointer is observable or used as a persistent key.
 
@@ -1395,12 +1430,15 @@ Acceptance:
 - the same pattern system works for all three family kinds;
 - only the selected body is parsed;
 - recursive functions resolve through in-progress entries;
+- compile-time completion and runtime emission demand are tracked separately;
+- a runtime-needed specialization brings in its retained runtime dependencies,
+  even if it was first evaluated at compile time;
 - infinitely recursive type layout fails;
 - `let1` enforces exactly one correctly named residual `let`;
 - function-local `let1` declarations materialize at the family site;
 - generated HUC0 contains no unresolved family request;
-- each module output depends on the sorted closure of specialization keys
-  assigned to that defining module.
+- each module output depends on the sorted closure of runtime-needed
+  specialization keys assigned to that defining module.
 
 ### 11.6 Increment E: `@` and raw generation
 
@@ -1409,6 +1447,7 @@ Implement:
 - compile-time evaluation islands;
 - erased module/type/function/block phase-expression items;
 - forced `fn1` evaluation;
+- restricted ordinary `fn` evaluation from `fn2` and explicit `@` entry;
 - result materialization rules;
 - the compiler-supplied `import2 compiler` module;
 - `compiler::emit_huc`;
@@ -1433,6 +1472,10 @@ Acceptance:
 
 - `@` cannot appear on a type;
 - nested compiler calls do not need repeated `@`;
+- a compile-time-only `fn1` request does not emit a runtime definition, while a
+  later retained runtime reference requires one;
+- ordinary `fn` declarations remain in HUC0 even when called only at compile
+  time or not called;
 - helpers emit at the call site, not definition site;
 - raw HUC1 emitted as text is rejected by the HUC0 stage;
 - diagnostics compose HUC0 location, emission call site, and phase call stack.

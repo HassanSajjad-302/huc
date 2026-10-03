@@ -13,6 +13,13 @@ Its two central ideas are:
 - A small value model: Basic values copy, Advanced values transfer, and raw
   `T*` pointers observe without extending lifetimes.
 
+Compiler-only `fn2` helpers can reuse ordinary `fn` functions under an initial
+[scalar evaluation subset](docs/language-specification.md#121-ordinary-functions-in-compiler-execution):
+booleans and integers, local mutation, bounded execution, and no runtime-memory
+access or external effects. Ordinary `fn` definitions still appear in HUC0;
+a `fn1` specialization used only at compile time is checked and evaluated
+without requiring a runtime definition.
+
 HUC has no general reference type. `T*`, `T**`, and longer pointer chains are
 non-owning raw-pointer types. Use unary `&value` to get a non-owning pointer
 to an inline value or storage slot, including a pointer slot. It cannot be
