@@ -19,7 +19,11 @@ Key terms:
   syntax.
 - **Place**: a storage location. **Liveness** here means whether that place
   contains an active HUC value that may need cleanup.
-- **Insertion cursor**: the position where generated HUC0 text will be added.
+- **Program mode**: prepare code for the HUC0 program.
+- **Evaluation mode**: prepare a private function body for the compiler to run.
+- **Generation site**: the source position and scope currently being prepared.
+- **Insertion point**: the forward-only destination selected for generated code.
+- **Origin**: the generator location and call chain behind a generated span.
 
 ## 1. Recommendation
 
@@ -98,7 +102,7 @@ HUC1 source manager + delimiter scanner + staged index
 selected-body parser + phase checker + C++20 interpreter
     |
     v
-family specialization + residualizer + raw-text insertion
+family specialization + parsed text insertion + residualizer
     |
     v
 printable per-module .huc0 files + origin maps
@@ -256,7 +260,7 @@ normal `Huc0TranspileRequest`.
 ### 5.1 Source manager
 
 `SourceManager` owns immutable source buffers and assigns each one a `FileId`.
-Every token and syntax node carries a compact `SourceSpan`. Its range includes
+Every token carries a compact `SourceSpan`. Its range includes
 the start position but excludes the end position (a half-open range):
 
 ```cpp
@@ -267,12 +271,19 @@ typedef struct HucSourceSpan {
 } HucSourceSpan;
 ```
 
+Syntax nodes retain a primary span plus additional spans when needed. A loop
+with a generated header and an original body cannot be described as one
+contiguous range in one buffer. Parsing uses logical input order, not a numeric
+comparison of offsets from different files. Generated text gets a new immutable
+buffer; no insertion changes earlier source offsets.
+
 Line and column numbers are computed lazily from per-file newline indexes.
-Generated nodes additionally carry an expansion chain:
+Generated nodes additionally carry an origin chain:
 
 ```text
 generated HUC0 range
-  -> selected HUC1 source or raw generation call
+  -> original/generated source spans and generation site
+  -> text-emission operation
   -> phase helper call stack
   -> specialization request chain
   -> original source declaration
@@ -470,8 +481,11 @@ The HUC0 translator checks it again after it has been written to a file.
 though they share binder, pattern, predicate, and deferred-body components.
 The syntax tree also has a phase-expression item node for standalone
 `@expression;` at module, type-body, function, or block scope. Its expression
-must evaluate to compiler `void`; expansion erases the node after applying its
-effects at the node's insertion cursor.
+must evaluate to compiler `void`. Preparation erases the node, drains its local
+output queue in inherited mode, and processes that input before the following
+source. A generated final `for (...)` header may consume the following braced
+source block as its body. Do not check that block's loop context prematurely.
+Reject numbered syntax in inserted HUC0; it does not start another staging pass.
 
 Ordinary `import` exposes runtime declarations and phase-1 families and remains
 as a runtime import in the corresponding HUC0 module. `import2` is available
@@ -479,7 +493,8 @@ only to compiler code and is erased. There is no `import1` in 0.1.
 
 ## 6. Semantic analysis
 
-The HUC0 translator owns runtime semantic analysis:
+HUC0 performs the following runtime semantic analysis. HUC1 reuses these rules
+for prepared source and parsed generated text:
 
 1. collect declarations and module imports;
 2. resolve names;
@@ -493,15 +508,23 @@ raw pointers. It requires constant initializers for fixed globals, supplies
 zero/null only to omitted mutable initializers, and rejects structures,
 Advanced values, runtime initialization, and global cleanup in 0.1.
 
-HUC1 performs its own phase checking, family matching, and selected-body
-analysis before printing HUC0. The HUC0 translator then reparses and checks
-that text exactly as it checks user-written HUC0. No generic HIR or
-specialization cache crosses the translator boundary.
+HUC1 additionally performs phase checking, family matching, and selected-body
+preparation before printing HUC0. Queue forward module output after its owning
+top-level declaration and collect relevant declarations before final body
+resolution. Defer unresolved forward references until collection is complete;
+compiler evaluation needs an available checked definition. Diagnose a missing
+definition or a dependency cycle rather than inventing one from suppressed
+evaluation-mode output. Do not silently revise a finalized lookup or compiler
+decision after an insertion; diagnose conflicting insertion.
+
+The HUC0 translator independently reparses and checks the emitted text exactly
+as it checks handwritten HUC0. No generic HIR or specialization cache crosses
+the translator boundary.
 
 A selected deferred body is parsed according to its enclosing module, type,
 function, or block. Module/type bodies may mix generated runtime declarations
 or members with compiler-only statements. Those statements must use values
-available at compile time; they execute during expansion and disappear from
+available at compile time; they execute during preparation and disappear from
 the output. Skipped bodies are only delimiter-scanned, not parsed.
 
 ### 6.1 Symbol table
@@ -828,17 +851,23 @@ Operations behave as follows:
 - `if1` requires a concrete boolean and selects one branch;
 - ordinary `if` with a symbolic condition creates residual branches;
 - `for1` evaluates its initialization, condition, and step at compile time,
-  expanding its body once per iteration;
-- raw generation calls append text to their defined HUC0 output cursor.
+  preparing and inserting its body once per iteration;
+- text-generation calls queue input for the forward insertion rules in section
+  10, using program mode or evaluation mode independently of execution timing.
 
 This is a small partial evaluator, not C++ template substitution. It has no
 bootstrap syntax-object, quote, splice, or structural emit value.
 
 ### 8.4 Forced mode
 
-`@call` supplies concrete values and sets the evaluator mode to
-`HUC_EVALUATION_FORCED`. Creation of an unresolved symbolic operation in forced
-mode is a diagnostic.
+`@call` requires a concrete compiler result and sets the execution requirement
+to `HUC_EVALUATION_FORCED`. This is not the generation-mode selector: a `fn2`
+generator entered through `@` inherits program mode when preparing program code.
+A value-evaluation call to `fn` or `fn1` instead prepares a private body in
+evaluation mode, then binds its concrete ordinary arguments and executes it.
+Body preparation still treats ordinary parameters as symbolic; they do not
+become phase arguments just because the later evaluation has concrete inputs.
+An unresolved value needed during actual evaluation is a diagnostic.
 
 A normal `fn1` call requests or calls a concrete runtime specialization.
 Prefixing that call with `@` instead requires complete compile-time evaluation,
@@ -848,15 +877,16 @@ for runtime code.
 Completing a `fn1` body for evaluation is separate from emitting it. A
 compile-time-only request does not mark the specialization for HUC0 emission.
 A retained runtime reference does, even when that specialization was evaluated
-earlier. Ordinary `fn` declarations in retained modules are still emitted
-without demand filtering.
+earlier. Preparation caches and publication state distinguish program mode
+from evaluation mode. Ordinary `fn` declarations in retained modules are still
+emitted without demand filtering, independently of any evaluation-mode use.
 
 #### 8.4.1 Ordinary-function calls
 
 An active compiler evaluation, including a `fn2`, may call an ordinary `fn`
 without another `@`. An explicit `@` can also enter this evaluation from runtime
 source. Resolve the call normally, require its HUC definition, and evaluate its
-expanded, checked body under specification section 12.1. Local variables keep
+prepared, checked body under specification section 12.1. Local variables keep
 their ordinary `let` spelling; their storage is evaluator-owned for this call.
 
 Initially accept only boolean and integer parameters/results, with `void`
@@ -879,11 +909,13 @@ overflow, division by zero, and invalid shifts produce diagnostics with the
 evaluation call stack. Unsupported operations and exhausted budgets also
 diagnose; no forced call falls back to runtime execution.
 
-Expand definition-owned phase work before evaluating the ordinary function;
-do not replay it at the evaluating caller's insertion cursor. A body containing
-an opaque raw fragment is not evaluable in the bootstrap because HUC1 has not
-parsed that fragment. Ordinary-function evaluation does not change the raw-text
-boundary or provide a native-code escape hatch.
+Prepare definition-owned phase work in evaluation mode before executing the
+ordinary function; do not replay it into its caller. Parse local generated code
+into that private body and apply the scalar subset to its executed operations.
+Generator helpers may use compiler text while preparing it. Suppress module
+output after evaluating the emission arguments; it supplies no declarations.
+Later program-mode preparation must still generate and publish its module
+output. None of this permits execution of arbitrary native code.
 
 ### 8.5 Resource control
 
@@ -910,7 +942,7 @@ its value and is part of the separate compiler-library design.
 
 ### 8.7 Staging contexts
 
-`if1`, `for1`, and `while1` execute while HUC1 is expanded and may occur at
+`if1`, `for1`, and `while1` execute while HUC1 prepares code and may occur at
 module, type-body, function, or nested-block scope. Selected output must be
 valid declarations/members at module or type scope and may be declarations or
 statements at function/block scope. Inside `fn2`, ordinary `if`, `for`, and
@@ -921,8 +953,8 @@ All compiler-only variables are spelled `let2`; parameters inherit the phase
 of their enclosing function. `fn2`, `struct2`, and `let2` are erased.
 `@` opens a compile-time evaluation island and never qualifies a type. A
 selected `let1` specialization must leave exactly one ordinary runtime `let`
-with the family name and no other residual statement. Raw generation is
-forbidden inside a `let1` selection body because it would evade that invariant.
+with the family name and no other residual statement. Text generation remains
+forbidden inside a `let1` selection body as a separate 0.1 restriction.
 `let1` is permitted at module and function/block scope, but never as an
 instance field.
 
@@ -997,7 +1029,7 @@ must never contain pointer addresses or non-canonical map iteration order.
 
 ### 9.2 State machine
 
-Each specialization cache entry is:
+Each specialization has a separate preparation record for each generation mode:
 
 ```text
 Absent -> InProgress -> Complete
@@ -1011,14 +1043,19 @@ indirection makes its size finite is an infinite-size diagnostic.
 Failed entries retain diagnostics for the duration of the compilation so the
 same bad specialization is not repeatedly evaluated.
 
-Track `runtime_needed` independently of body/evaluation state. An evaluation
-request can complete without setting it; a retained runtime reference sets it
-and adds the specialization's runtime dependencies to the emission worklist.
+Track `runtime_needed` and `module_output_published` independently of evaluation
+results. An evaluation request can complete without setting either. A retained
+runtime reference requires the program-mode preparation record and adds the
+specialization's runtime dependencies to the emission worklist.
 This also applies when the evaluation result was a cache hit. Requests found
 only while executing compiler code do not become runtime roots. Ordinary `fn`
 declarations remain runtime roots in retained modules, even if uncalled; their
 retained bodies can therefore require `fn1` definitions. Do not treat an
-unexecuted ordinary runtime branch as an erased phase branch.
+unexecuted ordinary runtime branch as an erased phase branch. Publish ordered
+module output once per destination module and owning function/specialization;
+do not deduplicate different emission calls or phase-loop iterations within it.
+Distinct explicit `fn2` requests remain distinct and can cause duplicate-name
+diagnostics. Never silently choose the first conflicting generated definition.
 
 ### 9.3 Naming
 
@@ -1030,9 +1067,11 @@ _HU3app4math6select__A7F19C2E
 ```
 
 The HUC0 name is deterministic for the defining family, canonical arguments,
-and target-relevant configuration. The C backend encodes this HUC0 symbol as
-a collision-free C identifier without using C implementation-reserved names;
-the HUC-only prefix above is not emitted verbatim. Exact spellings remain
+and target-relevant ABI identity. Generation mode, body/dependency fingerprints,
+and ambient HUC1 state do not enter the mangled name. The C backend encodes this
+HUC0 symbol as a collision-free C identifier without using C
+implementation-reserved names; the HUC-only prefix above is not emitted verbatim.
+Exact spellings remain
 implementation details until a native HUC ABI is specified; comments and
 origin maps recover the source family and compile-time arguments.
 
@@ -1043,18 +1082,18 @@ importable in 0.1. Every requested type must already be nameable through the
 defining module's import closure; a requester-local type that would create a
 reverse dependency is rejected in 0.1.
 
-Expansion uses a deterministic worklist across the whole module graph.
-Initial requests are sorted by stable source identity. Expanding one
+Preparation uses a deterministic worklist across the whole module graph.
+Initial requests are sorted by stable source identity. Preparing one
 specialization may add more requests; processing continues until no new
 requests remain (a fixpoint).
 
 A defining module's output and cache dependency include the sorted keys of
-all specializations assigned to it, including those found through other
-requests. A new request in an importing module therefore invalidates or
+runtime-needed specializations assigned to it, including those found through
+other requests. A new request in an importing module therefore invalidates or
 extends the defining module's output. The compiler must not reuse a cached
 module that lacks the newly requested specialization.
 
-## 10. Bootstrap raw generation
+## 10. Text generation and forward insertion
 
 The bootstrap compiler-supplied `import2 compiler` module exposes only:
 
@@ -1069,30 +1108,59 @@ A call uses `@` when it enters compiler execution:
 @compiler::emit_huc("let mod generated: i32;");
 ```
 
-`emit_huc` writes raw HUC0 text at the insertion cursor inherited from its
-call site. That cursor can represent a module declaration sequence, a type
-member sequence, or a function/block statement sequence. Nested `fn2` helpers
-inherit the caller's cursor, so helper location never changes where output is
-inserted.
+Maintain a generation context with mode, generation site, destination module,
+owning declaration, and ordered local/module output queues. Nested `fn2`
+helpers inherit it. A `fn` or `fn1` value-evaluation call pushes a separate
+evaluation-mode context for its own body, then restores the caller's context.
+The emission operation's location inside a helper does not become its output
+destination.
 
-`emit_huc_module` appends raw HUC0 declarations to the call-site module's
-generated declaration buffer. It cannot inject a statement into an arbitrary
-block. Bootstrap HUC has no operation meaning “one lexical scope above.”
+| Generation mode | Local output | Module output |
+|---|---|---|
+| Program mode | Parsed into retained code | Published after its owner |
+| Evaluation mode | Parsed into a private evaluated body | Suppressed |
 
-The HUC1 translator deliberately does not parse or semantically validate these
-strings. It records their byte ranges and origins, writes them into the
-per-module `.huc0` artifacts, and lets the public HUC0 translator diagnose
-them. Raw text containing a numbered HUC1 construct is therefore rejected by
-the HUC0 translator, not recursively staged. A generated-code diagnostic
-composes:
+`emit_huc` queues HUC0 for the inherited scope. Finish the requesting source
+statement/declaration's compiler work, then drain local output before advancing
+to subsequent source. An erased standalone phase item is replaced by this
+input. Add immutable generated buffers to the parser's logical input stream;
+do not rewrite earlier source buffers or parse the next block prematurely.
+At function/block scope, a final complete `for (...)` header may be completed
+by the following source block. Other partial expressions or unmatched braces
+are rejected. A generator that emits nothing has no implicit loop contract.
 
-1. the location in generated HUC0;
-2. the raw-generation call site;
-3. the phase helper call stack;
-4. the specialization request chain.
+In program mode, `emit_huc_module` requires complete module declarations and
+queues them immediately after the enclosing top-level declaration (after the
+whole type for a method). At module scope, use the boundary after the requesting
+item. Associate queues with these boundaries rather than collecting everything
+at the file start or end. Preserve emission order within each boundary. For a
+concrete function specialization, the following output belongs after that
+concrete declaration in its defining module. This is logical source order;
+late preparation must not move fragments ahead of their owner.
+
+In evaluation mode, evaluate a module emission's arguments normally, but do not
+insert, parse, or register its declaration text and do not mark it published.
+Module selection affects only that emission, not the inherited local destination.
+Neither operation supports backward insertion or modifying previously prepared
+source. Missing declarations from suppressed output diagnose when needed.
+
+Share HUC0 lexing/parsing and semantic rules with HUC1's inserted-code path.
+Reject numbered constructs, `import2`, and `@` in generated HUC0 during HUC1
+preparation. Resolve generated and original source together, allowing module
+forward references but rejecting changes to finalized compiler decisions.
+Print only checked program-mode output into `.huc0` artifacts; the standalone
+HUC0 translator independently validates those files.
+
+Record generated-buffer spans, generation site, emission operation, helper
+stack, specialization chain, and mode. Syntax nodes can have multiple spans.
+Diagnostics in original blocks point to original source; generated errors show
+their text and origin chain. Output maps add final HUC0 ranges when files are
+printed. Source locations never require rewriting earlier buffer offsets.
 
 There is no bootstrap `gen`, `gen_global`, `quote`, splice, `parse_huc`,
-structural syntax object, or structural `emit` API. A compiler reflection and
+structural syntax object, expression-capture API, automatic fresh-name service,
+or structural `emit` API. Parsing inserted text is internal compiler behavior,
+not a public `parse_huc` function. A compiler reflection and
 structured-generation library may later provide environment, module,
 declaration, type, function, statement, and expression handles, but that is a
 separate language/library design. The bootstrap architecture must not invent
@@ -1616,7 +1684,7 @@ The HUC frontend should catch all language errors. Backend diagnostics are
 treated as compiler bugs or foreign-code diagnostics.
 
 Generated files contain `#line` directives where they improve messages, but a
-sidecar `.huc.map` records richer expansion chains. The driver rewrites backend
+sidecar `.huc.map` records richer generation origins. The driver rewrites backend
 diagnostics to HUC locations and includes the raw backend message under
 `--verbose-backend`.
 
@@ -1731,28 +1799,32 @@ Even on a cache hit, `build` materializes the HUC0 module files before invoking
 the HUC0 translator. A cached private AST is not a substitute for the textual
 boundary.
 
-Ordinary-function evaluation caches record argument values, expanded-body and
-expansion-dependency fingerprints, transitively evaluated callees, immutable
+Ordinary-function evaluation caches record argument values, prepared-body and
+preparation-dependency fingerprints, transitively evaluated callees, immutable
 constants read, and target settings. Validate those dependencies before reuse;
 coarse invalidation by module/import closure is acceptable initially. Do not
 put ambient compiler state or evaluation-result dependencies into symbol names.
 Evaluation-cache hits never decide whether a runtime definition must be emitted.
 
-The phase checker classifies transitive compiler execution as pure or
-effectful. A normal family specialization is constructed once per key; its
-cache entry includes its complete residual declaration and ordered raw
-fragments. Local/type fragments enter the declaration; module fragments enter
-the defining module buffer once. Repeated normal requests only reference that
-one result.
+Preparation records are keyed by generation mode as well as definition,
+specialization arguments, and dependencies. A program-mode record includes a
+checked body, origins, and ordered module declarations to publish after its
+owner. Publication is once per destination module and owning definition or
+specialization, not once per emission API, helper name, or source line. A cache
+hit restores output once in a new compilation; repeated runtime uses in that
+compilation do not duplicate it.
 
-An actual `fn2` call, forced `@fn1` call, or standalone phase expression that
-reaches `emit_huc` or `emit_huc_module`, directly or through helpers, runs each
-time it is evaluated. It uses the current inherited insertion cursor; a
-cached return value alone cannot replace that execution. The compiler may
-still cache selected-body parsing and pure computations within the call.
+An evaluation-mode record contains its private checked body and no module
+declarations from suppressed calls. Its completion cannot mark program output
+published or satisfy later program-mode preparation. Reuse common parsing and
+pure computations where sound, but never reuse a suppressed effect as though it
+had been emitted. Execution of a prepared `fn`/`fn1` does not replay generation.
 
-A future cache for these calls would need to record their output and replay
-it in order at the current cursor. That feature is outside the bootstrap.
+Each explicit `fn2` invocation during preparation executes with its inherited
+mode and site. A cached return value alone cannot replace its insertion effects.
+Initially cache the whole prepared owner rather than individual effectful helper
+calls. Separate invocations and phase-loop iterations remain distinct; conflicting
+declarations diagnose rather than deduplicate.
 
 ### 16.2 Interface files
 
@@ -1809,7 +1881,7 @@ symbol hashes must be identical across processes for identical inputs.
 - specialization keys;
 - evaluator arithmetic and resource limits;
 - deferred-body delimiter scanning;
-- raw-generation cursor inheritance;
+- generation-mode and insertion-point inheritance through nested helpers;
 - tracked-root versus pointer-extraction cleanup modes;
 - rejection of direct field/array-element and read-only pointer sources;
 - drop-state analysis and relocation-state diagnostics for both `Inactive`
@@ -1894,14 +1966,24 @@ Compile and run small programs that record:
 - target-width integer arithmetic, unsigned wrapping, and diagnostics for
   signed overflow, division by zero, and invalid shifts;
 - rejection of unsupported scalar-call signatures/aliases, pointers, foreign
-  calls, runtime-storage access, shared mutable state, and opaque raw bodies;
+  calls, runtime-storage access, and shared mutable state;
 - unsupported operations skipped by ordinary branches versus reached operations,
   while both branches still receive normal syntax/type checks;
 - evaluation-cache invalidation after a constant or evaluated callee changes;
 - compile-time-only `fn1` calls omitted from HUC0, later runtime demand causing
   emission, transitive runtime dependencies, and uncalled ordinary `fn` retention;
-- raw generation at local, type-body, and module insertion points;
-- HUC0 rejection of numbered syntax emitted as raw text;
+- parsed generation at local, type-body, and forward module insertion points;
+- local generation in both modes, with scalar checks on the prepared evaluation
+  body; suppressed module output evaluates arguments but introduces no names;
+- evaluation-first/program-later preparation still publishing module output;
+- once-per-owner program publication, distinct emissions/iterations preserved,
+  and duplicate generated definitions diagnosed;
+- generated `for` headers followed by original blocks, correct loop control,
+  missing-block errors, and ordinary blocks when no header is generated;
+- immutable source locations, mixed-origin syntax nodes, forward module name
+  resolution, and rejection of retroactive semantic changes;
+- HUC1 rejection of numbered syntax in inserted text and independent HUC0
+  rejection if such syntax is supplied directly;
 - acceptance of every successful staged module by the standalone HUC0
   translator.
 
@@ -1961,7 +2043,8 @@ Implement in this order:
 4. `struct1`, `fn1`, and `let1` primary/partial/full family selection with
    angle patterns, deduction, predicates, and recursion states;
 5. `@`, forced evaluation, `compiler::emit_huc`,
-   `compiler::emit_huc_module`, cursor inheritance, and composed diagnostics.
+   `compiler::emit_huc_module`, inherited generation modes and sites, and
+   composed diagnostics.
 
 The HUC1 frontend loads a versioned, inspectable generated interface for the
 compiler module before indexing user modules. This is the implementation
@@ -2018,14 +2101,15 @@ The following should be enforced in code review and tests:
 5. Compile-time evaluation has no ambient untracked host effects.
 6. HUC1 produces written per-module HUC0; HUC0 never consumes a private HUC1
    AST or HIR.
-7. Bootstrap raw generation is source concatenation only at defined cursors;
-   no structural-generation API is implied.
+7. Text generation uses parsed, forward-only insertion in program mode or
+   evaluation mode; no structural-generation API is implied.
 8. Backend output preserves HUC left-to-right argument evaluation and
    by-value parameter initialization.
 9. Source inactivity and cleanup state do not add fields to nominal value types.
 10. No checked use of a root whose tracked state is `Inactive` or
     `MaybeActive` is accepted; this diagnostic is never optional. Lifetime
     changes through raw-pointer aliases remain outside that guarantee.
-11. Diagnostics retain source and expansion chains across both translators.
+11. Diagnostics retain original/generated spans and origin chains across both
+    translators.
 12. A future C++ or native-code backend can consume MIR without recreating
     semantic analysis.

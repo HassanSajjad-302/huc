@@ -85,13 +85,14 @@ fn1 choose(T: auto, Greater: bool = true)(mod left: T, mod right: T) -> T {
 
 struct2 BuildRecord {
     let2 generated_declarations: usize;
-    let2 used_raw_generation: bool;
+    let2 used_text_generation: bool;
 }
 
 // An ordinary scalar function can also run in the compiler evaluator.
 // Its runtime definition still remains in HUC0 even if only used by fn2.
 fn add_values(left: i32, right: i32) -> i32 {
-    let sum: i32 = left + right;
+    // Local generated code is parsed in both program and evaluation mode.
+    @compiler::emit_huc("let sum: i32 = left + right;");
     return sum;
 }
 
@@ -105,7 +106,7 @@ fn2 declare_local_counter() -> void {
     compiler::emit_huc("let mod generated_counter: i32 = 0;");
 }
 
-// This raw HUC0 declaration is appended to this module's generated buffer.
+// At module scope, the generated declaration is inserted after this request.
 @compiler::emit_huc_module(
     "fn generated_answer() -> i32 { return 42; }",
 );
@@ -158,8 +159,8 @@ fn main() -> i32 {
     let smaller: i32 = @choose<i32, false>(3, 5);
     io::println(folded + smaller);
 
-    // The helper writes its output here in this block. Only the second-round
-    // HUC0 translator parses that text.
+    // The helper inherits this generation site. HUC1 parses its output before
+    // checking the following use; HUC0 independently checks the printed program.
     @declare_local_counter();
     generated_counter += 1;
 

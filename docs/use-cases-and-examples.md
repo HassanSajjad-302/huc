@@ -12,7 +12,7 @@ larger examples that resemble real applications.
 
 The compiler does not exist yet. These examples describe the intended design.
 As features are implemented, each example must become either an executable
-test or an expansion test that compares generated HUC0 with expected output
+test or a generation test that compares generated HUC0 with expected output
 (a golden test).
 
 ## 1. Reading the examples
@@ -89,7 +89,7 @@ Notable HUC-specific combinations are:
    including a different type or mutation permission.
 3. Typed phase conditions at module and type-body scope whose discarded bodies
    are never parsed.
-4. Compiler helper functions that emit raw HUC0 at their expansion call site,
+4. Compiler helper functions that insert HUC0 at their inherited generation site,
    followed by a separately inspectable and independently parsed HUC0 round.
 5. A normal `fn1` call that generates and calls a runtime specialization, while
    the same call prefixed by `@` must run completely at compile time.
@@ -136,8 +136,8 @@ The examples below cover these use cases:
 | HUC1 | Runtime residualization versus forced execution |
 | HUC1 | Restricted ordinary-function calls from compiler execution |
 | HUC1 | Compiler-only helper functions and state |
-| HUC1 | Call-site and module-scope raw generation |
-| Pipeline | Per-module HUC1-to-HUC0 expansion |
+| HUC1 | Parsed, forward-only text generation in program and evaluation modes |
+| Pipeline | Per-module HUC1-to-HUC0 translation |
 | Pipeline | Standalone hand-written HUC0 |
 | Pipeline | Generated C17 with explicit evaluation sequencing and cleanup |
 | Systems | Target-specific layouts without preprocessor directives |
@@ -1570,8 +1570,8 @@ The normal call produces a specialized runtime function and calls it at
 runtime. `@` runs the call completely at compile time and writes its result
 as a HUC0 value.
 
-Only `biased_add<5>` needs a runtime definition here. The compiler expands and
-checks `biased_add<9>` to evaluate it, but does not emit that specialization.
+Only `biased_add<5>` needs a runtime definition here. The compiler prepares and
+checks `biased_add<9>` in evaluation mode, but does not emit that specialization.
 A later runtime reference would require its definition too. Both ordinary
 functions, `runtime_case` and `compile_case`, remain in HUC0 even if nothing
 calls them. Function families that are never requested remain deferred.
@@ -1661,7 +1661,7 @@ type checking. Signed overflow, division by zero, invalid shifts, and exceeded
 evaluation limits are also compile-time diagnostics, with no runtime fallback.
 The full rules are in specification section 12.1.
 
-## 7. Raw generation examples
+## 7. Text generation examples
 
 ### 7.1 A helper generating at its call site
 
@@ -1693,8 +1693,10 @@ fn run() -> i32 {
 }
 ```
 
-The helper is defined at module scope, but it writes code at its call site
-inside `run`. That output position is its inherited insertion cursor.
+The helper is defined at module scope, but it inherits the generation site
+inside `run`. HUC1 parses its output before processing the following assignment.
+If the helper declared a different name, HUC1 would diagnose the use of
+`generated_counter`; it does not leave that check only to HUC0.
 
 ### 7.2 Module generation from a helper
 
@@ -1709,7 +1711,14 @@ fn2 generate_health_check() -> void {
     );
 }
 
-@generate_health_check();
+fn run() -> i32 {
+    @generate_health_check();
+    return health_check();
+}
+
+fn next_function() -> i32 {
+    return 0;
+}
 ```
 
 Generated HUC0:
@@ -1717,15 +1726,114 @@ Generated HUC0:
 ```huc
 module examples.module_emit;
 
+fn run() -> i32 {
+    return health_check();
+}
+
 fn health_check() -> i32 {
     return 200;
 }
+
+fn next_function() -> i32 {
+    return 0;
+}
 ```
 
-`emit_huc_module` may emit declarations only. It cannot insert arbitrary code
-into an already checked foreign module.
+`emit_huc_module` inserts declarations after the enclosing top-level declaration:
+here, after `run`, before `next_function`. Module-level function references may
+refer forward, so the call in `run` is valid. For a method, the insertion point
+would be after its whole top-level type. At module scope, it would be after the
+request itself. Neither operation inserts before its owner or modifies an
+already checked foreign module.
 
-### 7.3 Emitted HUC1 is rejected in Round 2
+### 7.3 Program mode and evaluation mode
+
+Both modes run during compilation. The difference is what the prepared code is
+for: the HUC0 program or a private body executed by the compiler.
+
+```huc
+module examples.generation_modes;
+
+import2 compiler;
+
+fn1 generated_value(Extra: i32)() -> i32 {
+    @compiler::emit_huc("let local: i32 = 40;");
+    @compiler::emit_huc_module(
+        "fn generation_marker() -> i32 { return 1; }",
+    );
+    return local + Extra;
+}
+
+fn main() -> i32 {
+    let folded: i32 = @generated_value<2>();
+    let first: i32 = generated_value<2>();
+    let second: i32 = generated_value<2>();
+    return folded + first + second;
+}
+```
+
+- The forced call prepares a private evaluation-mode body. Local generation
+  declares `local`, so evaluation returns `42`. Module generation introduces
+  no `generation_marker` declaration and does not mark it as emitted.
+- The runtime calls require the same specialization in program mode. Its local
+  declaration appears inside the emitted function, and `generation_marker`
+  appears after that function. There is one definition of each, not one per
+  runtime call.
+- This remains true if the evaluation request is processed first. If only the
+  forced call existed, neither function would be emitted for that request.
+
+Module suppression evaluates the call's arguments, but does not parse the text
+as declarations or make its names available. A body that needs a helper supplied
+only by its suppressed output cannot be evaluated. An ordinary `fn` follows the
+same preparation rules, but independently retains its normal HUC0 definition
+even when it is never called at runtime.
+
+"Once" applies to publishing one function or specialization's program-mode
+output, not to the emission API globally. Two explicit generator calls or loop
+iterations both contribute output. Another specialization of this example
+would also generate `generation_marker`; that duplicate definition is an error,
+not silently discarded output. Real generators must choose distinct names or
+arrange for one declaration owner.
+
+### 7.4 A generated loop header with an original body
+
+```huc
+module examples.generated_loop;
+
+import2 compiler;
+
+fn2 forward_four() -> void {
+    compiler::emit_huc("for (; index < 4; index += 1)");
+}
+
+fn sum_indices() -> i32 {
+    let mod total: i32 = 0;
+    {
+        let mod index: i32 = 0;
+        @forward_four(); {
+            if (index == 2) {
+                continue;
+            }
+            total += index;
+        }
+    }
+    return total;
+}
+```
+
+HUC1 parses the generated header together with the next source block. The body
+is not passed to `forward_four`. Its `continue` advances the generated loop's
+step, and the result is `4`. An enclosing source block keeps `index` local to
+this example; the existing `for` grammar still has three optional expression
+clauses, without declarations or comma-separated steps.
+
+Only a complete final `for (...)` header gets this fragment exception. A missing
+following block is an error. If the generator emits nothing, the block remains
+an ordinary block; there is no implicit promise that a helper creates a loop.
+Names are not made unique automatically: this helper deliberately uses the
+caller's `index`.
+
+### 7.5 Generated text must be HUC0
 
 ```huc
 @compiler::emit_huc_module(
@@ -1733,9 +1841,16 @@ into an already checked foreign module.
 );
 ```
 
-The HUC1 translator writes the string without parsing it. The HUC0 translator
-then rejects `if1`. Raw generation does not run staging a second time: its
-output must already be valid HUC0.
+In program mode, HUC1 rejects the generated `if1` while parsing the inserted
+text. Generation does not run staging a second time: its output must already
+be valid HUC0. The standalone HUC0 translator independently rejects numbered
+constructs if handed such a file. In evaluation mode, this particular module
+emission is suppressed; its text is not parsed or inserted.
+
+Errors in generated text point to that text and its generator call chain.
+Errors in the original loop body still point to the original source. Original
+and generated buffers keep their own immutable locations; printing final HUC0
+adds an output map rather than changing those locations.
 
 ## 8. Large case study: target-specialized small vector
 
@@ -1922,7 +2037,7 @@ This illustrates the design; it is not a finished, safety-checked container:
 ## 9. Large case study: embedded register map
 
 A hardware description often needs many nearly identical volatile accessors.
-The bootstrap reflection library is not available yet, so raw HUC0 generation
+The bootstrap reflection library is not available yet, so HUC0 text generation
 can serve as the initial mechanism.
 
 The probable compiler text helper `format` below is illustrative.
@@ -2019,7 +2134,7 @@ Usefulness:
 
 `compiler::Text`, `compiler::format`, and user-defined `struct2 init` details
 belong to the future compiler-library proposal; this case study records the
-intended experience, not bootstrap API commitments beyond raw emission.
+intended experience, not bootstrap API commitments beyond text generation.
 
 ## 10. Large case study: protocol messages
 
@@ -2409,7 +2524,7 @@ Possible tools include:
 | `fn1` partial specialization | overloads, traits, macros | Same primary/partial/full mechanism as structure and variable families |
 | `let1` | variable templates, macros, generated locals | Selected leaf is a complete ordinary `let`, including type and mutation permissions |
 | `@fn1(...)` | constant evaluation or interpreter call | Same family either residualizes or must fully execute |
-| Raw call-site emission | macros, mixins, compiler plugins | Compiler helper inherits a lexical HUC0 insertion cursor |
+| Text generation | macros, mixins, compiler plugins | Helpers inherit the generation mode and site; inserted HUC0 is parsed and checked |
 | Printable HUC0 boundary | internal compiler IR or generated source | Second public translator parses the exact intermediate source |
 | Future semantic reflection | procedural macros, plugins, build generators | Stable compiler-only semantic snapshots plus explicit emission |
 

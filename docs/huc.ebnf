@@ -9,6 +9,13 @@
    does not turn the body into tokens. If selected, the body is parsed later
    using the grammar for its enclosing module, type, function, or block.
 
+   HUC1 parses inserted text using the applicable HUC0 productions: generated
+   text cannot contain numbered constructs or @. At function/block scope, a
+   local generation request may end with a complete for-header-0 followed by
+   the next original block-1. Parse them together, process the original body's
+   phase constructs, and retain an ordinary for-statement-0. The language
+   specification section 11 defines generation modes and forward insertion.
+
    Semantic restrictions such as phase availability, fixed-global
    initialization, family partial ordering, and address-taking permissions are
    defined by the language specification, not by this grammar alone. *)
@@ -217,7 +224,7 @@ deferred-body     = "{", ? scanner-delimited opaque source span ?, "}" ;
    compiler-only statements. A function or nested block uses the ordinary
    mixed HUC1 block grammar. The phase checker, not this grammar, checks
    whether an ordinary expression or control statement uses only values
-   available at compile time. Such a statement runs during expansion and
+   available at compile time. Such a statement runs during preparation and
    disappears from the output. *)
 
 selected-module-body
@@ -316,9 +323,9 @@ local-let-decl-0  = "let", [ "mod" ], identifier, ":", ( type-0 | "auto" ),
 if-statement-0    = "if", "(", expression-0, ")", block-0,
                     [ "else", ( block-0 | if-statement-0 ) ] ;
 while-statement-0 = "while", "(", expression-0, ")", block-0 ;
-for-statement-0   = "for", "(", [ expression-0 ], ";",
-                    [ expression-0 ], ";", [ expression-0 ], ")",
-                    block-0 ;
+for-header-0      = "for", "(", [ expression-0 ], ";",
+                    [ expression-0 ], ";", [ expression-0 ], ")" ;
+for-statement-0   = for-header-0, block-0 ;
 return-statement-0
                   = "return", [ expression-0 ], ";" ;
 expression-statement-0

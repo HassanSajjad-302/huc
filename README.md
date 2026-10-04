@@ -20,6 +20,14 @@ access or external effects. Ordinary `fn` definitions still appear in HUC0;
 a `fn1` specialization used only at compile time is checked and evaluated
 without requiring a runtime definition.
 
+Text generation has two [generation modes](docs/language-specification.md#111-program-mode-and-evaluation-mode):
+**program mode** prepares the HUC0 program; **evaluation mode** prepares a private
+body for the compiler to execute. Local generated code is parsed and checked
+in both. Module output is inserted forward in program mode and suppressed in
+evaluation mode. Repeated runtime uses publish a function or specialization's
+generated declarations only once; compile-time evaluation does not consume
+that opportunity.
+
 HUC has no general reference type. `T*`, `T**`, and longer pointer chains are
 non-owning raw-pointer types. Use unary `&value` to get a non-owning pointer
 to an inline value or storage slot, including a pointer slot. It cannot be
