@@ -93,9 +93,11 @@ HUC does not promise:
 ## 2. Program structure
 
 A staged source file has the extension `.huc1`; a runtime-only source file has
-the extension `.huc0`. Each contains one module declaration, zero or more
-imports, and declarations. The HUC1 translator writes printable `.huc0`
-modules, and the standalone HUC0 translator consumes only that runtime form.
+the extension `.huc0`. Source starts with a module declaration, followed by
+imports and declarations. A root file and its imported sources form one
+translation unit. Modules supply namespaces, not separate compilation or
+specialization ownership. The HUC1 translator writes one printable, flattened
+`.huc0` translation unit; the standalone HUC0 translator consumes that text.
 
 ```huc
 module app.main;
@@ -108,21 +110,44 @@ fn main() -> i32 {
 }
 ```
 
-The initial implementation may compile a whole program at once. Module
-semantics are nevertheless specified now so that separate compilation can be
-added without changing the language.
+Import processing is inclusion-like: process an imported source at its first
+import, then resume the importing source. Unlike literal text substitution,
+the imported source keeps its own namespace and lexical name lookup. HUC keeps
+`module` and `import`; it does not add a HUC `#include` directive.
 
 ### 2.1 Modules
 
 - A module name is a dot-separated sequence of identifiers.
-- A source file must contain exactly one `module` declaration as its first
-  non-comment declaration.
+- A source file starts with `module name;`. That declaration selects the
+  namespace for following declarations. Another `module name;` starts a new
+  section, selecting or reopening a namespace; it does not start another
+  translation unit. Ordinary authored files normally need only one section.
 - `import a.b;` binds the imported module under its last component, `b`.
 - `import a.b as c;` binds the module to `c`.
 - Unqualified wildcard imports do not exist in 0.1.
-- Every top-level declaration is accessible through a qualified module import;
-  HUC 0.1 has no module visibility or `export` keyword.
+- Every top-level declaration is accessible through its namespace. A full
+  canonical name uses `::`, for example `app::widget::Widget`; an import alias
+  provides the shorter spelling. HUC 0.1 has no module visibility or `export`
+  keyword. Imports load source and bind aliases; they are not access barriers.
+- Resolve source imports with the configured module-to-file search paths.
+  Process each imported source once per translation unit, in depth-first import
+  order. A repeated import binds its alias without repeating declarations or
+  compiler-stage effects. On return, restore the importer's namespace and
+  lexical context. Conflicting aliases are diagnostics.
 - Import cycles are a diagnostic in 0.1.
+
+An imported function resolves unqualified names in its own lexical context,
+not in the caller's locals. A generic may nevertheless receive any suitable
+type available at its request, including a type declared by the importer. It
+does not need a reverse import to name that type through its phase parameter.
+
+Flattened HUC0 uses repeated `module name;` sections to preserve namespaces
+while keeping declarations in forward processing order. Its first section
+names the configured root, even if initially empty. Imports are resolved away;
+the printer rewrites imported aliases to canonical names. Reopening a section
+is only a change of naming scope, not another import or another execution of
+previous declarations. The flattened file is ordinary valid HUC0, with no
+private module bundle or hidden HUC1 state.
 
 An imported member is named with `::`:
 
@@ -144,8 +169,12 @@ signature belong to the separate standard-library design.
 
 ### 2.2 Declaration order
 
-Top-level names are collected before bodies are checked, so a declaration may
-refer to a later declaration in the same module. HUC0 runtime globals are
+Runtime name resolution may refer to later top-level declarations in the
+translation unit. This does not make future generated declarations available
+to compiler execution. Ordinary `fn` bodies are parsed and prepared when
+encountered; `fn1` and `fn2` bodies remain deferred until requested. Pending
+module output becomes available only at its forward insertion boundary
+(section 11). HUC0 runtime globals are
 restricted to drop-free Basic scalars and raw pointers. A fixed global requires
 a constant initializer; an omitted initializer is allowed only for mutable
 storage and produces zero or null. Advanced globals, structure globals,
@@ -1600,7 +1629,7 @@ HUC1 source
     |
     | prepare code and evaluate compiler expressions
     v
-printable per-module HUC0 source
+printable flattened HUC0 source
     |
     | runtime transpilation
     v
@@ -1627,11 +1656,11 @@ can never become runtime symbols. Code preparation has two generation modes:
 private body for the compiler to execute. Both modes run during compilation;
 section 11 defines their insertion and emission rules.
 
-Every successfully prepared output module must be independently readable HUC0.
+Every successfully prepared translation unit must be independently readable HUC0.
 It contains no numbered declaration or control-flow keyword, `import2`, `@`,
 unresolved family binder, specialization request, compiler-only value, or
-compiler metadata handle. Ordinary `import` declarations remain. The HUC1
-translator writes one HUC0 module for every residual runtime module before the
+compiler metadata handle. Both import forms are resolved away. The HUC1
+translator writes one flattened file with namespace sections before the
 HUC0-to-C17 translator begins.
 
 Built-in casts such as `as<T>` and `ptr_as<Target>`, type queries, and
@@ -1732,8 +1761,8 @@ supplies every non-defaulted binder in its angle list.
 Each `struct1` and `let1` name has one primary family in a scope. Each `fn1`
 name also has one primary family in a scope in 0.1; ordinary runtime `fn`
 overloading remains a separate facility. The primary must precede its
-specializations, and a specialization must initially be declared in the
-primary's defining module.
+specializations, and a specialization must be declared in the primary's
+namespace in 0.1; this need not be a separately compiled source file.
 
 In 0.1, `struct1` families are module-scope declarations; `fn1` families may
 be declared at module scope or as type members; and `let1` families may be
@@ -1765,9 +1794,14 @@ Only after selection does the translator parse and prepare the chosen body:
 - a `let1` request produces exactly one concrete runtime `let` as specified in
   section 9.4.
 
-Concrete specializations are emitted in their defining module. A local
-variable-family specialization is emitted at the family declaration site in
-its block. The HUC0 printer assigns deterministic concrete names where multiple
+Concrete specializations keep their family's namespace and lexical lookup,
+but have no separate defining-module compilation boundary. The printer places
+them at their family declaration positions, including methods within their
+containing type and local variable specializations within their block.
+This placement of concrete family definitions is distinct from
+`emit_huc_module` output: that output follows the original runtime request's
+top-level declaration (section 11), including for nested requests. The HUC0
+printer assigns deterministic concrete names where multiple
 specializations would otherwise collide and rewrites their requests to those
 names. No unresolved family request may remain in HUC0.
 
@@ -1777,10 +1811,10 @@ by retained runtime code are written to HUC0; section 9.7 separates these two
 steps. Ordinary `fn` declarations are not subject to this demand-driven rule.
 
 Any phase-1 family may be requested through an ordinary import from another
-module. When the request requires a runtime definition, its generated concrete
-declaration is emitted in the defining module, and the requesting module's
-residual reference stays qualified through that preserved import. Generated
-concrete names remain deterministic implementation details.
+namespace. A runtime-needed concrete definition keeps the family's namespace;
+the printed request uses its canonical qualified name, with no preserved import
+or defining-module dependency barrier. Generated concrete names remain
+deterministic implementation details.
 
 This uniform model deliberately permits function-family partial
 specialization. It does not use C++ substitution failure, and a failure while
@@ -1830,10 +1864,10 @@ reaches that site; preparation does not add a lazy runtime initialization flag.
 
 ### 9.5 Deferred bodies
 
-Family bodies and phase-control bodies are deferred source spans. Indexing
-parses a family header, phase condition, loop header, pattern, and predicate,
+Family bodies, `fn2` bodies, and phase-control bodies are deferred source
+spans. Registration parses their headers, signatures, patterns, and predicates,
 but does not lex or parse the associated braced body merely to discover its
-end.
+end. Registering a `fn1` or `fn2` is not a request to prepare or execute it.
 
 A dedicated delimiter scanner locates the matching outer `}` while recognizing
 only what is necessary to avoid false brace matches:
@@ -1846,6 +1880,7 @@ only what is necessary to avoid false brace matches:
 The following bodies remain opaque until selected:
 
 - every unchosen primary, partial, or full family body;
+- every uncalled `fn2` body, including compiler methods and constructors;
 - the unselected branch of an `if1`;
 - the body of a zero-iteration `for1` or `while1`.
 
@@ -1858,6 +1893,20 @@ resolves, and checks it normally in its inherited context.
 A phase loop whose body executes at least once may parse that body once and
 reuse the parsed form for later iterations. This implementation choice does not
 change insertion order or observable compiler effects.
+
+On a `fn1` request, parse and prepare the selected specialization in the
+requested generation mode. For a runtime request, execute its compiler-stage
+operations but retain its ordinary runtime statements. For a compile-time
+request, execute the resulting private body. On a `fn2` call, parse its body
+if needed, check it, and execute it in the inherited generation context.
+Reusing parsed syntax does not skip later calls or their generation effects.
+
+An ordinary `fn` is different: parse and prepare its body in program mode
+when its declaration is encountered in the active source stream, even if it
+is never called. A method is encountered when its containing type body is
+processed. A `fn` inside an unselected phase body is still skipped with that
+body. Runtime forward-name checks may wait for declaration collection, but
+the function's compiler-stage work is not postponed until a runtime call.
 
 ### 9.6 Phase-1 control flow and insertion contexts
 
@@ -1986,8 +2035,10 @@ Preparing a body and emitting HUC0 are separate:
   its runtime definition is not emitted merely for that call. Local
   `emit_huc` output is part of that private body; `emit_huc_module` introduces
   no declarations in evaluation mode.
-- A specialization referenced by retained runtime code is emitted in its
-  defining module, together with the specializations that runtime body needs.
+- A specialization referenced by retained runtime code is emitted at its
+  family's declaration position, together with the specializations that runtime
+  body needs. Any `emit_huc_module` output instead follows the original
+  requesting top-level declaration; its namespace comes from the generation site.
 - A later runtime request requires preparation in program mode and emission of
   that definition and its module output. A completed evaluation-mode body or
   cached result does not satisfy this requirement or mark module output as
@@ -1996,15 +2047,17 @@ Preparing a body and emitting HUC0 are separate:
   branches in retained runtime code still count as runtime code; only removed
   phase branches and other erased compiler execution remove that demand.
 
-Ordinary `fn` declarations in retained modules continue to pass through into
-HUC0, even if they are called only at compile time or never called. Calling one
+Ordinary `fn` declarations encountered in the translation unit are prepared
+immediately in program mode and pass through into HUC0, even if they are called
+only at compile time or never called. Calling one
 from `fn2` under section 12.1 does not make its emission demand-driven. Later
 optimization may remove unused runtime functions.
 
-Generation belongs to the function definition being prepared, not to the caller
-that later executes it. Evaluating a `fn` or `fn1` does not insert that
-function's generated statements into its caller. Section 11 also distinguishes
-these function-owned bodies from `fn2` generator helpers.
+Local generation belongs to the function body being prepared. Evaluating a
+`fn` or `fn1` does not insert that function's generated statements into its
+caller. Module output has a separate insertion anchor; section 11 explains
+how a runtime specialization request supplies that anchor and how `fn2`
+functions inherit the active context.
 
 ### 9.8 Phase-2 declarations
 
@@ -2106,9 +2159,12 @@ import app.data;
 import2 compiler;
 ```
 
-`import` exposes runtime declarations and phase-1 families. It remains as an
-ordinary import in the corresponding generated HUC0 module when runtime code
-depends on it. `import2` exposes compiler-only declarations and is removed.
+`import` exposes runtime declarations and phase-1 families and processes the
+imported source in the same translation unit under section 2.1. `import2`
+exposes compiler-only declarations; it does not create a runtime dependency.
+The compiler-supplied `compiler` namespace is bound this way without reading
+a user source file. Both import forms disappear from flattened HUC0; retained
+declarations use namespace sections and canonical references instead.
 There is no `import1` in 0.1. Import cycles are rejected with the complete cycle
 path.
 
@@ -2125,7 +2181,7 @@ Residualization removes the phase mechanism itself:
   forward-only insertion points in program mode; private evaluation-mode bodies
   are not printed merely because they were evaluated.
 
-The emitted module text, rather than an internal HUC1 AST, is the contract
+The emitted translation-unit text, rather than an internal HUC1 AST, is the contract
 between rounds. Running the HUC0 translator on it must require no compatibility
 mode and must reject any remaining numbered construct.
 
@@ -2144,21 +2200,20 @@ Runtime argument values are not part of a normal function-specialization key.
 They are concrete evaluator inputs only for a forced `@fn1` call. Equivalent
 requests within one program produce one concrete specialization.
 
-The translator discovers specialization requests across the complete module
-graph with a deterministic worklist until no new requests remain. Each
-defining module's generated HUC0 depends on the sorted closure of concrete keys
-needed by retained runtime code and assigned to it, including requests first
-discovered in importing modules. Compile-time-only evaluation requests do not
-by themselves enter that runtime emission closure.
-In 0.1, every type named by a cross-module request must already be nameable
-through the defining module's own import closure. A requester-local type that
-would introduce a reverse dependency is rejected; requester-side specialization
-placement is deferred.
+The translator processes one translation unit in deterministic source and
+first-import order. A program-mode `fn1` request reserves its insertion anchor
+and prepares the selected body, discovering nested requests as needed. A
+worklist may implement this, but must preserve that observable ordering.
+Compile-time-only requests do not reserve a runtime insertion anchor. The
+output depends on the complete runtime-needed specialization closure, including
+requests from importing sources. A caller-defined type is a valid phase
+argument; the family need not import the caller. Substitution carries canonical
+type identity, while unqualified names still use the family's lexical context.
 
 Preparation caches distinguish program mode from evaluation mode. They retain
 the checked body, generation origins, and, in program mode, ordered module
 output. Each ordinary function definition or concrete `fn1` specialization in
-a destination module publishes its program-mode output once. Repeated runtime
+a translation unit publishes its program-mode output once. Repeated runtime
 uses reference that definition; they do not replay generation. Different
 specializations and distinct generation calls within one preparation remain
 distinct requests; only identical resulting module declarations are shared
@@ -2176,8 +2231,11 @@ inputs to name mangling.
 An identical function specialization requested while it is already being
 constructed denotes a recursive reference to the in-progress function. An
 infinitely recursive concrete type layout is a diagnostic. A failed
-specialization remains failed for the same key so diagnostics and selection do
-not depend on request order.
+specialization remains failed for the same key and lookup environment. Cached
+preparation and failures must account for the declarations available at the
+request; a cache hit must not reveal pending output or hide output published
+since an earlier evaluation. This availability state is not part of name
+mangling.
 
 The core compiler environment is deterministic. It has no implicit access to
 wall-clock time, randomness, process environment, network, or arbitrary
@@ -2337,9 +2395,10 @@ fn1 area(Scale: i32)(side: i32) -> i32 {
 ```
 
 The emitted `area<2>` calls the generated `square`. The evaluated `area<2>`
-never refers to it. Without the query, `@area<2>(3)` would be rejected,
-because an evaluated body cannot use its own definition's module output
-(section 11.2). The two bodies may differ by design, and the compiler does not
+never refers to it. Without the query, `@area<2>(3)` cannot use `square` while
+that declaration is still pending or if it has never been emitted. A later
+evaluation may use an already published, checked `square` (section 11.2).
+The two bodies may differ by design, and the compiler does not
 compare them; keeping their results consistent is the programmer's
 responsibility.
 
@@ -2355,8 +2414,11 @@ compiler::emit_huc_module(text);
 A **generation site** is the source position and scope being prepared. An
 **insertion point** is the destination selected for generated code. Its
 **origin** records the generator location and call chain for diagnostics.
-A helper inherits its generation site from the call that entered it, not from
-the helper's definition location.
+A **module insertion anchor** is the top-level declaration or module item
+whose completion releases queued module output. Keep the anchor separate from
+the output's namespace: a request in `app` can queue declarations named in
+`library` after an `app` function. A `fn2` inherits the active generation site,
+namespace, and anchor, not the location of its own definition.
 
 From otherwise runtime or module source, use `@` to enter compiler execution.
 Calls inside a `fn2`, phase-control evaluation, or an active compiler call do
@@ -2388,25 +2450,39 @@ and does not add declarations or comma-separated steps to the `for` grammar.
 A generator that emits nothing still leaves any following block as an ordinary
 block; there is no implicit promise that a generator will produce a loop.
 
-In program mode, `emit_huc_module` queues complete declarations for the module
-associated with the generation site. Inside a function or type, place them
-immediately after the enclosing top-level declaration, before the next original
-module item. A method's enclosing declaration is its top-level type. A concrete
-module-scope function specialization owns its own following module output.
-At module scope, insert after the current requesting item. Preserve emission
-order when several calls share a boundary. This is not an append-to-end-of-file
-operation or permission to insert before the enclosing declaration.
+In program mode, `emit_huc_module` queues complete declarations in the
+generation site's namespace, after its module insertion anchor:
+
+- An ordinary `fn` in the active source is prepared when encountered. Its
+  anchor is its enclosing top-level declaration, even if the function is never
+  called. For a method in an ordinary type, this is the containing top-level type.
+- A first runtime request for `fn1` inherits the anchor of the source being
+  prepared. If `main` requests `A`, which requests `B`, their queued module
+  declarations follow `main`, not the family declarations or a private `B`
+  preparation. Preparing nested functions does not release this queue early.
+- A request made while preparing a concrete type uses the top-level declaration
+  whose preparation originally requested that type; registration alone does
+  not execute a deferred body. Methods reached inside a requested `struct1`
+  keep that inherited anchor rather than opening an earlier type-site boundary.
+- A standalone module item uses the boundary immediately after that item.
+
+At that boundary, retain the completed requesting declaration, then parse and
+publish queued module declarations in emission order, before continuing with
+the next original source item. Namespace sections preserve each declaration's
+naming context even when the request crosses an import. Already published output
+is not relocated to later requesting sites. This is neither append-to-end-of-file
+generation nor permission to insert before previously processed source.
 
 In evaluation mode, `emit_huc_module` evaluates its argument expressions
 normally and returns `void`, but inserts no text, registers no names, and marks
 nothing as already emitted. Its suppressed text is not parsed as a declaration.
-An evaluated body cannot rely on this suppressed output, even when the same
-definition is also emitted: a declaration that exists only because the
-evaluated definition was emitted is not visible to its evaluated body. A
-compile-time result therefore never depends on whether runtime code also uses
-the definition. Unresolved references are diagnostics, not a reason to fall
-back to program mode. Declarations available for other reasons remain subject
-to the ordinary evaluation restrictions. Section 11.1 shows how
+An evaluated body cannot rely on suppressed or pending output. This is a
+timing rule, not a permanent ban on using its own generated declarations.
+Already published and checked declarations may be used by later evaluations,
+including evaluations of the function that generated them, subject to the
+ordinary evaluator restrictions. An evaluation inside `main` cannot use output
+queued after `main`, directly or through another function. Unresolved references
+are diagnostics, not a reason to fall back to program mode. Section 11.1 shows how
 `compiler::emitting()` gives an evaluated body its own path.
 
 Selecting module output affects only that operation. Subsequent `emit_huc`
@@ -2445,7 +2521,7 @@ reads or changes mutable `let2` state can therefore produce different emitted
 and evaluated bodies. A generator whose output depends only on its arguments
 and on `compiler::emitting()` gives predictable results.
 
-For each destination module, publish the program-mode output of one ordinary
+For each translation unit, publish the program-mode output of one ordinary
 function definition or concrete `fn1` specialization once. Repeated runtime
 uses reuse that definition and its ordered module output. An evaluation-mode
 preparation does not consume this opportunity; later program-mode demand must
@@ -2459,10 +2535,12 @@ belongs to that item's preparation, not to a process-global "already emitted"
 flag.
 
 A generated module-scope declaration whose tokens are identical to those of a
-generated declaration already inserted in the same module is not inserted
-again. Both requests share the existing declaration, and its origins record
+generated declaration already inserted in the same namespace in this
+translation unit is not inserted again when its lexical naming context also
+matches. Both requests share the existing declaration, and its origins record
 both. Whitespace and comments do not affect the comparison. Identical text at
-module scope in one module always has the same meaning, so sharing it cannot
+module scope is compared within the same canonical namespace and resolved
+lexical naming context, not across different import aliases. Sharing must not
 change a lookup. Any other duplicate remains an ordinary duplicate-declaration
 error, reported with both origins.
 
@@ -2478,12 +2556,13 @@ are therefore available to subsequent HUC1 processing, not only to HUC0.
 Module-level forward references remain allowed. Collect the relevant generated
 declarations before final body resolution; an unknown-name diagnostic must not
 be issued merely because a later module declaration has not yet been collected.
-A compiler evaluation that needs such a declaration must wait for an available,
-checked definition. If no definition becomes available, or generation depends
-cyclically on evaluating that unavailable definition, report an error. Suppressed
-evaluation-mode module output cannot satisfy that dependency, and neither can a
-declaration that exists only because the evaluated definition was emitted
-(section 11.2). Insertion may not
+A compiler evaluation needs an available, checked definition. It cannot advance
+past its active module insertion anchor to publish output that is still pending
+there, even if the needed declaration was generated by a different function.
+If evaluation is required to finish that anchor, waiting for its queued output
+is a dependency cycle and must be diagnosed. Suppressed evaluation-mode output
+cannot satisfy the dependency either. A previously published declaration is
+available regardless of which function generated it. Insertion may not
 silently change a name lookup, specialization choice, or compiler decision that
 has already been finalized; reject a conflicting insertion instead of rerunning
 earlier generation with different results.
@@ -2494,14 +2573,16 @@ private object format. The printable HUC0 boundary remains unchanged.
 
 Original and generated text occupy separate immutable source buffers. A source
 location identifies its buffer and offset; inserting output does not renumber
-earlier original locations. A syntax node may span a generated header and an
+earlier original locations. Imported files also retain their own buffers;
+record their import chains and the active namespace separately from physical
+locations. A syntax node may span a generated header and an
 original body, so its source information must allow multiple spans. The final
 HUC0 output map connects printed ranges to their source origins.
 
 Diagnostics should retain:
 
 1. the offending original or generated span;
-2. the generation site and emission operation;
+2. the generation site, module insertion anchor, and emission operation;
 3. the compiler helper and specialization call chains;
 4. the generated HUC0 location, when an output file exists.
 

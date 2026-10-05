@@ -137,7 +137,7 @@ The examples below cover these use cases:
 | HUC1 | Restricted ordinary-function calls from compiler execution |
 | HUC1 | Compiler-only helper functions and state |
 | HUC1 | Parsed, forward-only text generation in program and evaluation modes |
-| Pipeline | Per-module HUC1-to-HUC0 translation |
+| Pipeline | One flattened HUC1-to-HUC0 translation unit, with module namespaces |
 | Pipeline | Standalone hand-written HUC0 |
 | Pipeline | Generated C17 with explicit evaluation sequencing and cleanup |
 | Systems | Target-specific layouts without preprocessor directives |
@@ -1743,8 +1743,9 @@ fn next_function() -> i32 {
 here, after `run`, before `next_function`. Module-level function references may
 refer forward, so the call in `run` is valid. For a method, the insertion point
 would be after its whole top-level type. At module scope, it would be after the
-request itself. Neither operation inserts before its owner or modifies an
-already checked foreign module.
+request itself. `run` is an ordinary `fn`, so this happens when its declaration
+is processed, even if no code ever calls it. Neither operation inserts before
+its anchor or rewrites already processed source.
 
 ### 7.3 Program mode and evaluation mode
 
@@ -1777,15 +1778,16 @@ fn main() -> i32 {
   no `generation_marker` declaration and does not mark it as emitted.
 - The runtime calls require the same specialization in program mode. Its local
   declaration appears inside the emitted function, and `generation_marker`
-  appears after that function. There is one definition of each, not one per
-  runtime call.
+  appears after `main`, the original requesting top-level declaration. There
+  is one definition of each, not one per runtime call.
 - This remains true if the evaluation request is processed first. If only the
   forced call existed, neither function would be emitted for that request.
 
 Module suppression evaluates the call's arguments, but does not parse the text
-as declarations or make its names available. A body that needs a helper supplied
-only by its own module output cannot be evaluated, even when runtime code also
-emits that definition. An ordinary `fn` follows the same preparation rules, but
+as declarations or make its names available. Evaluation cannot use a helper
+while its declaration is pending after the active anchor. Once that declaration
+has been published and checked, later evaluation can use it. An ordinary `fn`
+follows the same mode rules, but
 independently retains its normal HUC0 definition even when it is never called
 at runtime.
 
@@ -1835,22 +1837,22 @@ fn __huc_area_2(side: i32) -> i32 {
     return 2 * square(side);
 }
 
-fn square(x: i32) -> i32 {
-    return x * x;
-}
-
 fn main() -> i32 {
     let live: i32 = __huc_area_2(4);
     return 18 + live;
 }
+
+fn square(x: i32) -> i32 {
+    return x * x;
+}
 ```
 
-The emitted `area<2>` is followed by the generated `square`. The evaluated
+The generated `square` follows `main`, which requested `area<2>`. The evaluated
 `area<2>` takes the other branch, so `@area<2>(3)` becomes `18`. Without the
 query, the forced call would be rejected even though `area<2>(4)` emits
-`square`: an evaluated body cannot use a declaration that exists only because
-its own definition was emitted. Compile-time results therefore never depend on
-whether runtime code also uses a definition.
+`square`: the declaration is still queued after `main`. Finishing a nested
+function's preparation does not publish it early. An evaluation requested in a
+later declaration, after `square` is published, could use it without the query.
 
 The compiler does not compare the two branches; keeping their results
 consistent is the programmer's responsibility. As with macros, generators that
@@ -1913,6 +1915,126 @@ Errors in generated text point to that text and its generator call chain.
 Errors in the original loop body still point to the original source. Original
 and generated buffers keep their own immutable locations; printing final HUC0
 adds an output map rather than changing those locations.
+
+### 7.6 Nested requests share the original module insertion anchor
+
+```huc
+module examples.nested_generation;
+
+import2 compiler;
+
+fn1 B(Tag: i32)() -> i32 {
+    return generated() + Tag;
+}
+
+fn1 A(Tag: i32)() -> i32 {
+    @compiler::emit_huc_module(
+        "fn generated() -> i32 { return 42; }",
+    );
+    return B<Tag>();
+}
+
+fn main() -> i32 {
+    return A<0>();
+}
+
+fn later() -> i32 {
+    return @B<0>();
+}
+```
+
+Registering `A` and `B` does not prepare their bodies. Preparing `main` requests
+`A<0>`, which queues `generated` and requests `B<0>`. Both requests use `main`
+as their module insertion anchor. The runtime call in `B` may refer forward,
+but `generated` is not available for compiler execution yet.
+
+After `main` finishes its compiler-stage work, `generated` is parsed and
+published before `later`. The forced call in `later` can therefore return
+`42`. Moving that forced call into `main` would be an error: it would require
+a declaration still queued after `main`. It does not matter that `A`, rather
+than `B`, generated that declaration. No origin-based exception bypasses the
+insertion boundary.
+
+Concrete `A<0>` and `B<0>` definitions occupy their family declaration positions
+in printed HUC0. This ordinary specialization step is separate from explicit
+module generation, which inserts `generated` after `main`.
+
+### 7.7 Imported families can use caller-defined types
+
+In `library/read.huc1`:
+
+```huc
+module library.read;
+
+import2 compiler;
+
+fn1 read_value(T: auto)(item: T*) -> i32 {
+    @compiler::emit_huc_module(
+        "fn bonus() -> i32 { return 1; }",
+    );
+    return item->value + bonus();
+}
+```
+
+In `app/main.huc1`:
+
+```huc
+module app.main;
+
+import library.read;
+
+struct UserType {
+    let value: i32;
+    fn init(value: i32) : value(value) {}
+}
+
+fn main() -> i32 {
+    let item: UserType = UserType(41);
+    return read::read_value<UserType>(&item);
+}
+```
+
+The import processes the library source once in this translation unit. Its
+generic can receive `UserType` without importing `app.main`. The type parameter
+carries the caller's type; ordinary names such as `bonus` still resolve in
+`library.read`, not in the caller's local scope.
+
+Flattened HUC0, with a shortened specialization name:
+
+```huc
+module app.main;
+
+module library.read;
+
+fn __huc_read_user(item: app::main::UserType*) -> i32 {
+    return item->value + bonus();
+}
+
+module app.main;
+
+struct UserType {
+    let value: i32;
+    fn init(value: i32) : value(value) {}
+}
+
+fn main() -> i32 {
+    let item: UserType = UserType(41);
+    return library::read::__huc_read_user(&item);
+}
+
+module library.read;
+
+fn bonus() -> i32 {
+    return 1;
+}
+```
+
+`bonus` follows the requesting `main` but belongs to the library namespace.
+Repeated `module` sections simply select naming scopes; they do not reload
+files. Imports and their short aliases have been resolved away. The standalone
+HUC0 translator accepts this entire file without access to the original HUC1.
+Original file offsets remain intact in source maps; the flattened layout has
+its own output positions.
 
 ## 8. Large case study: target-specialized small vector
 

@@ -23,6 +23,10 @@ Key terms:
 - **Evaluation mode**: prepare a private function body for the compiler to run.
 - **Generation site**: the source position and scope currently being prepared.
 - **Insertion point**: the forward-only destination selected for generated code.
+- **Module insertion anchor**: the original requesting top-level declaration;
+  its completion releases pending module output, including nested requests.
+- **Module**: a namespace, not a separate compilation unit.
+- **Translation unit**: a root source and its once-processed import closure.
 - **Origin**: the generator location and call chain behind a generated span.
 
 ## 1. Recommendation
@@ -35,7 +39,7 @@ HUC1 source
     |
     | huc1_expand
     v
-printable per-module HUC0 source
+printable flattened HUC0 source
     |
     | huc0_transpile
     v
@@ -44,7 +48,7 @@ C17 headers + one root translation unit
 
 The translators are independently usable. Milestone 1 implements
 HUC0-to-C17 first. Milestone 2 then implements HUC1-to-HUC0 and invokes the
-already public HUC0 translator only through the generated HUC0 module files.
+already public HUC0 translator only through the generated HUC0 file.
 A user may always write, inspect, and compile HUC0 without using HUC1.
 
 This choice is for the first implementation; it does not make HUC's rules
@@ -93,7 +97,7 @@ staging interpreter, middle end, emitters, and driver are C++20 programs.
 ## 3. Compiler overview
 
 ```text
-.huc1 module tree
+.huc1 root + once-processed imports (one translation unit)
     |
     v
 HUC1 source manager + delimiter scanner + staged index
@@ -105,11 +109,11 @@ selected-body parser + phase checker + C++20 interpreter
 family specialization + parsed text insertion + residualizer
     |
     v
-printable per-module .huc0 files + origin maps
+one flattened .huc0 file with namespace sections + origin map
 
 -------------------- explicit textual boundary --------------------
 
-.huc0 module tree
+.huc0 translation unit (handwritten imports or flattened sections)
     |
     v
 HUC0 source manager -> lexer -> parser -> syntax AST
@@ -184,15 +188,16 @@ Compiler modules expose typed C++ interfaces:
 ```cpp
 using FileId = StrongId<struct FileTag>;
 using ModuleId = StrongId<struct ModuleTag>;
+using TranslationUnitId = StrongId<struct TranslationUnitTag>;
 
 struct ParseResult {
-    std::optional<ModuleId> module;
+    std::optional<TranslationUnitId> translation_unit;
     std::vector<Diagnostic> diagnostics;
 };
 
 class Compiler {
 public:
-    [[nodiscard]] ParseResult parse_module(FileId file);
+    [[nodiscard]] ParseResult parse_translation_unit(FileId root_file);
 };
 ```
 
@@ -239,7 +244,8 @@ struct Huc1ExpandRequest {
 };
 
 struct Huc1ExpandResult {
-    std::vector<Artifact> modules;
+    std::optional<Artifact> source;
+    std::vector<Artifact> sidecars;
     std::vector<Diagnostic> diagnostics;
     DependencyGraph dependencies;
     bool succeeded = false;
@@ -252,8 +258,9 @@ huc1_expand(const Huc1ExpandRequest& request);
 ```
 
 Ordinary source errors are returned as diagnostics rather than thrown. A
-chained build passes the paths from `Huc1ExpandResult::modules` back through a
-normal `Huc0TranspileRequest`.
+chained build passes the written `Huc1ExpandResult::source` through a normal
+`Huc0TranspileRequest`. `ModuleId` identifies a canonical namespace, not an
+independently emitted file. Sidecars hold origins and tracked dependencies.
 
 ## 5. Frontend
 
@@ -465,16 +472,19 @@ diagnostics should refer to IDs.
 
 ### 5.5 HUC1 indexing and deferred bodies
 
-The HUC1 frontend first indexes imports, declaration/family headers,
+The HUC1 frontend indexes imports, declaration/family headers,
 specialization patterns, and opaque body spans. A dedicated delimiter scanner
 finds an outer matching `}` while recognizing nested braces, strings,
 characters, line comments, and block comments. It does not produce HUC tokens
 for the body.
 
-Only a selected `if1` branch, a reached phase-loop body, or a chosen family
-body is then lexed and parsed. A skipped body may contain invalid HUC; the
-scanner may report only that it cannot find the outer closing delimiter.
-Ordinary HUC0 code selected for output is kept by the per-module residualizer.
+Only a selected `if1` branch, a reached phase-loop body, a chosen family
+body, or a called `fn2` body is then lexed and parsed. Register `fn1` and `fn2`
+headers without preparing their bodies. Ordinary `fn` bodies are parsed and
+prepared in program mode when encountered, including uncalled functions. A
+skipped body may contain invalid HUC; the scanner may report only that it
+cannot find the outer closing delimiter.
+Ordinary HUC0 code selected for output is kept by the translation-unit residualizer.
 The HUC0 translator checks it again after it has been written to a file.
 
 `struct1`, `fn1`, and `let1` use distinct indexed declaration nodes even
@@ -487,9 +497,14 @@ source. A generated final `for (...)` header may consume the following braced
 source block as its body. Do not check that block's loop context prematurely.
 Reject numbered syntax in inserted HUC0; it does not start another staging pass.
 
-Ordinary `import` exposes runtime declarations and phase-1 families and remains
-as a runtime import in the corresponding HUC0 module. `import2` is available
-only to compiler code and is erased. There is no `import1` in 0.1.
+Ordinary `import` exposes runtime declarations and phase-1 families. Resolve
+and process a source at its first import, depth-first, then restore the
+importer's lexical context. Repeated imports bind aliases but do not replay
+source or compiler effects; active import cycles diagnose. `import2` is
+compiler-only. There is no `import1` in 0.1. Flattened output resolves away
+imports and uses canonical references and `module name;` namespace sections.
+Keep imported buffers and import chains rather than copying bytes or losing
+their original locations.
 
 ## 6. Semantic analysis
 
@@ -509,12 +524,15 @@ zero/null only to omitted mutable initializers, and rejects structures,
 Advanced values, runtime initialization, and global cleanup in 0.1.
 
 HUC1 additionally performs phase checking, family matching, and selected-body
-preparation before printing HUC0. Queue forward module output after its owning
-top-level declaration and collect relevant declarations before final body
-resolution. Defer unresolved forward references until collection is complete;
+preparation before printing HUC0. Queue forward module output after its original
+requesting top-level declaration and collect relevant declarations before final
+body resolution. Defer unresolved forward references until collection is complete;
 compiler evaluation needs an available checked definition. Diagnose a missing
 definition or a dependency cycle rather than inventing one from suppressed
-evaluation-mode output. Do not silently revise a finalized lookup or compiler
+evaluation-mode output. An active anchor's pending declarations remain
+unavailable through every nested compiler call, regardless of which function
+queued them. A completed nested preparation does not publish them early.
+Do not silently revise a finalized lookup or compiler
 decision after an insertion; diagnose conflicting insertion.
 
 The HUC0 translator independently reparses and checks the emitted text exactly
@@ -1002,12 +1020,15 @@ broader ones, and the primary is the fallback. Predicates filter but do not
 rank, and declaration order never resolves a tie.
 
 The primary must precede its specializations, and 0.1 requires every
-specialization in the defining module. Only the selected body is parsed.
+specialization in the primary's namespace. Only the selected body is parsed.
 Concrete `struct1` and `let1` specializations are printed as required by their
 retained declarations; a `fn1` specialization is printed only when retained
-runtime code requires its definition. Print these at their family declaration
-sites. A function-local `let1` result therefore initializes on each runtime
-execution that reaches that declaration; staging never inserts a lazy runtime
+runtime code requires its definition. Print concrete definitions at their family
+declaration sites, including methods within their containing type. This is
+distinct from the functions' `emit_huc_module` output, which follows the
+original program-mode request's anchor. A function-local `let1` result therefore
+initializes on each runtime execution that reaches that declaration; staging
+never inserts a lazy runtime
 flag. Merely evaluating a `fn1` at compile time does not require its runtime
 definition.
 
@@ -1041,8 +1062,9 @@ Requesting the same `InProgress` function specialization from its own body
 creates a recursive call edge. Requesting an `InProgress` type layout before
 indirection makes its size finite is an infinite-size diagnostic.
 
-Failed entries retain diagnostics for the duration of the compilation so the
-same bad specialization is not repeatedly evaluated.
+Failed entries retain diagnostics for the same dependency and lookup environment
+so the same bad specialization is not repeatedly evaluated. Availability of
+published declarations must be validated before reusing evaluation records.
 
 Track `runtime_needed` and `module_output_published` independently of evaluation
 results. An evaluation request can complete without setting either. A retained
@@ -1053,11 +1075,12 @@ only while executing compiler code do not become runtime roots. Ordinary `fn`
 declarations remain runtime roots in retained modules, even if uncalled; their
 retained bodies can therefore require `fn1` definitions. Do not treat an
 unexecuted ordinary runtime branch as an erased phase branch. Publish ordered
-module output once per destination module and owning function/specialization;
+module output once per translation unit and owning function/specialization;
 do not skip different emission calls or phase-loop iterations within it.
 Distinct explicit `fn2` requests remain distinct. A generated module declaration
-with the same tokens as one already inserted in that module adds its origin to
-the existing declaration instead of being inserted again. Report any other
+with the same tokens and lexical naming context as one already inserted in that
+namespace adds its origin to the existing declaration instead of being inserted
+again. Report any other
 duplicate with both origins; never silently choose the first conflicting
 generated definition.
 
@@ -1079,23 +1102,19 @@ Exact spellings remain
 implementation details until a native HUC ABI is specified; comments and
 origin maps recover the source family and compile-time arguments.
 
-When a request originates in another module, its generated concrete HUC0
-declaration remains in the defining module and the requesting module refers to
-it through the preserved runtime import. All module declarations are
-importable in 0.1. Every requested type must already be nameable through the
-defining module's import closure; a requester-local type that would create a
-reverse dependency is rejected in 0.1.
+An imported family may receive a caller-defined type without a reverse import.
+Substitution carries canonical type identity; unqualified body names still
+resolve in the family's lexical context. The concrete function keeps the
+family's namespace and declaration position in the shared translation unit.
+Its module output follows the first runtime request's anchor instead. Reopen
+namespace sections for that output and print canonical references; do not
+invent caller-side lookup for the function body.
 
-Preparation uses a deterministic worklist across the whole module graph.
-Initial requests are sorted by stable source identity. Preparing one
-specialization may add more requests; processing continues until no new
-requests remain (a fixpoint).
-
-A defining module's output and cache dependency include the sorted keys of
-runtime-needed specializations assigned to it, including those found through
-other requests. A new request in an importing module therefore invalidates or
-extends the defining module's output. The compiler must not reuse a cached
-module that lacks the newly requested specialization.
+Preparation follows deterministic source and depth-first import order. A
+worklist must preserve that order and inherited anchors, including on cache hits.
+The flattened output depends on the complete runtime-needed specialization
+closure and its publication order. Revalidate these dependencies rather than
+reusing a defining-module artifact missing a new importing-site request.
 
 ## 10. Text generation and forward insertion
 
@@ -1113,16 +1132,16 @@ A call uses `@` when it enters compiler execution:
 @compiler::emit_huc("let mod generated: i32;");
 ```
 
-Maintain a generation context with mode, generation site, destination module,
-owning declaration, and ordered local/module output queues. Nested `fn2`
-helpers inherit it. A `fn` or `fn1` value-evaluation call pushes a separate
+Maintain a generation context with mode, generation site, lexical namespace,
+body owner, original module insertion anchor, and ordered local/module output
+queues. Nested `fn2` helpers inherit it. A `fn` or `fn1` value-evaluation call pushes a separate
 evaluation-mode context for its own body, then restores the caller's context.
 The emission operation's location inside a helper does not become its output
 destination.
 
 | Generation mode | Local output | Module output |
 |---|---|---|
-| Program mode | Parsed into retained code | Published after its owner |
+| Program mode | Parsed into retained code | Published after the original request's anchor |
 | Evaluation mode | Parsed into a private evaluated body | Suppressed |
 
 The module's only other bootstrap member, `compiler::emitting()`, returns
@@ -1140,23 +1159,33 @@ At function/block scope, a final complete `for (...)` header may be completed
 by the following source block. Other partial expressions or unmatched braces
 are rejected. A generator that emits nothing has no implicit loop contract.
 
-In program mode, `emit_huc_module` requires complete module declarations and
-queues them immediately after the enclosing top-level declaration (after the
-whole type for a method). At module scope, use the boundary after the requesting
-item. Associate queues with these boundaries rather than collecting everything
-at the file start or end. Preserve emission order within each boundary. For a
-concrete function specialization, the following output belongs after that
-concrete declaration in its defining module. This is logical source order;
-late preparation must not move fragments ahead of their owner.
+In program mode, `emit_huc_module` requires complete declarations and queues
+them after the original module insertion anchor. For an ordinary `fn`, use its
+top-level declaration (the whole containing type for a method), prepared when
+encountered even if uncalled. A first runtime `fn1` request inherits the active
+anchor; all nested specialization requests retain it. Thus `main -> A -> B`
+queues both functions' module output after `main`. Registering deferred bodies
+does not run generation. A method encountered while preparing a requested
+`struct1` keeps the requesting anchor too. A standalone module item anchors
+its own output.
+
+Finish the anchor's compiler-stage work, retain the anchor declaration, then
+parse and publish module output in emission order before the next original item.
+The output's namespace comes from its generation site, independently of the anchor's
+namespace. Use namespace sections when these differ. Do not publish a nested
+function's output just because that nested preparation completed. No queue may
+move fragments ahead of its anchor or append them all at end of file.
 
 In evaluation mode, evaluate a module emission's arguments normally, but do not
 insert, parse, or register its declaration text and do not mark it published.
 Module selection affects only that emission, not the inherited local destination.
 Neither operation supports backward insertion or modifying previously prepared
 source. Missing declarations from suppressed output diagnose when needed.
-Resolve an evaluated body without declarations whose only origin is its own
-definition's program-mode output; a declaration that another definition also
-generated remains visible.
+Resolve evaluated bodies using declarations already published and checked.
+Pending output is unavailable even through another function or a cached body;
+already published output is usable even by its own generator's evaluated body.
+If completing an active anchor requires evaluating its pending output, diagnose
+the dependency cycle rather than draining the queue early.
 
 Share HUC0 lexing/parsing and semantic rules with HUC1's inserted-code path.
 Reject numbered constructs, `import2`, and `@` in generated HUC0 during HUC1
@@ -1165,7 +1194,8 @@ forward references but rejecting changes to finalized compiler decisions.
 Print only checked program-mode output into `.huc0` artifacts; the standalone
 HUC0 translator independently validates those files.
 
-Record generated-buffer spans, generation site, emission operation, helper
+Record generated-buffer spans, generation site, module insertion anchor,
+namespace, import chain, emission operation, helper
 stack, specialization chain, and mode. Syntax nodes can have multiple spans.
 Diagnostics in original blocks point to original source; generated errors show
 their text and origin chain. Output maps add final HUC0 ranges when files are
@@ -1188,7 +1218,7 @@ The inspection mechanism is the ordinary stage output:
 huc stage app/main.huc1 --out-dir build/huc0
 ```
 
-Its printable modules are the exact input consumed by the next translator.
+Its printable translation unit is the exact input consumed by the next translator.
 
 ## 11. Concrete HIR and MIR
 
@@ -1665,22 +1695,21 @@ object's lifetime to end at the same point.
 
 ### 13.5 Names and modules
 
-Each HUC module maps to a unique generated identifier prefix and normally
-produces:
+Each HUC module namespace maps to a unique generated identifier prefix. One
+HUC translation unit normally produces:
 
 ```text
 build/c/huc_runtime.h
 build/c/app/main.huc.h
 build/c/app/main.huc.c
 build/c/app/main.huc.map
-build/c/dependency/module.huc.h
 ```
 
-Every HUC module produces a guarded header. Runtime imports become generated
-header includes. The root `.c` includes the root header and is the only
-translation unit compiled by the first whole-program backend. This avoids
-pretending that the initial generated ABI already supports independent object
-compilation.
+The root guarded header contains the translation unit's declarations. The root
+`.c` includes it and is the single C translation unit compiled by this backend.
+Source imports have already been processed, not turned into separate object
+boundaries. Internal header splitting is an implementation detail, not HUC
+module ownership or independent compilation.
 
 Names are mangled deterministically to distinguish modules, overloads,
 methods, and generated helpers. Headers include required forward declarations
@@ -1749,8 +1778,8 @@ huc build <root.huc1> --out-dir <build-dir>
 
 `lower` is the public, independently usable HUC0-to-C17 translation and is
 implemented first. `stage` is the public HUC1-to-printable-HUC0 translation
-and is implemented second. `build` runs `stage`, closes and writes every
-generated HUC0 module, and then invokes `lower` on those files. It must not
+and is implemented second. `build` runs `stage`, closes and writes the flattened
+HUC0 file, and then invokes `lower` on that file. It must not
 pass an HUC1 AST, HIR, or private in-memory module directly into HUC0 semantic
 analysis.
 
@@ -1782,7 +1811,7 @@ build the HUC transpiler and driver.
 
 ```text
 build/
-  huc0/          printable staged module tree
+  huc0/          flattened staged root source and origin/dependency sidecars
   c/             generated C17 headers, root source, runtime header, maps
   cache/         content-addressed frontend/staging cache
   obj/           backend object files
@@ -1804,12 +1833,12 @@ Initial cacheable units:
 - HUC1 indexed module and selected-body parse;
 - pure HUC1 family specialization, pure `fn2` result, and restricted
   ordinary-function evaluation result;
-- emitted per-module HUC0 text plus its origin map;
-- HUC0 lexed/parsed module and runtime interface;
+- emitted flattened HUC0 text plus its origin map;
+- HUC0 lexed/parsed translation unit and namespace tables;
 - concrete HUC0 HIR/MIR;
 - generated C17 header, root source, and object.
 
-Even on a cache hit, `build` materializes the HUC0 module files before invoking
+Even on a cache hit, `build` materializes the flattened HUC0 file before invoking
 the HUC0 translator. A cached private AST is not a substitute for the textual
 boundary.
 
@@ -1823,10 +1852,12 @@ Evaluation-cache hits never decide whether a runtime definition must be emitted.
 Preparation records are keyed by generation mode as well as definition,
 specialization arguments, and dependencies. A program-mode record includes a
 checked body, origins, and ordered module declarations to publish after its
-owner. Publication is once per destination module and owning definition or
-specialization, not once per emission API, helper name, or source line. A cache
+original requesting anchor. Publication is once per translation unit and
+definition or specialization, not once per emission API, helper name, or source line. A cache
 hit restores output once in a new compilation; repeated runtime uses in that
-compilation do not duplicate it.
+compilation do not duplicate it. Cache reuse preserves import order, namespace
+lookup, and pending-versus-published visibility. Availability fingerprints are
+cache dependencies, not symbol-mangling inputs.
 
 An evaluation-mode record contains its private checked body and no module
 declarations from suppressed calls. Its completion cannot mark program output
@@ -1909,7 +1940,7 @@ symbol hashes must be identical across processes for identical inputs.
 Store input plus expected:
 
 - diagnostics;
-- printable per-module HUC0;
+- printable flattened HUC0 with namespace sections;
 - concrete HIR;
 - MIR;
 - generated C17.
@@ -1994,16 +2025,22 @@ Compile and run small programs that record:
 - once-per-owner program publication, distinct emissions/iterations preserved,
   identical generated declarations inserted once, and other duplicates
   diagnosed;
-- `compiler::emitting()` in both modes and nested helpers, its rejection in
-  predicates, and evaluated bodies that cannot see declarations existing only
-  because their own definition was emitted;
+- `compiler::emitting()` in both modes and nested helpers, and its rejection in
+  predicates;
+- unused `fn2` bodies left opaque, called bodies checked, and uncalled ordinary
+  `fn` bodies prepared with module output immediately following their declaration;
+- nested `main -> A -> B` requests publishing module output only after `main`;
+  compiler evaluation inside `main` rejecting pending output even through `B`,
+  and evaluation after the boundary accepting the published declaration;
+- imports processed once in depth-first order, alias restoration, canonical
+  namespace sections, and imported generics accepting caller-defined types;
 - generated `for` headers followed by original blocks, correct loop control,
   missing-block errors, and ordinary blocks when no header is generated;
 - immutable source locations, mixed-origin syntax nodes, forward module name
   resolution, and rejection of retroactive semantic changes;
 - HUC1 rejection of numbered syntax in inserted text and independent HUC0
   rejection if such syntax is supplied directly;
-- acceptance of every successful staged module by the standalone HUC0
+- acceptance of every successful flattened translation unit by the standalone HUC0
   translator.
 
 Tests verify relocated values through the active destination, not by reading
@@ -2055,7 +2092,7 @@ HUC1 facility is required by `huc0_transpile`.
 Implement in this order:
 
 1. staged module indexing, `import2`, opaque deferred-body spans, phase-free
-   pass-through, per-module HUC0 buffers, and origin maps;
+   pass-through, flattened HUC0 namespace sections, and origin maps;
 2. the deterministic phase-2 interpreter with resource and effect limits;
 3. `if1`, three-part `for1`, bounded phase loops, selected-body parsing, and
    module/type/function/block insertion contexts;
@@ -2072,8 +2109,8 @@ it. The bootstrap interface contains only the two text-generation functions and
 `compiler::emitting()`, and never exposes pointers to internal compiler objects.
 
 Milestone 2 is complete only when every numbered/compiler-only construct is
-removed, output modules are deterministic and readable, and the public
-Milestone 1 translator accepts them without a compatibility mode.
+removed, flattened output is deterministic and readable, and the public
+Milestone 1 translator accepts it without a compatibility mode.
 
 Compiler reflection and structured generation are intentionally not a third
 bootstrap milestone. They require a separate design after these two
@@ -2118,7 +2155,7 @@ The following should be enforced in code review and tests:
 3. HIR records Copy, Relocate, Observe, and Clone explicitly.
 4. MIR is fully concrete and contains no phase construct.
 5. Compile-time evaluation has no ambient untracked host effects.
-6. HUC1 produces written per-module HUC0; HUC0 never consumes a private HUC1
+6. HUC1 produces written flattened HUC0; HUC0 never consumes a private HUC1
    AST or HIR.
 7. Text generation uses parsed, forward-only insertion in program mode or
    evaluation mode; no structural-generation API is implied.

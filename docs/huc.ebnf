@@ -21,10 +21,18 @@
    defined by the language specification, not by this grammar alone. *)
 
 huc0-compilation-unit
-                  = module-decl, { runtime-import }, { module-item-0 } ;
+                  = module-section-0, { module-section-0 } ;
 
 huc1-compilation-unit
-                  = module-decl, { import-decl-1 }, { module-item-1 } ;
+                  = module-section-1, { module-section-1 } ;
+
+module-section-0 = module-decl, { runtime-import }, { module-item-0 } ;
+module-section-1 = module-decl, { import-decl-1 }, { module-item-1 } ;
+
+(* Imports process source once in the same translation unit, preserving lexical
+   namespaces. A repeated module declaration selects or reopens a namespace;
+   it does not create a compilation boundary. Flattened HUC0 has no imports:
+   namespace sections and canonical qualified names preserve source order. *)
 
 module-decl       = "module", qualified-module-name, ";" ;
 runtime-import    = "import", qualified-module-name,
@@ -177,14 +185,18 @@ type-pattern-primary
 (* ---------- Phase-2 declarations ---------- *)
 
 phase2-function-decl
-                  = phase2-function-signature, ( block-1 | ";" ) ;
+                  = phase2-function-signature, ( deferred-body | ";" ) ;
 phase2-function-signature
                   = "fn2", identifier, parameter-list-1,
                     [ "mod" ], "->", type-1 ;
 
 phase2-constructor-decl
                   = "fn2", "init", parameter-list-1,
-                    [ constructor-initializer-list-1 ], block-1 ;
+                    [ constructor-initializer-list-1 ], deferred-body ;
+
+(* Register fn2 signatures immediately. Parse a deferred function or constructor
+   body as block-1 only when called. Ordinary fn bodies are parsed and prepared
+   when encountered, even if uncalled. *)
 
 phase2-struct-decl
                   = "struct2", identifier, "{",
