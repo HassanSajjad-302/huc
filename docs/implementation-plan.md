@@ -774,8 +774,8 @@ A `let1` header has no result type. Every selected path must leave:
 - with the same identifier as the family;
 - with no other residual runtime declaration or statement.
 
-Compiler-only setup and `if1`/`for1`/`while1` are permitted. Raw emission is
-not permitted inside a `let1` selection body because it would obscure the
+Compiler-only setup and `if1`/`for1`/`while1` are permitted. Text generation
+is not permitted inside a `let1` selection body because it would obscure the
 rule that exactly one variable must remain.
 
 Different specializations may choose different:
@@ -903,7 +903,7 @@ cycle path.
 
 ### 6.11 Text generation and generation modes
 
-The bootstrap `compiler` module exposes only:
+The bootstrap `compiler` module exposes two text-generation operations:
 
 ```huc
 compiler::emit_huc(text);
@@ -921,6 +921,9 @@ body for compiler execution. Both run during compilation. A `fn2` generator
 inherits mode, generation site, and insertion context, including when entered
 through `@`. A value-evaluation call to `fn` or `fn1` opens its own evaluation-mode
 body context instead. The two modes are not different mangled function names.
+The module's only other bootstrap member, `compiler::emitting()`, returns
+`true` in program mode and `false` in evaluation mode, so `if1` can choose a
+mode-specific branch. Specialization predicates cannot call it.
 
 `emit_huc` queues code in the inherited scope. Finish the requesting source
 statement/declaration's compiler work, then parse its output before subsequent
@@ -932,9 +935,10 @@ In program mode, `emit_huc_module` queues complete declarations after the
 enclosing top-level declaration, or after the requesting item when already at
 module scope. It neither prints before that declaration nor appends everything
 to the file's end. In evaluation mode its arguments execute normally, but the
-text is not inserted or parsed and creates no names. A body depending on missing
-suppressed declarations cannot be evaluated. Module selection affects only the
-current emission, not subsequent local output.
+text is not inserted or parsed and creates no names. A body that depends on its
+own module output cannot be evaluated, even when the same definition is also
+emitted. Module selection affects only the current emission, not subsequent
+local output.
 
 HUC1 parses generated HUC0 and checks it with surrounding source. Numbered
 constructs and `@` in inserted text are errors, not recursive staging. Module
@@ -945,10 +949,12 @@ The independent HUC0 translator still checks the final printed artifact.
 
 Publish program-mode module output once per destination module and owning
 function or specialization. Distinct emissions and phase-loop iterations within
-that preparation all remain. Explicit `fn2` invocations are not silently merged;
-duplicate generated definitions diagnose. Evaluation-mode completion never marks
-program output published. Keep mode-sensitive preparation caches, immutable source
-buffers, and origin chains linking generated spans to their request and generator.
+that preparation all remain, and explicit `fn2` invocations are not skipped. A
+generated module declaration with the same tokens as one already inserted in
+that module is inserted once and records both origins; other duplicates
+diagnose. Evaluation-mode completion never marks program output published.
+Keep mode-sensitive preparation caches, immutable source buffers, and origin
+chains linking generated spans to their request and generator.
 
 Bootstrap HUC does not include:
 
@@ -983,8 +989,9 @@ The eventual compiler library is exposed through a versioned, inspectable
 generated interface unit that the HUC1 frontend loads before user modules—the
 language-level equivalent of an always-included header. `import2 compiler`
 binds that already loaded interface under the `compiler` name. The bootstrap
-interface declares only the two raw-emission operations; later versions add
-the public handle types above without exposing internal C compiler objects.
+interface declares only the two text-generation operations and
+`compiler::emitting()`; later versions add the public handle types above
+without exposing internal C compiler objects.
 
 The future API should provide read-only snapshots of checked code and stable
 IDs, not direct access to the compiler's internal AST objects. Structured edits
@@ -1478,10 +1485,12 @@ Implement:
 - the compiler-supplied `import2 compiler` module;
 - `compiler::emit_huc`;
 - `compiler::emit_huc_module`;
+- `compiler::emitting()`;
 - inherited generation modes and forward insertion points;
 - immutable generated buffers parsed before following source;
 - ordered module output after each enclosing top-level declaration;
-- separate program/evaluation preparation caches and once-per-owner publication;
+- separate program/evaluation preparation caches, once-per-owner publication,
+  and shared identical generated declarations;
 - pure/effectful phase-call classification.
 
 HUC1 parses and checks inserted HUC0 together with original source. Reuse the
@@ -1513,8 +1522,12 @@ Acceptance:
 - nested local/module output is forward-only and ordered; module output follows
   the whole type when requested from a method;
 - module suppression evaluates arguments but registers no names or publication;
+- `compiler::emitting()` selects mode-specific `if1` branches and is rejected in
+  predicates; an evaluated body cannot use declarations that exist only because
+  its own definition was emitted;
 - repeated runtime uses publish once while distinct emissions and iterations
-  remain distinct, with errors for conflicting definitions;
+  remain distinct; identical generated declarations are inserted once, and other
+  duplicates are errors;
 - generated headers join their following blocks, including correct `break` and
   `continue` handling and diagnostics for missing blocks;
 - generated HUC1 syntax is rejected by HUC1, and standalone HUC0 still rejects it;

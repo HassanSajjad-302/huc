@@ -1784,16 +1784,78 @@ fn main() -> i32 {
 
 Module suppression evaluates the call's arguments, but does not parse the text
 as declarations or make its names available. A body that needs a helper supplied
-only by its suppressed output cannot be evaluated. An ordinary `fn` follows the
-same preparation rules, but independently retains its normal HUC0 definition
-even when it is never called at runtime.
+only by its own module output cannot be evaluated, even when runtime code also
+emits that definition. An ordinary `fn` follows the same preparation rules, but
+independently retains its normal HUC0 definition even when it is never called
+at runtime.
 
 "Once" applies to publishing one function or specialization's program-mode
 output, not to the emission API globally. Two explicit generator calls or loop
-iterations both contribute output. Another specialization of this example
-would also generate `generation_marker`; that duplicate definition is an error,
-not silently discarded output. Real generators must choose distinct names or
-arrange for one declaration owner.
+iterations both contribute output. Another specialization, such as
+`generated_value<3>`, generates the same `generation_marker` text. Because the
+declaration is identical, it is inserted once and both specializations share
+it. A generator that produced a different `generation_marker` for another
+specialization would get a duplicate-declaration error showing both origins.
+Generators therefore need distinct names only for declarations that differ.
+
+A definition that needs generated module declarations at runtime can still be
+evaluated if it takes a separate path in each mode. `compiler::emitting()`
+returns `true` in program mode and `false` in evaluation mode:
+
+```huc
+module examples.mode_query;
+
+import2 compiler;
+
+fn2 define_square() -> void {
+    compiler::emit_huc_module("fn square(x: i32) -> i32 { return x * x; }");
+}
+
+fn1 area(Scale: i32)(side: i32) -> i32 {
+    if1 (compiler::emitting()) {
+        @define_square();
+        return Scale * square(side);
+    } else {
+        return Scale * side * side;
+    }
+}
+
+fn main() -> i32 {
+    let live: i32 = area<2>(4);
+    return @area<2>(3) + live;
+}
+```
+
+Generated HUC0:
+
+```huc
+module examples.mode_query;
+
+fn __huc_area_2(side: i32) -> i32 {
+    return 2 * square(side);
+}
+
+fn square(x: i32) -> i32 {
+    return x * x;
+}
+
+fn main() -> i32 {
+    let live: i32 = __huc_area_2(4);
+    return 18 + live;
+}
+```
+
+The emitted `area<2>` is followed by the generated `square`. The evaluated
+`area<2>` takes the other branch, so `@area<2>(3)` becomes `18`. Without the
+query, the forced call would be rejected even though `area<2>(4)` emits
+`square`: an evaluated body cannot use a declaration that exists only because
+its own definition was emitted. Compile-time results therefore never depend on
+whether runtime code also uses a definition.
+
+The compiler does not compare the two branches; keeping their results
+consistent is the programmer's responsibility. As with macros, generators that
+read or change mutable `let2` state can also make a definition's emitted and
+evaluated bodies differ.
 
 ### 7.4 A generated loop header with an original body
 
@@ -2245,7 +2307,7 @@ transfer and cleanup are independent of the compile-time layout mechanism.
 ## 11. Large case study: generated command registry
 
 This case demonstrates module-scope generation and direct runtime dispatch.
-Raw generation requires detailed text construction. The future structured
+Text generation requires building source text by hand. The future structured
 compiler API is intended to add name hygiene: generated names would not
 accidentally clash with or refer to existing names.
 

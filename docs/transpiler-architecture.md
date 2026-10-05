@@ -934,8 +934,9 @@ print the most recent evaluation frames rather than a C++ stack trace.
 
 The bootstrap phase interpreter has no filesystem, process-environment,
 network, clock, random, or host-process APIs. Its only compiler-supplied
-effects are the two raw HUC0 generation operations in Section 10, whose bytes,
-cursor, and origin are recorded explicitly. The build dependency graph
+effects are the two text-generation operations in Section 10, whose text,
+insertion point, and origin are recorded explicitly. The `compiler::emitting()`
+query only reads the current generation mode. The build dependency graph
 therefore consists of loaded HUC1/HUC0 modules and configured target inputs.
 Any future explicit external-input API must return a dependency record with
 its value and is part of the separate compiler-library design.
@@ -1053,9 +1054,12 @@ declarations remain runtime roots in retained modules, even if uncalled; their
 retained bodies can therefore require `fn1` definitions. Do not treat an
 unexecuted ordinary runtime branch as an erased phase branch. Publish ordered
 module output once per destination module and owning function/specialization;
-do not deduplicate different emission calls or phase-loop iterations within it.
-Distinct explicit `fn2` requests remain distinct and can cause duplicate-name
-diagnostics. Never silently choose the first conflicting generated definition.
+do not skip different emission calls or phase-loop iterations within it.
+Distinct explicit `fn2` requests remain distinct. A generated module declaration
+with the same tokens as one already inserted in that module adds its origin to
+the existing declaration instead of being inserted again. Report any other
+duplicate with both origins; never silently choose the first conflicting
+generated definition.
 
 ### 9.3 Naming
 
@@ -1095,7 +1099,8 @@ module that lacks the newly requested specialization.
 
 ## 10. Text generation and forward insertion
 
-The bootstrap compiler-supplied `import2 compiler` module exposes only:
+The bootstrap compiler-supplied `import2 compiler` module exposes two
+text-generation operations:
 
 ```huc
 compiler::emit_huc(text);
@@ -1120,6 +1125,12 @@ destination.
 | Program mode | Parsed into retained code | Published after its owner |
 | Evaluation mode | Parsed into a private evaluated body | Suppressed |
 
+The module's only other bootstrap member, `compiler::emitting()`, returns
+`true` in program mode and `false` in evaluation mode, read from the active
+generation context. `if1` can therefore select a mode-specific branch before
+either branch is parsed. Reject the query in specialization predicates, which
+must give one answer per specialization key.
+
 `emit_huc` queues HUC0 for the inherited scope. Finish the requesting source
 statement/declaration's compiler work, then drain local output before advancing
 to subsequent source. An erased standalone phase item is replaced by this
@@ -1143,6 +1154,9 @@ insert, parse, or register its declaration text and do not mark it published.
 Module selection affects only that emission, not the inherited local destination.
 Neither operation supports backward insertion or modifying previously prepared
 source. Missing declarations from suppressed output diagnose when needed.
+Resolve an evaluated body without declarations whose only origin is its own
+definition's program-mode output; a declaration that another definition also
+generated remains visible.
 
 Share HUC0 lexing/parsing and semantic rules with HUC1's inserted-code path.
 Reject numbered constructs, `import2`, and `@` in generated HUC0 during HUC1
@@ -1179,9 +1193,9 @@ Its printable modules are the exact input consumed by the next translator.
 ## 11. Concrete HIR and MIR
 
 Successful HUC1 output contains no numbered construct, `@`, `import2`,
-compiler-only declaration, family binder, specialization request, or raw
-generation call. Local `let name: auto` remains legal HUC0; unresolved inferred
-function parameters or results do not.
+compiler-only declaration, family binder, specialization request, or
+text-generation call. Local `let name: auto` remains legal HUC0; unresolved
+inferred function parameters or results do not.
 
 The concrete HIR is lowered to a control-flow MIR:
 
@@ -1823,8 +1837,9 @@ had been emitted. Execution of a prepared `fn`/`fn1` does not replay generation.
 Each explicit `fn2` invocation during preparation executes with its inherited
 mode and site. A cached return value alone cannot replace its insertion effects.
 Initially cache the whole prepared owner rather than individual effectful helper
-calls. Separate invocations and phase-loop iterations remain distinct; conflicting
-declarations diagnose rather than deduplicate.
+calls. Separate invocations and phase-loop iterations remain distinct requests.
+Identical generated declarations share one inserted declaration with several
+origins; other duplicates diagnose.
 
 ### 16.2 Interface files
 
@@ -1977,7 +1992,11 @@ Compile and run small programs that record:
   body; suppressed module output evaluates arguments but introduces no names;
 - evaluation-first/program-later preparation still publishing module output;
 - once-per-owner program publication, distinct emissions/iterations preserved,
-  and duplicate generated definitions diagnosed;
+  identical generated declarations inserted once, and other duplicates
+  diagnosed;
+- `compiler::emitting()` in both modes and nested helpers, its rejection in
+  predicates, and evaluated bodies that cannot see declarations existing only
+  because their own definition was emitted;
 - generated `for` headers followed by original blocks, correct loop control,
   missing-block errors, and ordinary blocks when no header is generated;
 - immutable source locations, mixed-origin syntax nodes, forward module name
@@ -2043,14 +2062,14 @@ Implement in this order:
 4. `struct1`, `fn1`, and `let1` primary/partial/full family selection with
    angle patterns, deduction, predicates, and recursion states;
 5. `@`, forced evaluation, `compiler::emit_huc`,
-   `compiler::emit_huc_module`, inherited generation modes and sites, and
-   composed diagnostics.
+   `compiler::emit_huc_module`, `compiler::emitting()`, inherited generation
+   modes and sites, and composed diagnostics.
 
 The HUC1 frontend loads a versioned, inspectable generated interface for the
 compiler module before indexing user modules. This is the implementation
 equivalent of an always-included header; `import2 compiler` explicitly binds
-it. The bootstrap interface contains only the raw-emission functions and never
-exposes pointers to internal compiler objects.
+it. The bootstrap interface contains only the two text-generation functions and
+`compiler::emitting()`, and never exposes pointers to internal compiler objects.
 
 Milestone 2 is complete only when every numbered/compiler-only construct is
 removed, output modules are deterministic and readable, and the public

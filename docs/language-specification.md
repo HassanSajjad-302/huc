@@ -77,9 +77,9 @@ HUC 0.1 makes these promises:
   never an overload-selected user call.
 - Compilation removes every phase-1 and phase-2 construct before backend code
   generation.
-- Selected HUC1 syntax is residualized structurally. Bootstrap raw strings are
-  parsed and type-checked by the independent HUC0 translator before any C is
-  emitted.
+- Selected HUC1 syntax is residualized structurally. Generated text is parsed
+  and checked when HUC1 inserts it; printed HUC0 is checked again by the
+  independent HUC0 translator before any C is emitted.
 
 HUC does not promise:
 
@@ -1755,7 +1755,8 @@ rank them, and declaration order never resolves a tie. Equally specific or
 incomparable viable candidates are an ambiguity diagnostic. A false predicate
 is not an error in the candidate body. A predicate may inspect its bound
 arguments and immutable compiler metadata, but it must not mutate ambient
-compiler state, generate text, or access untracked external state.
+compiler state, generate text, query the generation mode (section 11.1), or
+access untracked external state.
 
 Only after selection does the translator parse and prepare the chosen body:
 
@@ -2160,7 +2161,8 @@ output. Each ordinary function definition or concrete `fn1` specialization in
 a destination module publishes its program-mode output once. Repeated runtime
 uses reference that definition; they do not replay generation. Different
 specializations and distinct generation calls within one preparation remain
-distinct; this is not global deduplication of `emit_huc_module` calls.
+distinct requests; only identical resulting module declarations are shared
+(section 11.3).
 
 An effectful `fn2` helper executes for each actual invocation while its caller
 is being prepared. It inherits that caller's mode and insertion context. A
@@ -2195,9 +2197,9 @@ candidate ordering, serialization, and generated naming are required.
 The bootstrap HUC1 language does not standardize the full reflection and
 structured-editing library. It supplies the phase evaluator, internal canonical
 type and declaration identities needed for specialization, and the two
-text-generation operations in section 11. This deliberately keeps the first
-HUC1-to-HUC0 milestone independent of an unfinished public compiler object
-model.
+text-generation operations and the generation-mode query in section 11. This
+deliberately keeps the first HUC1-to-HUC0 milestone independent of an
+unfinished public compiler object model.
 
 The implementation supplies a compiler-only module:
 
@@ -2213,7 +2215,8 @@ The module's declarations come from a versioned, inspectable generated
 interface unit loaded before user HUC1 modules, analogous to an always-included
 header. The explicit `import2 compiler` still binds its namespace and makes the
 phase dependency visible. The bootstrap interface declares only the two
-text-generation operations; the object-model design remains separate.
+text-generation operations and `compiler::emitting()`; the object-model design
+remains separate.
 
 ### 10.2 Future reflection model
 
@@ -2305,6 +2308,41 @@ while preparing a private evaluation body uses evaluation mode. Nested helpers
 inherit the context, but evaluating another `fn` or `fn1` opens a separate
 context for that callee's body.
 
+#### Querying the mode
+
+Besides the two operations in section 11.2, the `compiler` module provides
+one query, `compiler::emitting()`. It returns a compiler `bool`: `true` while
+the current body is being prepared in program mode, and `false` in evaluation
+mode. The value is fixed for one preparation. A `fn2` helper inherits it along
+with the mode; a `fn` or `fn1` called for evaluation from that body is
+prepared in evaluation mode and sees `false`. Specialization predicates must
+not call the query (section 9.3), so selection never depends on the mode.
+
+Phase control resolves the query before either branch is parsed, so one
+definition can take a different path in each mode:
+
+```huc
+fn2 define_square() -> void {
+    compiler::emit_huc_module("fn square(x: i32) -> i32 { return x * x; }");
+}
+
+fn1 area(Scale: i32)(side: i32) -> i32 {
+    if1 (compiler::emitting()) {
+        @define_square();
+        return Scale * square(side);
+    } else {
+        return Scale * side * side;
+    }
+}
+```
+
+The emitted `area<2>` calls the generated `square`. The evaluated `area<2>`
+never refers to it. Without the query, `@area<2>(3)` would be rejected,
+because an evaluated body cannot use its own definition's module output
+(section 11.2). The two bodies may differ by design, and the compiler does not
+compare them; keeping their results consistent is the programmer's
+responsibility.
+
 ### 11.2 Operations and forward-only insertion
 
 The `compiler` module exposes two text-generation operations:
@@ -2362,10 +2400,14 @@ operation or permission to insert before the enclosing declaration.
 In evaluation mode, `emit_huc_module` evaluates its argument expressions
 normally and returns `void`, but inserts no text, registers no names, and marks
 nothing as already emitted. Its suppressed text is not parsed as a declaration.
-An evaluated body cannot rely on declarations that exist only in this suppressed
-output: unresolved references are diagnostics, not a reason to fall back to
-program mode. Separately available declarations remain subject to the ordinary
-evaluation restrictions.
+An evaluated body cannot rely on this suppressed output, even when the same
+definition is also emitted: a declaration that exists only because the
+evaluated definition was emitted is not visible to its evaluated body. A
+compile-time result therefore never depends on whether runtime code also uses
+the definition. Unresolved references are diagnostics, not a reason to fall
+back to program mode. Declarations available for other reasons remain subject
+to the ordinary evaluation restrictions. Section 11.1 shows how
+`compiler::emitting()` gives an evaluated body its own path.
 
 Selecting module output affects only that operation. Subsequent `emit_huc`
 calls still use the inherited local insertion point. Neither operation supports
@@ -2397,6 +2439,12 @@ runtime or in the evaluator, does not replay generation or inject its body into
 the caller. Local generated code must not be skipped during evaluation; doing
 so could change the computed result.
 
+A definition that is both emitted and evaluated is prepared once in each mode,
+and each preparation runs its generators. As with macros, a generator that
+reads or changes mutable `let2` state can therefore produce different emitted
+and evaluated bodies. A generator whose output depends only on its arguments
+and on `compiler::emitting()` gives predictable results.
+
 For each destination module, publish the program-mode output of one ordinary
 function definition or concrete `fn1` specialization once. Repeated runtime
 uses reuse that definition and its ordered module output. An evaluation-mode
@@ -2405,11 +2453,18 @@ still produce the required output.
 
 This rule does not discard the second `emit_huc_module` operation within a
 preparation, later phase-loop iterations, different specializations, or distinct
-explicit `fn2` invocations. All such requests keep their normal order. Conflicting
-generated definitions are diagnosed rather than silently choosing the first.
+explicit `fn2` invocations. All such requests keep their normal order.
 Generated output attached to a retained type or standalone module item likewise
 belongs to that item's preparation, not to a process-global "already emitted"
 flag.
+
+A generated module-scope declaration whose tokens are identical to those of a
+generated declaration already inserted in the same module is not inserted
+again. Both requests share the existing declaration, and its origins record
+both. Whitespace and comments do not affect the comparison. Identical text at
+module scope in one module always has the same meaning, so sharing it cannot
+change a lookup. Any other duplicate remains an ordinary duplicate-declaration
+error, reported with both origins.
 
 ### 11.4 Parsing, diagnostics, and source locations
 
@@ -2426,7 +2481,9 @@ be issued merely because a later module declaration has not yet been collected.
 A compiler evaluation that needs such a declaration must wait for an available,
 checked definition. If no definition becomes available, or generation depends
 cyclically on evaluating that unavailable definition, report an error. Suppressed
-evaluation-mode module output cannot satisfy that dependency. Insertion may not
+evaluation-mode module output cannot satisfy that dependency, and neither can a
+declaration that exists only because the evaluated definition was emitted
+(section 11.2). Insertion may not
 silently change a name lookup, specialization choice, or compiler decision that
 has already been finalized; reject a conflicting insertion instead of rerunning
 earlier generation with different results.
@@ -2668,6 +2725,7 @@ The closest C++ equivalents are conceptual, not emitted C17 declarations:
 | `fn1` | a subset spanning templates and `constexpr` |
 | `fn2` | roughly `consteval` plus meta facilities |
 | `if1` | roughly `if constexpr` |
+| `if1 (compiler::emitting())` | roughly `if !consteval` |
 | `struct1` | type generation/monomorphization |
 | `compiler::emit_huc` | raw generated source or a build-time code generator |
 
