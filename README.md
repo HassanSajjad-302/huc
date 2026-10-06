@@ -8,24 +8,29 @@ smaller alternative to C++, not a memory-safe alternative to Rust.
 Its two central ideas are:
 
 - One staging model for generics, compile-time execution, reflection, and code
-  generation: `<...>` declares generic families; suffix `1` marks compiler-stage
-  declarations and control flow; `@` enters compiler execution.
+  generation: `<...>` marks deferred definitions and their parameters; suffix `1`
+  marks compiler storage, imports, and control flow; `@` enters compiler execution.
 - A small value model: Basic values copy, Advanced values transfer, and raw
   `T*` pointers observe without extending lifetimes.
 
-Compiler-only `fn1` helpers can reuse ordinary `fn` functions under an initial
+Compiler helpers use the same `fn` spelling and can reuse ordinary functions under an initial
 [scalar evaluation subset](docs/language-specification.md#121-ordinary-functions-in-compiler-execution):
 booleans and integers, local mutation, bounded execution, and no runtime-memory
 access or external effects. Ordinary `fn` definitions still appear in HUC0;
 a generic `fn` specialization used only at compile time is checked and evaluated
 without requiring a runtime definition. Ordinary `fn` bodies are prepared when
-encountered; generic `fn` and `fn1` bodies stay deferred until requested or called.
+encountered; angle-header `fn` and `struct` bodies stay deferred until requested,
+even when their parameter list is empty (`fn helper<>()`).
 
-Runtime-capable declarations use `fn`, `struct`, and `let`, with angle-bracket
-parameters for generic families: `fn choose<T: auto>(left: T, right: T)`.
-Compiler-only declarations use `fn1`, `struct1`, `let1`, and `import1`.
-`if1`, `for1`, and `while1` decide which runtime code is prepared. Compiler-only
-functions and types remain compiler-only even when they use only scalar values.
+Declarations use `fn`, `struct`, and `let`, with angle-bracket parameters for
+families: `fn choose<T: auto>(left: T, right: T)`. A second list supplies a
+specialization pattern: `<T: auto><T*>` is partial; `<><i32>` is complete.
+Function calls may omit angles when arguments are deduced, defaulted, or absent:
+`choose(a, b)` and `@helper()`.
+`let1` and `import1` retain compiler-only bindings and imports. `if1`, `for1`,
+and `while1` decide which code is prepared. Fields and working locals use `let`.
+Compiler-only types and operations are accepted for compiler use, but cannot
+survive in runtime storage, signatures, or executable code.
 
 `module` provides a namespace. `import` processes source once as part of the
 same translation unit, preserving the imported code's lexical scope. Generics
@@ -36,7 +41,10 @@ Text generation has two [generation modes](docs/language-specification.md#111-pr
 **program mode** prepares the HUC0 program; **evaluation mode** prepares a private
 body for the compiler to execute. Local generated code is parsed and checked
 in both. Module output is inserted forward in program mode and suppressed in
-evaluation mode. Repeated runtime uses publish a function or specialization's
+evaluation mode. A standalone `@generate();` inherits the insertion context;
+a value call such as `let x: i32 = @compute();` uses a private evaluation body
+and cannot introduce locals into its caller. Compiler API calls always use `@`,
+including nested calls. Repeated runtime uses publish a function or specialization's
 generated declarations only once; compile-time evaluation does not consume
 that opportunity. Nested specialization requests share the original requesting
 top-level declaration as their module insertion anchor: a request inside `main`

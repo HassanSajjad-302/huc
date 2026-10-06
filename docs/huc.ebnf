@@ -91,8 +91,6 @@ extern-function-decl-0
 
 module-item-1     = runtime-declaration-1
                   | generic-family-decl
-                  | compiler-function-decl
-                  | compiler-struct-decl
                   | global-let1-decl
                   | phase-control-item
                   | phase-expression-item ;
@@ -156,8 +154,7 @@ generic-struct-decl
 generic-let-decl  = "let", identifier, generic-header,
                     [ phase-predicate ], deferred-body ;
 
-generic-header   = phase-binder-list, [ phase-pattern-list ]
-                  | phase-pattern-list ;
+generic-header   = phase-binder-list, [ phase-pattern-list ] ;
 
 phase-binder-list = "<", [ phase-binder,
                     { ",", phase-binder }, [ "," ] ], ">" ;
@@ -169,11 +166,11 @@ phase-pattern-list
                     { ",", phase-argument }, [ "," ], ">" ;
 phase-predicate   = "if1", "(", expression-1, ")" ;
 
-(* After a declaration name, '<' starts a deferred generic declaration.
-   In its first angle list, identifier ':' starts binders; other nonempty
-   lists are full-specialization patterns. '<>' is a zero-binder primary.
-   A second angle list after nonempty binders supplies a partial-specialization
-   pattern. An empty binder list must not be followed by a pattern. Predicates
+(* After a declaration name, '<' starts a deferred declaration. The first
+   angle list always declares binders; the optional second supplies the
+   specialization pattern. '<>' alone is a zero-binder primary; '<><i32>'
+   is a full specialization, and '<T: auto><T*>' is a partial specialization.
+   Diagnose '<T>' in a declaration with a hint for '<T: auto>' or '<><T>'. Predicates
    are allowed only on specializations, never on a primary. Parenthesize
    '<' and '>' comparisons in angle-list value expressions and defaults.
    Runtime overload sets and generic families cannot share a name in one scope. *)
@@ -190,32 +187,14 @@ type-pattern-primary
 
 (* Open-ended phase packs are intentionally absent from 0.1. *)
 
-(* ---------- Compiler-only declarations ---------- *)
+(* ---------- Compiler-only storage ---------- *)
 
-compiler-function-decl
-                  = compiler-function-signature, ( deferred-body | ";" ) ;
-compiler-function-signature
-                  = "fn1", identifier, parameter-list-1,
-                    [ "mod" ], "->", type-1 ;
-
-compiler-constructor-decl
-                  = "fn1", "init", parameter-list-1,
-                    [ constructor-initializer-list-1 ], deferred-body ;
-
-(* Register fn1 signatures immediately. Parse a deferred compiler function or
-   constructor body as block-1 only when called. Non-generic fn bodies are
-   parsed and prepared when encountered, even if uncalled. Compiler-only
-   fn1/struct1/let1 declarations do not have generic headers in 0.1. *)
-
-compiler-struct-decl
-                  = "struct1", identifier, "{",
-                    { compiler-struct-member }, "}", [ ";" ] ;
-compiler-struct-member
-                  = let1-decl
-                  | compiler-function-decl
-                  | compiler-constructor-decl
-                  | phase-control-item
-                  | phase-expression-item ;
+(* fn and struct with a generic-header stay deferred, even with no binders.
+   Their runtime definitions are demand-driven. Without a generic-header,
+   functions and types are prepared when encountered. Methods/constructors
+   in a deferred type are reached only when that type body is selected.
+   fn1 and struct1 are not declaration keywords. Fields and working locals
+   use let; let1 explicitly declares storage used during preparation. *)
 
 let1-decl         = "let1", [ "mod" ], identifier, ":", ( type-1 | "auto" ),
                     [ "=", expression-1 ], ";" ;
@@ -237,6 +216,11 @@ phase-while-item  = "while1", "(", expression-1, ")", deferred-body ;
 
 phase-expression-item
                   = "@", unary-expression-1, ";" ;
+
+(* A standalone phase-expression-item must return void and executes as a
+   generation statement in the inherited insertion context. A value-context
+   @ call evaluates in a private body. Compiler API calls require @ even when
+   nested in another compiler call. These are semantic checks on the AST. *)
 
 deferred-body     = "{", ? scanner-delimited opaque source span ?, "}" ;
 

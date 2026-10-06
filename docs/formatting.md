@@ -59,11 +59,12 @@ fn inspect(widget: Widget*) -> i32 {
 These are presentation choices, not restrictions on operator spacing.
 For example, `a+b`, `a + b`, and `a+ b` are all valid binary additions in HUC.
 
-## Generic and compiler-only declarations
+## Deferred and generic declarations
 
 Keep angle-bracket binders attached to the family name. A function's ordinary
-parameters follow in parentheses. Compiler-only declarations use suffix `1`;
-their variables and fields use `let1`, not runtime `let`:
+parameters follow in parentheses. Use `<>` for a deferred definition without
+parameters. Fields and working locals use `let`; `let1` is for explicit compiler
+storage. Compiler calls use `@`, including calls inside generators:
 
 ```huc
 fn identity<T: auto>(mod value: T) -> T {
@@ -74,12 +75,12 @@ struct Cell<T: auto> {
     let mod value: T;
 }
 
-struct1 BuildOptions {
-    let1 tracing: bool;
+struct BuildOptions<> {
+    let tracing: bool;
 }
 
-fn1 build_limit() -> usize {
-    let1 limit: usize = 64;
+fn build_limit<>() -> usize {
+    let limit: usize = 64;
     return limit;
 }
 ```
@@ -93,7 +94,9 @@ fn identity<T: auto><T*>(value: T*) -> T* if1 (is_basic<T>()) {
 }
 ```
 
-A full specialization omits binders: `fn identity<i32>(value: i32) -> i32`.
+A full specialization has an empty first list: `fn identity<><i32>(value: i32) -> i32`.
+Calls use at most one angle list, and omit it when arguments are deduced or
+defaulted: `identity(42)`, `identity<i32>(42)`, and `@build_limit()`.
 
 ## Lists and trailing commas
 

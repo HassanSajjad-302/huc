@@ -350,7 +350,7 @@ fn clone() -> T;
 
 Rules:
 
-- it is an ordinary runtime `fn`, not generic `fn` or `fn1`;
+- it is an ordinary runtime `fn`, without an angle header;
 - it has no explicit parameters;
 - its receiver is read-only because it has no trailing `mod`;
 - it returns the same structure type in which it is declared;

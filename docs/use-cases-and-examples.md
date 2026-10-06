@@ -29,8 +29,8 @@ The following syntax and behavior describe language rules, not library proposals
 - `construct_at` and `destruct_at` for manually managed value lifetimes;
 - `raw_storage<T, N>` and `storage_ptr` for typed inline backing storage;
 - `size_of<T>()`, `align_of<T>()`, and `is_basic<T>()` for layout and category queries;
-- runtime-capable `fn`, generic `fn name<T: auto>`, and compiler-only `fn1`;
-- runtime `struct`, generic `struct Name<T: auto>`, and compiler-only `struct1`;
+- ordinary `fn`, deferred `fn name<>()`, and parameterized `fn name<T: auto>`;
+- ordinary `struct`, deferred `struct Name<>`, and parameterized `struct Name<T: auto>`;
 - `if1`, `for1`, and `while1`;
 - `@`;
 - `import` and `import1`;
@@ -1339,7 +1339,7 @@ struct Storage<T: auto><T*> {
     }
 }
 
-struct Storage<u8> {
+struct Storage<><u8> {
     let value: u8;
 
     fn init(value: u8) : value(value) {
@@ -1442,7 +1442,7 @@ fn run() -> i32 {
         let mod slot: T* = null;
     }
 
-    let slot<Widget> {
+    let slot<><Widget> {
         let mod slot: Widget = Widget(99);
     }
 
@@ -1576,7 +1576,7 @@ A later runtime reference would require its definition too. Both ordinary
 functions, `runtime_case` and `compile_case`, remain in HUC0 even if nothing
 calls them. Function families that are never requested remain deferred.
 
-### 6.2 Compiler-only helper and evaluation island
+### 6.2 Deferred helper and evaluation island
 
 `InlineArray` below is a probable later library family; it is used to show
 phase-value materialization, not as a HUC 0.1 primitive.
@@ -1584,7 +1584,7 @@ phase-value materialization, not as a HUC 0.1 primitive.
 ```huc
 module examples.phase_helper;
 
-fn1 clamp_build_value(value: i32, low: i32, high: i32) -> i32 {
+fn clamp_build_value<>(value: i32, low: i32, high: i32) -> i32 {
     if (value < low) {
         return low;
     }
@@ -1603,8 +1603,10 @@ struct Cache {
 }
 ```
 
-The outer `@` starts compiler execution. Calls made inside
-`clamp_build_value` would not need another `@`.
+The `@` requests a compiler value. Compiler API calls inside a helper also use
+`@`; ordinary scalar callees may execute normally under section 6.3 below.
+Only compiler use of `clamp_build_value` is requested here, so its deferred
+definition is not emitted. A later runtime call could request it too.
 
 The HUC0 structure has a concrete capacity of `256`; no compiler-only binding
 survives.
@@ -1623,7 +1625,7 @@ fn count_digits(mod value: u32) -> u32 {
     return count;
 }
 
-fn1 field_width(value: u32) -> u32 {
+fn field_width<>(value: u32) -> u32 {
     return count_digits(value);
 }
 
@@ -1643,7 +1645,7 @@ fn fixed_width() -> u32 {
 }
 ```
 
-The `fn1` definition disappears. Calling `count_digits` only at compile time
+The deferred `field_width` definition is not needed in HUC0. Calling `count_digits` only at compile time
 does not suppress its ordinary runtime definition. Writing
 `@count_digits(12345)` directly would use the same restricted evaluator.
 
@@ -1670,8 +1672,8 @@ module examples.callsite_emit;
 
 import1 compiler;
 
-fn1 declare_counter() -> void {
-    compiler::emit_huc("let mod generated_counter: i32;");
+fn declare_counter<>() -> void {
+    @compiler::emit_huc("let mod generated_counter: i32;");
 }
 
 fn run() -> i32 {
@@ -1698,6 +1700,41 @@ inside `run`. HUC1 parses its output before processing the following assignment.
 If the helper declared a different name, HUC1 would diagnose the use of
 `generated_counter`; it does not leave that check only to HUC0.
 
+The standalone call is what makes this a generator invocation. A call used as
+a value instead owns a private body:
+
+```huc
+fn answer<>() -> i32 {
+    @compiler::emit_huc("let result: i32 = 42;");
+    return result;
+}
+
+fn read_answer() -> i32 {
+    let folded: i32 = @answer();
+    let live: i32 = answer();
+    return folded + live;
+}
+```
+
+The first initializer becomes `42`; it does not declare `result` in
+`read_answer`. The runtime call needs a definition of `answer` with its own
+`result` local. `@answer<>()` has the same meaning as `@answer()`. Replacing
+`let folded` with a compiler `let1 folded` would not change the insertion site.
+A standalone `@answer();` is rejected because generation statements must
+return `void`. Neither return-type inference nor optimization chooses the site.
+
+Type generation likewise keeps fields inside the type being prepared:
+
+```huc
+struct Tagged<T: auto> {
+    let payload: T;
+    @compiler::emit_huc("let tag: i32;");
+}
+```
+
+Requesting `Tagged<i32>` creates its `tag` field, not a `tag` local in the
+requesting function. Its module-emission anchor can still belong to the caller.
+
 ### 7.2 Module generation from a helper
 
 ```huc
@@ -1705,8 +1742,8 @@ module examples.module_emit;
 
 import1 compiler;
 
-fn1 generate_health_check() -> void {
-    compiler::emit_huc_module(
+fn generate_health_check<>() -> void {
+    @compiler::emit_huc_module(
         "fn health_check() -> i32 { return 200; }",
     );
 }
@@ -1801,7 +1838,7 @@ specialization would get a duplicate-declaration error showing both origins.
 Generators therefore need distinct names only for declarations that differ.
 
 A definition that needs generated module declarations at runtime can still be
-evaluated if it takes a separate path in each mode. `compiler::emitting()`
+evaluated if it takes a separate path in each mode. `@compiler::emitting()`
 returns `true` in program mode and `false` in evaluation mode:
 
 ```huc
@@ -1809,12 +1846,12 @@ module examples.mode_query;
 
 import1 compiler;
 
-fn1 define_square() -> void {
-    compiler::emit_huc_module("fn square(x: i32) -> i32 { return x * x; }");
+fn define_square<>() -> void {
+    @compiler::emit_huc_module("fn square(x: i32) -> i32 { return x * x; }");
 }
 
 fn area<Scale: i32>(side: i32) -> i32 {
-    if1 (compiler::emitting()) {
+    if1 (@compiler::emitting()) {
         @define_square();
         return Scale * square(side);
     } else {
@@ -1866,8 +1903,8 @@ module examples.generated_loop;
 
 import1 compiler;
 
-fn1 forward_four() -> void {
-    compiler::emit_huc("for (; index < 4; index += 1)");
+fn forward_four<>() -> void {
+    @compiler::emit_huc("for (; index < 4; index += 1)");
 }
 
 fn sum_indices() -> i32 {
@@ -2231,12 +2268,12 @@ module case_studies.uart_registers;
 
 import1 compiler;
 
-struct1 RegisterSpec {
-    let1 name: compiler::Text;
-    let1 offset: usize;
-    let1 writable: bool;
+struct RegisterSpec<> {
+    let name: compiler::Text;
+    let offset: usize;
+    let writable: bool;
 
-    fn1 init(
+    fn init(
         name: compiler::Text,
         offset: usize,
         writable: bool,
@@ -2248,10 +2285,10 @@ struct1 RegisterSpec {
     }
 }
 
-fn1 emit_register(spec: RegisterSpec) -> void {
+fn emit_register<>(spec: RegisterSpec<>) -> void {
     if (spec.writable) {
-        compiler::emit_huc_module(
-            compiler::format(
+        @compiler::emit_huc_module(
+            @compiler::format(
                 "fn write_{0}(base: mod u32*, value: u32) -> void { "
                 "base[{1}] = value; "
                 "}",
@@ -2261,8 +2298,8 @@ fn1 emit_register(spec: RegisterSpec) -> void {
         );
     }
 
-    compiler::emit_huc_module(
-        compiler::format(
+    @compiler::emit_huc_module(
+        @compiler::format(
             "fn read_{0}(base: u32*) -> u32 { "
             "return base[{1}]; "
             "}",
@@ -2272,9 +2309,9 @@ fn1 emit_register(spec: RegisterSpec) -> void {
     );
 }
 
-@emit_register(RegisterSpec("status", 0x00, false));
-@emit_register(RegisterSpec("control", 0x04, true));
-@emit_register(RegisterSpec("baud", 0x08, true));
+@emit_register(@RegisterSpec<>("status", 0x00, false));
+@emit_register(@RegisterSpec<>("control", 0x04, true));
+@emit_register(@RegisterSpec<>("baud", 0x08, true));
 
 fn initialize_uart(base: mod u32*, baud: u32) -> void {
     write_control(base, 0);
@@ -2316,7 +2353,7 @@ Usefulness:
 - future structured generation can replace raw formatting without changing the
   two-stage architecture.
 
-`compiler::Text`, `compiler::format`, and user-defined `struct1 init` details
+`compiler::Text`, `compiler::format`, and construction of compiler-resident records
 belong to the future compiler-library proposal; this case study records the
 intended experience, not bootstrap API commitments beyond text generation.
 
@@ -2458,8 +2495,8 @@ fn command_test(arguments: text::Text) -> i32 {
     return 0;
 }
 
-fn1 emit_dispatcher() -> void {
-    compiler::emit_huc_module(
+fn emit_dispatcher<>() -> void {
+    @compiler::emit_huc_module(
         "fn dispatch(name: text::Text, "
         "mod arguments: text::Text) -> i32 {"
         "  if (name == \"build\") { return command_build(arguments); }"
@@ -2515,7 +2552,7 @@ struct Sprite {
 }
 
 struct ComponentStore<T: auto> {
-    if1 (@compiler::type<T>().is_advanced()) {
+    if1 (@(@compiler::type<T>()).is_advanced()) {
         let mod values: collections::Vector<T>;
 
         fn add(mod value: T) mod -> usize {
@@ -2571,18 +2608,19 @@ describe the capabilities required from the future `import1 compiler` design.
 ```huc
 import1 compiler;
 
-fn1 report_environment() -> void {
-    let1 environment: compiler::Environment =
-        compiler::current_environment();
+fn report_environment<>() -> void {
+    let environment: compiler::Environment =
+        @compiler::current_environment();
 
-    compiler::log(environment.target().triple());
-    compiler::log(environment.language_revision());
+    let target: compiler::Target = @environment.target();
+    @compiler::log(@target.triple());
+    @compiler::log(@environment.language_revision());
 
-    let1 modules: auto = environment.modules();
-    let1 mod index: usize = 0;
-    for1 (; index < modules.size(); index += 1) {
-        let1 module: compiler::Module = modules[index];
-        compiler::log(module.qualified_name());
+    let modules: auto = @environment.modules();
+    let mod index: usize = 0;
+    for (; index < @modules.size(); index += 1) {
+        let module: compiler::Module = modules[index];
+        @compiler::log(@module.qualified_name());
     }
 }
 
@@ -2603,29 +2641,30 @@ Required design properties:
 ```huc
 import1 compiler;
 
-fn1 generate_serializer(type: compiler::Type) -> void {
-    let1 record: compiler::Class = type.as_class();
-    let1 mod body: compiler::Code = compiler::Code();
+fn generate_serializer<>(target_type: compiler::Type) -> void {
+    let record: compiler::Class = @target_type.as_class();
+    let mod body: compiler::Code = @compiler::Code();
 
-    let1 fields: auto = record.fields();
-    let1 mod index: usize = 0;
-    for1 (; index < fields.size(); index += 1) {
-        let1 field: compiler::Field = fields[index];
-        if1 (!field.attributes().contains("skip")) {
-            body.append(
-                compiler::statement(
+    let fields: auto = @record.fields();
+    let mod index: usize = 0;
+    for (; index < @fields.size(); index += 1) {
+        let field: compiler::Field = fields[index];
+        let attributes: auto = @field.attributes();
+        if (!@attributes.contains("skip")) {
+            @body.append(
+                @compiler::statement(
                     "writer.write_field({name}, value.{field})",
-                    field.name(),
-                    field.identifier(),
+                    @field.name(),
+                    @field.identifier(),
                 ),
             );
         }
     }
 
-    compiler::emit_module(
-        compiler::function(
-            "serialize_" + record.name(),
-            body.commit(),
+    @compiler::emit_module(
+        @compiler::function(
+            "serialize_" + @record.name(),
+            @body.commit(),
         ),
     );
 }
@@ -2708,7 +2747,7 @@ Possible tools include:
 | generic `fn` partial specialization | overloads, traits, macros | Same primary/partial/full mechanism as structure and variable families |
 | generic `let` | variable templates, macros, generated locals | Selected leaf is a complete ordinary `let`, including type and mutation permissions |
 | `@family<T>(...)` | constant evaluation or interpreter call | Same family either residualizes or must fully execute |
-| Text generation | macros, mixins, compiler plugins | Helpers inherit the generation mode and site; inserted HUC0 is parsed and checked |
+| Text generation | macros, mixins, compiler plugins | Standalone generation calls inherit the site; value calls keep generated locals private; inserted HUC0 is parsed and checked |
 | Printable HUC0 boundary | internal compiler IR or generated source | Second public translator parses the exact intermediate source |
 | Future semantic reflection | procedural macros, plugins, build generators | Stable compiler-only semantic snapshots plus explicit emission |
 
