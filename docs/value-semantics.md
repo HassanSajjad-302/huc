@@ -350,7 +350,7 @@ fn clone() -> T;
 
 Rules:
 
-- it is an ordinary runtime `fn`, not `fn1` or `fn2`;
+- it is an ordinary runtime `fn`, not generic `fn` or `fn1`;
 - it has no explicit parameters;
 - its receiver is read-only because it has no trailing `mod`;
 - it returns the same structure type in which it is declared;
@@ -1422,7 +1422,7 @@ design is not yet approved. They show how a container can use the
 same Basic/Advanced rules without adding another ownership model.
 
 The code in this section is HUC1-facing library source: `Vector<T>` is a
-phase-1 family request. Before HUC0 checking, staging replaces every request
+generic family request. Before HUC0 checking, staging replaces every request
 with the name of a concrete type. HUC0 itself never parses `Vector<T>`.
 
 ```huc

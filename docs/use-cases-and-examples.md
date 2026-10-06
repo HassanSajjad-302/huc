@@ -21,7 +21,7 @@ test or a generation test that compares generated HUC0 with expected output
 
 The following syntax and behavior describe language rules, not library proposals:
 
-- `let`, `let1`, and `let2`;
+- runtime `let`, generic `let name<T: auto>`, and compiler-only `let1`;
 - `mod`;
 - inline values and raw `T*` pointers;
 - unary `&` for taking the address of any addressable data slot;
@@ -29,11 +29,11 @@ The following syntax and behavior describe language rules, not library proposals
 - `construct_at` and `destruct_at` for manually managed value lifetimes;
 - `raw_storage<T, N>` and `storage_ptr` for typed inline backing storage;
 - `size_of<T>()`, `align_of<T>()`, and `is_basic<T>()` for layout and category queries;
-- `fn`, `fn1`, and `fn2`;
-- `struct`, `struct1`, and `struct2`;
+- runtime-capable `fn`, generic `fn name<T: auto>`, and compiler-only `fn1`;
+- runtime `struct`, generic `struct Name<T: auto>`, and compiler-only `struct1`;
 - `if1`, `for1`, and `while1`;
 - `@`;
-- `import` and `import2`;
+- `import` and `import1`;
 - constructors named `init`;
 - `clone`, `copy`, and `drop`;
 - family specialization with angle patterns and predicates.
@@ -85,13 +85,13 @@ The useful distinction is:
 Notable HUC-specific combinations are:
 
 1. One partial-specialization model for structures, functions, and variables.
-2. A `let1` specialization that chooses the variable’s complete declaration,
+2. A generic `let` specialization that chooses the variable’s complete declaration,
    including a different type or mutation permission.
 3. Typed phase conditions at module and type-body scope whose discarded bodies
    are never parsed.
 4. Compiler helper functions that insert HUC0 at their inherited generation site,
    followed by a separately inspectable and independently parsed HUC0 round.
-5. A normal `fn1` call that generates and calls a runtime specialization, while
+5. A normal generic `fn` call that generates and calls a runtime specialization, while
    the same call prefixed by `@` must run completely at compile time.
 6. Fixed/read-only-by-default declarations, layer-specific `mod`, and fixed
    destructive relocation of Advanced values.
@@ -152,8 +152,8 @@ The examples below cover these use cases:
 
 ## 3. Runtime examples
 
-These examples describe HUC0 runtime behavior. A snippet with no numbered
-syntax or angle-family request is directly valid HUC0. Snippets using probable
+These examples describe HUC0 runtime behavior. Runtime snippets without compiler
+constructs, generic declarations, or family requests use HUC0 syntax. Snippets using probable
 generic library spellings such as `Vector<T>` or `Result<T, E>` are HUC1
 source: staging replaces each request with the name of a concrete type before the
 same runtime semantics are checked by HUC0.
@@ -783,7 +783,7 @@ inactive, so do not destroy them again:
 ```huc
 // data points to length live, manually managed values; length > 0.
 // length points to separate writable bookkeeping, outside the element region.
-fn1 pop_last(T: auto)(data: mod T*, length: mod usize*) -> T {
+fn pop_last<T: auto>(data: mod T*, length: mod usize*) -> T {
     let last: usize = *length - 1;
     let slot: mod T* = data + last;
     let mod result: T = *slot;
@@ -1097,7 +1097,7 @@ remain library design choices. Direct moves from Advanced fields remain rejected
 ```huc
 module examples.platform_clock;
 
-let2 use_monotonic_clock: bool = true;
+let1 use_monotonic_clock: bool = true;
 
 if1 (use_monotonic_clock) {
     fn platform_ticks() -> u64 {
@@ -1128,7 +1128,7 @@ runtime.
 ```huc
 module examples.packet_header;
 
-let2 compact_header: bool = true;
+let1 compact_header: bool = true;
 
 struct PacketHeader {
     let kind: u16;
@@ -1205,7 +1205,7 @@ fields, and architecture-dependent layouts.
 ```huc
 module examples.opaque_branch;
 
-let2 building_linux: bool = true;
+let1 building_linux: bool = true;
 
 if1 (building_linux) {
     fn platform_name() -> c8* {
@@ -1232,7 +1232,7 @@ fails until it is replaced with valid HUC.
 ```huc
 module examples.generated_probes;
 
-let2 mod index: usize = 0;
+let1 mod index: usize = 0;
 
 while1 (index < 2) {
     if1 (index == 0) {
@@ -1275,10 +1275,10 @@ accept it.
 ```huc
 module examples.sum_constants;
 
-fn1 sum_constants(Values: i32...)() -> i32 {
+fn sum_constants<Values: i32...>() -> i32 {
     let mod result: i32 = 0;
 
-    let2 mod index: usize = 0;
+    let1 mod index: usize = 0;
     for1 (; index < pack_size<Values>(); index += 1) {
         result += Values[index];
     }
@@ -1317,7 +1317,7 @@ after fixed-arity families. The loop uses the three-part `for1` header.
 ```huc
 module examples.storage;
 
-struct1 Storage(T: auto) {
+struct Storage<T: auto> {
     let value: T;
 
     fn init(mod value: T) : value(value) {
@@ -1328,7 +1328,7 @@ struct1 Storage(T: auto) {
     }
 }
 
-struct1 Storage(T: auto)<T*> {
+struct Storage<T: auto><T*> {
     let value: T*;
 
     fn init(value: T*) : value(value) {
@@ -1339,7 +1339,7 @@ struct1 Storage(T: auto)<T*> {
     }
 }
 
-struct1 Storage()<u8> {
+struct Storage<u8> {
     let value: u8;
 
     fn init(value: u8) : value(value) {
@@ -1375,14 +1375,14 @@ This example assumes a probable library `InlineArray<T, N>` family; primitive
 `[N]T` arrays are deferred from HUC 0.1.
 
 ```huc
-struct1 Buffer(T: auto, N: usize) {
+struct Buffer<T: auto, N: usize> {
     let mod values: InlineArray<T, N>;
 
     fn init() {
     }
 }
 
-struct1 Buffer(T: auto, N: usize)<T*, N>(N <= 16) {
+struct Buffer<T: auto, N: usize><T*, N> if1 (N <= 16) {
     let mod values: InlineArray<T*, N>;
 
     fn init() {
@@ -1399,11 +1399,11 @@ pattern outrank another pattern that is structurally more specific.
 ```huc
 module examples.hash;
 
-fn1 hash_value(T: auto)(value: T) -> u64 {
+fn hash_value<T: auto>(value: T) -> u64 {
     return probable_hash_bytes(&value, size_of<T>());
 }
 
-fn1 hash_value(T: auto)<T*>(value: T*) -> u64 {
+fn hash_value<T: auto><T*>(value: T*) -> u64 {
     if (!value) {
         return 0;
     }
@@ -1421,9 +1421,9 @@ fn run(value: i32, pointer: i32*) -> u64 {
 [C++ does not permit partial specialization of function templates
 directly](https://eel.is/c++draft/temp.spec.partial); overloading is normally
 used instead. HUC deliberately uses the same declared family-specialization
-model for `fn1` and `struct1`.
+model for generic `fn` and generic `struct`.
 
-### 5.4 `let1` with different result types
+### 5.4 Generic variables with different result types
 
 ```huc
 module examples.specialized_slot;
@@ -1434,15 +1434,15 @@ struct Widget {
 }
 
 fn run() -> i32 {
-    let1 slot(T: auto) {
+    let slot<T: auto> {
         let slot: T = T();
     }
 
-    let1 slot(T: auto)<T*> {
+    let slot<T: auto><T*> {
         let mod slot: T* = null;
     }
 
-    let1 slot()<Widget> {
+    let slot<Widget> {
         let mod slot: Widget = Widget(99);
     }
 
@@ -1481,11 +1481,11 @@ also be explicitly/partially specialized, but HUC integrates the selected
 ordinary `let` declaration, mutation permissions, phase control, and HUC0
 materialization into the same numbered model.
 
-### 5.5 `let1` selecting mutability
+### 5.5 Generic variables selecting mutability
 
 ```huc
 fn configure(writable: bool) -> void {
-    let1 setting(Writable: bool) {
+    let setting<Writable: bool> {
         if1 (Writable) {
             let mod setting: i32;
         } else {
@@ -1505,13 +1505,13 @@ fn configure(writable: bool) -> void {
 The family decides whether the generated variable itself is writable.
 Because `writable` must be a compile-time value for `if1`, a runtime boolean is
 not accepted here; the example’s parameter would need to be a family binder or
-phase-2 input in the finalized grammar.
+compiler-only input in the finalized grammar.
 
 A correct family form is:
 
 ```huc
-fn1 configure(Writable: bool)() -> void {
-    let1 setting(Choice: bool) {
+fn configure<Writable: bool>() -> void {
+    let setting<Choice: bool> {
         if1 (Choice) {
             let mod setting: i32;
         } else {
@@ -1532,12 +1532,12 @@ The invalid first version is retained deliberately to show the phase boundary.
 
 ## 6. Residualization and forced execution
 
-### 6.1 One `fn1`, two call modes
+### 6.1 One generic `fn`, two call modes
 
 ```huc
 module examples.biased_add;
 
-fn1 biased_add(Bias: i32)(left: i32, right: i32) -> i32 {
+fn biased_add<Bias: i32>(left: i32, right: i32) -> i32 {
     return left + right + Bias;
 }
 
@@ -1576,7 +1576,7 @@ A later runtime reference would require its definition too. Both ordinary
 functions, `runtime_case` and `compile_case`, remain in HUC0 even if nothing
 calls them. Function families that are never requested remain deferred.
 
-### 6.2 Phase-2 helper and evaluation island
+### 6.2 Compiler-only helper and evaluation island
 
 `InlineArray` below is a probable later library family; it is used to show
 phase-value materialization, not as a HUC 0.1 primitive.
@@ -1584,7 +1584,7 @@ phase-value materialization, not as a HUC 0.1 primitive.
 ```huc
 module examples.phase_helper;
 
-fn2 clamp_build_value(value: i32, low: i32, high: i32) -> i32 {
+fn1 clamp_build_value(value: i32, low: i32, high: i32) -> i32 {
     if (value < low) {
         return low;
     }
@@ -1596,7 +1596,7 @@ fn2 clamp_build_value(value: i32, low: i32, high: i32) -> i32 {
     return value;
 }
 
-let2 selected_capacity: i32 = @clamp_build_value(1000, 16, 256);
+let1 selected_capacity: i32 = @clamp_build_value(1000, 16, 256);
 
 struct Cache {
     let mod bytes: InlineArray<u8, selected_capacity>;
@@ -1623,7 +1623,7 @@ fn count_digits(mod value: u32) -> u32 {
     return count;
 }
 
-fn2 field_width(value: u32) -> u32 {
+fn1 field_width(value: u32) -> u32 {
     return count_digits(value);
 }
 
@@ -1643,7 +1643,7 @@ fn fixed_width() -> u32 {
 }
 ```
 
-The `fn2` definition disappears. Calling `count_digits` only at compile time
+The `fn1` definition disappears. Calling `count_digits` only at compile time
 does not suppress its ordinary runtime definition. Writing
 `@count_digits(12345)` directly would use the same restricted evaluator.
 
@@ -1668,9 +1668,9 @@ The full rules are in specification section 12.1.
 ```huc
 module examples.callsite_emit;
 
-import2 compiler;
+import1 compiler;
 
-fn2 declare_counter() -> void {
+fn1 declare_counter() -> void {
     compiler::emit_huc("let mod generated_counter: i32;");
 }
 
@@ -1703,9 +1703,9 @@ If the helper declared a different name, HUC1 would diagnose the use of
 ```huc
 module examples.module_emit;
 
-import2 compiler;
+import1 compiler;
 
-fn2 generate_health_check() -> void {
+fn1 generate_health_check() -> void {
     compiler::emit_huc_module(
         "fn health_check() -> i32 { return 200; }",
     );
@@ -1755,9 +1755,9 @@ for: the HUC0 program or a private body executed by the compiler.
 ```huc
 module examples.generation_modes;
 
-import2 compiler;
+import1 compiler;
 
-fn1 generated_value(Extra: i32)() -> i32 {
+fn generated_value<Extra: i32>() -> i32 {
     @compiler::emit_huc("let local: i32 = 40;");
     @compiler::emit_huc_module(
         "fn generation_marker() -> i32 { return 1; }",
@@ -1807,13 +1807,13 @@ returns `true` in program mode and `false` in evaluation mode:
 ```huc
 module examples.mode_query;
 
-import2 compiler;
+import1 compiler;
 
-fn2 define_square() -> void {
+fn1 define_square() -> void {
     compiler::emit_huc_module("fn square(x: i32) -> i32 { return x * x; }");
 }
 
-fn1 area(Scale: i32)(side: i32) -> i32 {
+fn area<Scale: i32>(side: i32) -> i32 {
     if1 (compiler::emitting()) {
         @define_square();
         return Scale * square(side);
@@ -1856,7 +1856,7 @@ later declaration, after `square` is published, could use it without the query.
 
 The compiler does not compare the two branches; keeping their results
 consistent is the programmer's responsibility. As with macros, generators that
-read or change mutable `let2` state can also make a definition's emitted and
+read or change mutable `let1` state can also make a definition's emitted and
 evaluated bodies differ.
 
 ### 7.4 A generated loop header with an original body
@@ -1864,9 +1864,9 @@ evaluated bodies differ.
 ```huc
 module examples.generated_loop;
 
-import2 compiler;
+import1 compiler;
 
-fn2 forward_four() -> void {
+fn1 forward_four() -> void {
     compiler::emit_huc("for (; index < 4; index += 1)");
 }
 
@@ -1921,13 +1921,13 @@ adds an output map rather than changing those locations.
 ```huc
 module examples.nested_generation;
 
-import2 compiler;
+import1 compiler;
 
-fn1 B(Tag: i32)() -> i32 {
+fn B<Tag: i32>() -> i32 {
     return generated() + Tag;
 }
 
-fn1 A(Tag: i32)() -> i32 {
+fn A<Tag: i32>() -> i32 {
     @compiler::emit_huc_module(
         "fn generated() -> i32 { return 42; }",
     );
@@ -1966,9 +1966,9 @@ In `library/read.huc1`:
 ```huc
 module library.read;
 
-import2 compiler;
+import1 compiler;
 
-fn1 read_value(T: auto)(item: T*) -> i32 {
+fn read_value<T: auto>(item: T*) -> i32 {
     @compiler::emit_huc_module(
         "fn bonus() -> i32 { return 1; }",
     );
@@ -2065,7 +2065,7 @@ module case_studies.small_vector;
 import std.memory as memory;
 import std.io as io;
 
-struct1 HeapArray(T: auto) {
+struct HeapArray<T: auto> {
     let mod values: mod T*;
     let capacity: usize;
 
@@ -2084,7 +2084,7 @@ struct1 HeapArray(T: auto) {
     }
 }
 
-struct1 SmallVector(T: auto, Inline: usize) {
+struct SmallVector<T: auto, Inline: usize> {
     let mod inline_values: raw_storage<T, Inline>;
     let mod heap_values: HeapArray<T>;
     let mod size: usize;
@@ -2161,7 +2161,7 @@ struct1 SmallVector(T: auto, Inline: usize) {
     }
 }
 
-struct1 SmallVector(T: auto, Inline: usize)<T*, Inline>(Inline <= 4) {
+struct SmallVector<T: auto, Inline: usize><T*, Inline> if1 (Inline <= 4) {
     let mod values: raw_storage<T*, Inline>;
     let mod size: usize;
 
@@ -2229,14 +2229,14 @@ The probable compiler text helper `format` below is illustrative.
 ```huc
 module case_studies.uart_registers;
 
-import2 compiler;
+import1 compiler;
 
-struct2 RegisterSpec {
-    let2 name: compiler::Text;
-    let2 offset: usize;
-    let2 writable: bool;
+struct1 RegisterSpec {
+    let1 name: compiler::Text;
+    let1 offset: usize;
+    let1 writable: bool;
 
-    fn2 init(
+    fn1 init(
         name: compiler::Text,
         offset: usize,
         writable: bool,
@@ -2248,7 +2248,7 @@ struct2 RegisterSpec {
     }
 }
 
-fn2 emit_register(spec: RegisterSpec) -> void {
+fn1 emit_register(spec: RegisterSpec) -> void {
     if (spec.writable) {
         compiler::emit_huc_module(
             compiler::format(
@@ -2316,7 +2316,7 @@ Usefulness:
 - future structured generation can replace raw formatting without changing the
   two-stage architecture.
 
-`compiler::Text`, `compiler::format`, and user-defined `struct2 init` details
+`compiler::Text`, `compiler::format`, and user-defined `struct1 init` details
 belong to the future compiler-library proposal; this case study records the
 intended experience, not bootstrap API commitments beyond text generation.
 
@@ -2332,9 +2332,9 @@ import std.io as io;
 import std.net as net;
 import std.result as result;
 
-let2 protocol_has_checksum: bool = true;
+let1 protocol_has_checksum: bool = true;
 
-struct1 WireInteger(Bits: usize) {
+struct WireInteger<Bits: usize> {
     if1 (Bits == 8) {
         let value: u8;
         fn init(value: u8) : value(value) {}
@@ -2436,7 +2436,7 @@ accidentally clash with or refer to existing names.
 ```huc
 module case_studies.commands;
 
-import2 compiler;
+import1 compiler;
 import std.io as io;
 import std.text as text;
 
@@ -2458,7 +2458,7 @@ fn command_test(arguments: text::Text) -> i32 {
     return 0;
 }
 
-fn2 emit_dispatcher() -> void {
+fn1 emit_dispatcher() -> void {
     compiler::emit_huc_module(
         "fn dispatch(name: text::Text, "
         "mod arguments: text::Text) -> i32 {"
@@ -2493,7 +2493,7 @@ The predicate helpers are probable future compiler type queries.
 ```huc
 module case_studies.ecs;
 
-import2 compiler;
+import1 compiler;
 import std.collections as collections;
 import std.memory as memory;
 
@@ -2514,7 +2514,7 @@ struct Sprite {
     }
 }
 
-struct1 ComponentStore(T: auto) {
+struct ComponentStore<T: auto> {
     if1 (@compiler::type<T>().is_advanced()) {
         let mod values: collections::Vector<T>;
 
@@ -2564,24 +2564,24 @@ first implementation. It shows why HUC plans to provide stable type metadata:
 ## 13. Future compiler/reflection use cases
 
 The APIs in this section are proposals, not current language rules. They
-describe the capabilities required from the future `import2 compiler` design.
+describe the capabilities required from the future `import1 compiler` design.
 
 ### 13.1 Environment inspection
 
 ```huc
-import2 compiler;
+import1 compiler;
 
-fn2 report_environment() -> void {
-    let2 environment: compiler::Environment =
+fn1 report_environment() -> void {
+    let1 environment: compiler::Environment =
         compiler::current_environment();
 
     compiler::log(environment.target().triple());
     compiler::log(environment.language_revision());
 
-    let2 modules: auto = environment.modules();
-    let2 mod index: usize = 0;
+    let1 modules: auto = environment.modules();
+    let1 mod index: usize = 0;
     for1 (; index < modules.size(); index += 1) {
-        let2 module: compiler::Module = modules[index];
+        let1 module: compiler::Module = modules[index];
         compiler::log(module.qualified_name());
     }
 }
@@ -2601,16 +2601,16 @@ Required design properties:
 ### 13.2 Serializer generation
 
 ```huc
-import2 compiler;
+import1 compiler;
 
-fn2 generate_serializer(type: compiler::Type) -> void {
-    let2 record: compiler::Class = type.as_class();
-    let2 mod body: compiler::Code = compiler::Code();
+fn1 generate_serializer(type: compiler::Type) -> void {
+    let1 record: compiler::Class = type.as_class();
+    let1 mod body: compiler::Code = compiler::Code();
 
-    let2 fields: auto = record.fields();
-    let2 mod index: usize = 0;
+    let1 fields: auto = record.fields();
+    let1 mod index: usize = 0;
     for1 (; index < fields.size(); index += 1) {
-        let2 field: compiler::Field = fields[index];
+        let1 field: compiler::Field = fields[index];
         if1 (!field.attributes().contains("skip")) {
             body.append(
                 compiler::statement(
@@ -2705,9 +2705,9 @@ Possible tools include:
 | Fixed destructive relocation | C++ move constructors and move assignment | Bitwise non-failing transfer of inline Advanced values that ends the source lifetime, with no user hook or value-category overload |
 | Layered `mod` | const qualifiers, mutable references, capabilities | Slot and pointee permissions remain visually separate |
 | `if1` in a type body | conditional members, macros, template/static conditionals | Selected declarations become normal HUC0; discarded body is not parsed |
-| `fn1` partial specialization | overloads, traits, macros | Same primary/partial/full mechanism as structure and variable families |
-| `let1` | variable templates, macros, generated locals | Selected leaf is a complete ordinary `let`, including type and mutation permissions |
-| `@fn1(...)` | constant evaluation or interpreter call | Same family either residualizes or must fully execute |
+| generic `fn` partial specialization | overloads, traits, macros | Same primary/partial/full mechanism as structure and variable families |
+| generic `let` | variable templates, macros, generated locals | Selected leaf is a complete ordinary `let`, including type and mutation permissions |
+| `@family<T>(...)` | constant evaluation or interpreter call | Same family either residualizes or must fully execute |
 | Text generation | macros, mixins, compiler plugins | Helpers inherit the generation mode and site; inserted HUC0 is parsed and checked |
 | Printable HUC0 boundary | internal compiler IR or generated source | Second public translator parses the exact intermediate source |
 | Future semantic reflection | procedural macros, plugins, build generators | Stable compiler-only semantic snapshots plus explicit emission |

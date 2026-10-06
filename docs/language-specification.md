@@ -24,8 +24,8 @@ regular language model.
 
 HUC has two defining mechanisms:
 
-1. A numbered phase model unifies ordinary runtime code, generic
-   specialization, compile-time evaluation, reflection, and code generation.
+1. One staging model combines generic angle headers, suffix-1 compiler
+   declarations and control flow, and `@` for compile-time execution.
 2. A small value model copies Basic values and transfers Advanced values,
    with deterministic cleanup and unchecked observation through `T*`.
 
@@ -75,8 +75,8 @@ HUC 0.1 makes these promises:
 - Function arguments and subexpressions evaluate from left to right.
 - An Advanced transfer is fixed, compiler-defined destructive relocation,
   never an overload-selected user call.
-- Compilation removes every phase-1 and phase-2 construct before backend code
-  generation.
+- Compilation resolves generic families and removes compiler-only constructs
+  before backend code generation.
 - Selected HUC1 syntax is residualized structurally. Generated text is parsed
   and checked when HUC1 inserts it; printed HUC0 is checked again by the
   independent HUC0 translator before any C is emitted.
@@ -172,7 +172,7 @@ signature belong to the separate standard-library design.
 Runtime name resolution may refer to later top-level declarations in the
 translation unit. This does not make future generated declarations available
 to compiler execution. Ordinary `fn` bodies are parsed and prepared when
-encountered; `fn1` and `fn2` bodies remain deferred until requested. Pending
+encountered; generic `fn` and `fn1` bodies remain deferred until requested. Pending
 module output becomes available only at its forward insertion boundary
 (section 11). HUC0 runtime globals are
 restricted to drop-free Basic scalars and raw pointers. A fixed global requires
@@ -206,25 +206,27 @@ or the extent of a line comment is not a formatting-only change. The
 The following phase-related keyword families are indivisible:
 
 ```text
-fn fn1 fn2
-struct struct1 struct2
+fn fn1
+struct struct1
 if if1
 for for1
 while while1
-let let1 let2
-import import2
+let let1
+import import1
 ```
 
 The suffix is part of the keyword: `fn1` is not `fn` followed by the integer
-literal `1`. The unnumbered spelling is the runtime form; HUC does not spell it
-with a `0` suffix. HUC 0.1 supports only the listed forms. A spelling such as
-`fn0`, `fn3`, `if2`, or `import1` in the corresponding grammatical position
+literal `1`. Unnumbered declarations are runtime-capable; an angle-bracket
+header makes `fn`, `struct`, or `let` a generic family. Suffix `1` marks
+compiler-stage declarations or control flow, not genericity. HUC 0.1 supports
+only the listed forms. A spelling such as `fn0`, `fn2`, `struct2`, `let2`,
+`if2`, or `import2` in the corresponding grammatical position
 receives an “unsupported phase class” diagnostic.
 
-There is no `var` keyword. Runtime variables use `let`, phase-1 variable
-families use `let1`, and compiler-only variables use `let2`. The numbers
-classify availability; they do not request an arbitrary number of compiler
-passes. Section 9 defines their exact meaning.
+There is no `var` keyword. Runtime variables use `let name: Type`; variable
+families use `let name<T: auto> { ... }`; compiler-only variables use `let1`.
+There are no compatibility aliases for the former numbered generic declarations
+or suffix-2 compiler declarations. Section 9 defines the staging rules.
 
 `in` is an ordinary identifier, not a reserved keyword. Neither `for` nor
 `for1` has a range-based form; both use three-part, semicolon-separated headers.
@@ -1446,8 +1448,8 @@ Merely passing this check is not a lifetime guarantee for pointer arguments.
 #### Staging and unchecked boundaries
 
 The check applies to each runtime function after its body has been prepared,
-including each residual `fn1` specialization. `if1`, `for1`, and `while1` are
-resolved first and are not branches. A `fn1` body can therefore be valid for
+including each residual generic `fn` specialization. `if1`, `for1`, and `while1` are
+resolved first and are not branches. A generic `fn` body can therefore be valid for
 one specialization and ill-formed for another. For example, a body that
 passes the same argument by value twice is valid when `T` is Basic and
 ill-formed when `T` is Advanced. The diagnostic names the specialization and
@@ -1502,16 +1504,16 @@ inference is allowed. HUC 0.1 does not also accept an omitted `: Type`, the
 old type-first declaration form, or a destructuring declaration. Runtime
 parameters, fields, and globals require explicit types.
 
-Compiler-only locals use `let2`:
+Compiler-only locals use `let1`:
 
 ```huc
-let2 element: compiler::Type =
+let1 element: compiler::Type =
     @compiler::find_type("app.Widget"); // future reflection API
-let2 mod generated: usize = 0;
+let1 mod generated: usize = 0;
 ```
 
-`let2` never creates runtime storage. `mod` before its name permits reassignment
-during translation. `let1` instead names a specialization family whose
+`let1` never creates runtime storage. `mod` before its name permits reassignment
+during translation. A generic `let` instead names a specialization family whose
 selected body must residualize one ordinary runtime `let`. The
 `compiler::Type` example illustrates the separately designed future reflection
 library; the bootstrap compiler module initially exposes only text generation.
@@ -1519,7 +1521,7 @@ library; the bootstrap compiler module initially exposes only text generation.
 ### 7.3 Conditions and loops
 
 `if`, `for`, and `while` are ordinary control flow in a runtime function.
-Their phase-1 forms are specified in section 9.
+Their compile-time forms are specified in section 9.
 
 Conditions and loop headers require parentheses. Every `if`, `else`, `while`,
 and `for` body requires braces, even for one statement or an empty body.
@@ -1644,20 +1646,21 @@ two translators.
 | Class | Representative spellings | Meaning |
 |---|---|---|
 | Runtime | `fn`, `struct`, `let`, `if` | Concrete code or storage that survives in HUC0 |
-| Phase 1 | `fn1`, `struct1`, `let1`, `if1` | A family or operation that prepares concrete code |
-| Phase 2 | `fn2`, `struct2`, `let2`, `import2` | Compiler-only declarations, values, and imports that never survive in HUC0 |
+| Generic families | `fn f<T: auto>`, `struct S<T: auto>`, `let v<T: auto>` | Parameterized declarations selected and prepared on request |
+| Compiler-only declarations | `fn1`, `struct1`, `let1`, `import1` | Functions, types, storage, and imports that never survive in HUC0 |
+| Compiler-stage control | `if1`, `for1`, `while1` | Select or repeat code during preparation |
 
-Phase 1 produces runtime code; it does not add a third kind of runtime
-storage. A normal request for a phase-1 family produces a concrete runtime
-declaration. A forced call to a phase-1 function may instead run completely
-during compilation. Phase-2 declarations exist only during compilation and
+Genericity and compiler-only availability are separate. A normal request for
+a generic family produces a concrete runtime declaration. A forced call to a
+generic function may instead run completely during compilation. Compiler-only
+declarations exist only during compilation and
 can never become runtime symbols. Code preparation has two generation modes:
 **program mode** prepares code for HUC0, and **evaluation mode** prepares a
 private body for the compiler to execute. Both modes run during compilation;
 section 11 defines their insertion and emission rules.
 
 Every successfully prepared translation unit must be independently readable HUC0.
-It contains no numbered declaration or control-flow keyword, `import2`, `@`,
+It contains no numbered declaration or control-flow keyword, `import1`, `@`,
 unresolved family binder, specialization request, compiler-only value, or
 compiler metadata handle. Both import forms are resolved away. The HUC1
 translator writes one flattened file with namespace sections before the
@@ -1668,26 +1671,25 @@ Built-in casts such as `as<T>` and `ptr_as<Target>`, type queries, and
 No nominal type or ordinary function application with phase arguments survives
 into HUC0.
 
-### 9.2 Uniform phase-1 families
+### 9.2 Uniform generic families
 
-`struct1`, `fn1`, and `let1` use one primary/partial/full specialization model.
-The binder list is always the first parenthesized list following the family
-name, including for `let1`.
-A `fn1` always has a separate runtime-parameter list after its phase header;
-write that list as `()` when it is empty.
+Generic `struct`, `fn`, and `let` declarations use one primary/partial/full
+specialization model. The primary's angle-bracket binder list follows the
+family name. A generic `fn` then has a separate parenthesized runtime-parameter
+list; write `()` when it is empty. Generic bodies remain deferred until selected.
 
 Primary families have binders and no angle pattern:
 
 ```huc
-struct1 Cell(T: auto) {
+struct Cell<T: auto> {
     let mod element: T;
 }
 
-fn1 convert(T: auto)(mod value: T) -> T {
+fn convert<T: auto>(mod value: T) -> T {
     return value;
 }
 
-let1 value(T: auto) {
+let value<T: auto> {
     let value: T = T();
 }
 ```
@@ -1696,36 +1698,43 @@ Partial specializations add an angle pattern and may add a pure compiler
 predicate:
 
 ```huc
-struct1 Cell(T: auto)<T*>(true) {
+struct Cell<T: auto><T*> {
     let mod element: T*;
 }
 
-fn1 convert(T: auto)<T*>(true)(value: T*) -> T* {
+fn convert<T: auto><T*>(value: T*) -> T* {
     return value;
 }
 
-let1 value(T: auto)<T*>(true) {
+let value<T: auto><T*> {
     let value: T* = null;
 }
 ```
 
-For a `fn1`, the runtime-parameter list is mandatory. Without a predicate, the
-first parenthesized list after the angle pattern is therefore the runtime list;
-with a predicate, the predicate list precedes it. A `struct1` has no runtime
-list. A `let1` places its name before the binder list, like the other families.
-
-Full specializations have an empty binder list and a concrete angle pattern:
+A specialization may append `if1 (predicate)` immediately before its body. For
+a function it follows the return type; for a structure or variable family it
+follows the angle pattern. An omitted predicate means `true`; no `(true)`
+placeholder is needed. Predicates are allowed only on specializations, not
+primary declarations. For example:
 
 ```huc
-struct1 Cell()<i32> {
+fn convert<T: auto><T*>(value: T*) -> T* if1 (is_basic<T>()) {
+    return value;
+}
+```
+
+Full specializations have a concrete angle pattern and no binder list:
+
+```huc
+struct Cell<i32> {
     let mod element: i32;
 }
 
-fn1 convert()<i32>(value: i32) -> i32 {
+fn convert<i32>(value: i32) -> i32 {
     return value;
 }
 
-let1 value()<i32> {
+let value<i32> {
     let value: i32 = 0;
 }
 ```
@@ -1738,6 +1747,16 @@ binds a compiler value of that type. Primary declarations may give trailing
 defaults. Partial and full specializations must not introduce defaults.
 Open-ended phase packs are reserved for a later revision.
 
+After a declaration name, `<` starts a generic header; `(` starts an ordinary
+function's parameters. In the first angle list, `Name:` starts a binder list;
+any other nonempty list is a full-specialization pattern. A second angle list
+after nonempty binders is a partial-specialization pattern. An empty `<>`
+declares a zero-binder primary, not a full specialization, and must not be
+followed by a pattern list. These choices require no type
+lookup. Parenthesize `<` and `>` comparisons in angle-list value expressions
+and defaults, for example `fn choose<Big: bool = (8 > 4)>() -> bool { ... }`.
+Nested generic type arguments still use ordinary angle brackets.
+
 Requests use angle brackets uniformly:
 
 ```huc
@@ -1748,26 +1767,30 @@ inspect(value<u64>);
 
 Angle tokens are lexed separately. Where `<` could instead begin a comparison,
 the parser preserves an ambiguous angle postfix until name resolution
-determines whether the left name denotes a phase-1 family. Square brackets do
-not request a phase-1 specialization.
+determines whether the left name denotes a generic family. Square brackets do
+not request a compile-time specialization.
 
-A normal `fn1` call may omit deducible phase arguments. Deduction unifies its
-runtime parameter types with the runtime argument types. Every non-deducible
-binder must be supplied explicitly. A `struct1` or `let1` request always
-supplies every non-defaulted binder in its angle list.
+A normal generic function call may omit deducible phase arguments. Deduction
+unifies its runtime parameter types with the runtime argument types. Every
+non-deducible binder must be supplied explicitly. A generic structure or
+variable request supplies every non-defaulted binder in its angle list.
 
 ### 9.3 Selection and residual declarations
 
-Each `struct1` and `let1` name has one primary family in a scope. Each `fn1`
-name also has one primary family in a scope in 0.1; ordinary runtime `fn`
-overloading remains a separate facility. The primary must precede its
+Each generic structure, variable, or function name has one primary family in
+a scope in 0.1; ordinary runtime `fn`
+overloading remains a separate facility. In one scope, a function name is
+either a non-generic overload set or one generic family, never both. Use a full
+specialization such as `fn convert<i32>(value: i32) -> i32 { ... }` for a
+family's concrete case, not a competing `fn convert(value: i32)` overload.
+The primary must precede its
 specializations, and a specialization must be declared in the primary's
 namespace in 0.1; this need not be a separately compiled source file.
 
-In 0.1, `struct1` families are module-scope declarations; `fn1` families may
-be declared at module scope or as type members; and `let1` families may be
+In 0.1, generic `struct` families are module-scope declarations; generic `fn` families may
+be declared at module scope or as type members; and generic `let` families may be
 declared at module, function, or nested-block scope but never as fields. Local
-`fn1` or `struct1` declarations and nested type families are deferred.
+generic `fn` or generic `struct` declarations and nested type families are deferred.
 
 For a concrete request, selection proceeds as follows:
 
@@ -1789,9 +1812,9 @@ access untracked external state.
 
 Only after selection does the translator parse and prepare the chosen body:
 
-- a `struct1` request produces one nominal concrete runtime `struct`;
-- a normal `fn1` request produces one concrete runtime `fn` and a call to it;
-- a `let1` request produces exactly one concrete runtime `let` as specified in
+- a generic `struct` request produces one nominal concrete runtime `struct`;
+- a normal generic `fn` request produces one concrete runtime `fn` and a call to it;
+- a generic `let` request produces exactly one concrete runtime `let` as specified in
   section 9.4.
 
 Concrete specializations keep their family's namespace and lexical lookup,
@@ -1805,12 +1828,12 @@ printer assigns deterministic concrete names where multiple
 specializations would otherwise collide and rewrites their requests to those
 names. No unresolved family request may remain in HUC0.
 
-For `fn1`, completing a specialization for compile-time evaluation does not
+For generic `fn`, completing a specialization for compile-time evaluation does not
 by itself require emitting its runtime definition. Only specializations needed
 by retained runtime code are written to HUC0; section 9.7 separates these two
 steps. Ordinary `fn` declarations are not subject to this demand-driven rule.
 
-Any phase-1 family may be requested through an ordinary import from another
+Any generic family may be requested through an ordinary import from another
 namespace. A runtime-needed concrete definition keeps the family's namespace;
 the printed request uses its canonical qualified name, with no preserved import
 or defining-module dependency barrier. Generated concrete names remain
@@ -1821,17 +1844,17 @@ specialization. It does not use C++ substitution failure, and a failure while
 parsing or checking the selected body is an ordinary diagnostic rather than a
 reason to try a less-specific candidate.
 
-### 9.4 `let1` variable families
+### 9.4 Generic variable families
 
-`let` always declares runtime storage. `let2` always declares a compiler-only
-value. `let1` does neither directly: it declares a variable family whose
-selected body must residualize one runtime variable.
+A non-generic `let` declares runtime storage. `let1` declares compiler-only
+storage. A `let name<...>` family declares neither directly: its selected body
+must produce one runtime variable.
 
-A `let1` header has no result type because the chosen specialization determines
-the complete runtime declaration:
+A generic variable header has no result type because the chosen specialization
+determines the complete runtime declaration:
 
 ```huc
-let1 counter(Writable: bool) {
+let counter<Writable: bool> {
     if1 (Writable) {
         let mod counter: i32 = 0;
     } else {
@@ -1843,12 +1866,12 @@ let1 counter(Writable: bool) {
 Every selected path must leave:
 
 1. exactly one ordinary, unnumbered `let`;
-2. whose source-level identifier is the `let1` family identifier;
+2. whose source-level identifier is the generic `let` family identifier;
 3. and no other residual runtime declaration or statement.
 
-Compiler-only setup, `let2`, and phase control are permitted in the selection
+Compiler-only setup, `let1`, and phase control are permitted in the selection
 body because they disappear. Text generation remains prohibited within a
-`let1` selection body in 0.1. Parsing generated text does not relax this
+generic `let` selection body in 0.1. Parsing generated text does not relax this
 separate restriction on variable families.
 
 Different specializations of one family may choose different value types,
@@ -1856,7 +1879,7 @@ initializers, inline values versus raw-pointer forms, pointee permissions,
 and slot mutability. The family name is not itself a runtime variable; only a concrete
 request such as `counter<true>` denotes one.
 
-`let1` is permitted at module scope and at function or nested-block scope. It
+Generic `let` is permitted at module scope and at function or nested-block scope. It
 is not permitted as an instance field. Every statically requested
 specialization is emitted at the family declaration site. Consequently, a
 function-local specialization initializes on every runtime execution that
@@ -1864,10 +1887,10 @@ reaches that site; preparation does not add a lazy runtime initialization flag.
 
 ### 9.5 Deferred bodies
 
-Family bodies, `fn2` bodies, and phase-control bodies are deferred source
+Family bodies, `fn1` bodies, and phase-control bodies are deferred source
 spans. Registration parses their headers, signatures, patterns, and predicates,
 but does not lex or parse the associated braced body merely to discover its
-end. Registering a `fn1` or `fn2` is not a request to prepare or execute it.
+end. Registering a generic `fn` or `fn1` is not a request to prepare or execute it.
 
 A dedicated delimiter scanner locates the matching outer `}` while recognizing
 only what is necessary to avoid false brace matches:
@@ -1880,7 +1903,7 @@ only what is necessary to avoid false brace matches:
 The following bodies remain opaque until selected:
 
 - every unchosen primary, partial, or full family body;
-- every uncalled `fn2` body, including compiler methods and constructors;
+- every uncalled `fn1` body, including compiler methods and constructors;
 - the unselected branch of an `if1`;
 - the body of a zero-iteration `for1` or `while1`.
 
@@ -1894,21 +1917,21 @@ A phase loop whose body executes at least once may parse that body once and
 reuse the parsed form for later iterations. This implementation choice does not
 change insertion order or observable compiler effects.
 
-On a `fn1` request, parse and prepare the selected specialization in the
+On a generic `fn` request, parse and prepare the selected specialization in the
 requested generation mode. For a runtime request, execute its compiler-stage
 operations but retain its ordinary runtime statements. For a compile-time
-request, execute the resulting private body. On a `fn2` call, parse its body
+request, execute the resulting private body. On a `fn1` call, parse its body
 if needed, check it, and execute it in the inherited generation context.
 Reusing parsed syntax does not skip later calls or their generation effects.
 
-An ordinary `fn` is different: parse and prepare its body in program mode
+An ordinary, non-generic `fn` is different: parse and prepare its body in program mode
 when its declaration is encountered in the active source stream, even if it
 is never called. A method is encountered when its containing type body is
 processed. A `fn` inside an unselected phase body is still skipped with that
 body. Runtime forward-name checks may wait for declaration collection, but
 the function's compiler-stage work is not postponed until a runtime call.
 
-### 9.6 Phase-1 control flow and insertion contexts
+### 9.6 Compile-time control flow and insertion contexts
 
 `if1`, `for1`, and `while1` execute while HUC1 prepares code. They are legal at all
 of these scopes:
@@ -1927,12 +1950,12 @@ diagnostic when the selected body is parsed. Phase control does not implicitly
 move output one scope outward.
 
 A selected module/type body may interleave residual declarations or members
-with compiler-only `let2`, expression, and control statements. Such statements
+with compiler-only `let1`, expression, and control statements. Such statements
 must use only compiler-available values; they execute during preparation and
 erase. Function and block bodies use the mixed HUC1 statement grammar.
 
 ```huc
-let2 EnableTracing: bool = true;
+let1 EnableTracing: bool = true;
 
 if1 (EnableTracing) {
     fn trace_enabled() -> bool {
@@ -1960,7 +1983,7 @@ parsed. A `for1` uses `for1 (initialization; condition; step)`: initialization
 executes once, the condition is checked before each iteration, and the step
 executes after each completed iteration. All three clauses use compiler-only
 values. Like ordinary `for`, each clause is an optional expression; an omitted
-condition means `true`. Declare compiler-only loop variables with `let2` before
+condition means `true`. Declare compiler-only loop variables with `let1` before
 the loop.
 
 A `while1` reevaluates a compiler `bool`. Both phase loops prepare and insert
@@ -1970,7 +1993,7 @@ limits. A loop with zero iterations leaves its body opaque.
 For example:
 
 ```huc
-let2 mod index: usize = 0;
+let1 mod index: usize = 0;
 for1 (; index < 3; index += 1) {
     io::println(index);
 }
@@ -1979,16 +2002,17 @@ for1 (; index < 3; index += 1) {
 The index and loop control disappear during preparation. The output contains
 three calls with the arguments `0`, `1`, and `2`, not a runtime loop.
 
-There are no `if2`, `for2`, or `while2` keywords. Inside a `fn2`, predicate, or
+There are no `if2`, `for2`, or `while2` keywords. Inside a `fn1`, predicate, or
 existing compile-time evaluation island, ordinary `if`, `for`, and `while`
 already execute in the compiler environment.
 
-### 9.7 `fn1`: residual and forced call modes
+### 9.7 Generic functions: residual and forced call modes
 
-A `fn1` always separates its phase binder list from its runtime parameter list:
+A generic `fn` has angle-bracket phase binders followed by parenthesized runtime
+parameters:
 
 ```huc
-fn1 choose(T: auto, Greater: bool = true)(mod left: T, mod right: T) -> T {
+fn choose<T: auto, Greater: bool = true>(mod left: T, mod right: T) -> T {
     if1 (Greater) {
         if (left > right) {
             return left;
@@ -2012,7 +2036,7 @@ let selected: i32 = choose<i32, true>(runtime_left, runtime_right);
 The phase arguments and concrete runtime argument types determine the
 specialization. In program mode, ordinary parameters are typed symbolic
 expressions and remain runtime inputs. Ordinary `if`, `for`, and `while` that
-depend on them remain in the generated `fn`. Phase-1 control uses only compiler
+depend on them remain in the generated `fn`. compile-time control uses only compiler
 values and is resolved while the function body is prepared.
 
 Prefixing the call with `@` instead requires complete compile-time evaluation:
@@ -2031,7 +2055,7 @@ no fallback to runtime execution.
 
 Preparing a body and emitting HUC0 are separate:
 
-- A `fn1` used only in evaluation mode has its body prepared and checked, but
+- A generic `fn` used only in evaluation mode has its body prepared and checked, but
   its runtime definition is not emitted merely for that call. Local
   `emit_huc` output is part of that private body; `emit_huc_module` introduces
   no declarations in evaluation mode.
@@ -2050,54 +2074,60 @@ Preparing a body and emitting HUC0 are separate:
 Ordinary `fn` declarations encountered in the translation unit are prepared
 immediately in program mode and pass through into HUC0, even if they are called
 only at compile time or never called. Calling one
-from `fn2` under section 12.1 does not make its emission demand-driven. Later
+from `fn1` under section 12.1 does not make its emission demand-driven. Later
 optimization may remove unused runtime functions.
 
 Local generation belongs to the function body being prepared. Evaluating a
-`fn` or `fn1` does not insert that function's generated statements into its
+`fn`, whether generic or not, does not insert its generated statements into its
 caller. Module output has a separate insertion anchor; section 11 explains
-how a runtime specialization request supplies that anchor and how `fn2`
+how a runtime specialization request supplies that anchor and how `fn1`
 functions inherit the active context.
 
-### 9.8 Phase-2 declarations
+### 9.8 Compiler-only declarations
 
-`fn2`, `struct2`, and `let2` are meta-only:
+`fn1`, `struct1`, and `let1` are meta-only:
 
-- `fn2` declares a compiler function and has one compiler-parameter list;
-- `struct2` declares a compiler-only data type;
-- `let2` declares compiler-only storage.
+- `fn1` declares a compiler function and has one compiler-parameter list;
+- `struct1` declares a compiler-only data type;
+- `let1` declares compiler-only storage.
 
-Compiler-only variables are always spelled `let2`, including locals in `fn2`
-and fields in `struct2`. Function parameters inherit the phase of their
-enclosing function and do not begin with `let2`.
+Compiler-only status is explicit, not inferred. A `fn1` using only integers is
+still never emitted as a runtime function. A `struct1` containing only scalar
+fields is still forbidden in runtime storage. In 0.1 these numbered declarations
+do not take generic headers; the rename does not add compiler-function or
+compiler-type families.
+
+Compiler-only variables are always spelled `let1`, including locals in `fn1`
+and fields in `struct1`. Function parameters inherit the phase of their
+enclosing function and do not begin with `let1`.
 
 ```huc
-struct2 BuildOptions {
-    let2 tracing: bool;
-    let2 inline_limit: usize;
+struct1 BuildOptions {
+    let1 tracing: bool;
+    let1 inline_limit: usize;
 }
 
-fn2 add(left: i32, right: i32) -> i32 {
-    let2 result: i32 = left + right;
+fn1 add(left: i32, right: i32) -> i32 {
+    let1 result: i32 = left + right;
     return result;
 }
 
-let2 answer: i32 = @add(20, 22);
+let1 answer: i32 = @add(20, 22);
 ```
 
-A phase-2 type cannot appear in runtime storage, a runtime structure field, a
-runtime function ABI, or emitted HUC0. A phase-2 value may be used by phase
+A compiler-only type cannot appear in runtime storage, a runtime structure field, a
+runtime function ABI, or emitted HUC0. A compiler-only value may be used by phase
 control, predicates, family selection, forced evaluation, reflection, and
 generation. The phase checker must reject every path by which it could leak
 into runtime code.
 
-A `fn2` may also call an ordinary `fn` using the restricted scalar evaluator
+A `fn1` may also call an ordinary `fn` using the restricted scalar evaluator
 in section 12.1. Such a nested call needs no extra `@` or declaration marker.
 The ordinary function remains runtime-capable and keeps its normal `let`
 locals; the evaluator supplies storage for them during the compile-time call.
-A `fn2` generator inherits its caller's generation mode and insertion context;
-the fact that `fn2` executes at compile time does not itself select evaluation
-mode. A nested value-evaluation call to `fn` or `fn1` instead prepares that
+A `fn1` generator inherits its caller's generation mode and insertion context;
+the fact that `fn1` executes at compile time does not itself select evaluation
+mode. A nested value-evaluation call to a runtime-capable `fn` instead prepares that
 callee's own evaluation-mode body, then restores the helper's context on return.
 
 ### 9.9 The `@` evaluation-island operator
@@ -2110,16 +2140,16 @@ The following illustrates the spelling when a compiler query API is available;
 the query itself belongs to the future reflection library:
 
 ```huc
-import2 compiler;
+import1 compiler;
 
-let2 function: compiler::Function =
+let1 function: compiler::Function =
     @compiler::find_function("render");
 ```
 
 The declared type above is `compiler::Function`, not `@Function` and not
 `@compiler::Function`. A compiler call made from otherwise runtime or module
 source must use `@` at the point execution enters the compiler. Within a
-`fn2`, a specialization predicate, phase-control evaluation, or an already
+`fn1`, a specialization predicate, phase-control evaluation, or an already
 active `@` island, nested compiler calls execute normally and do not repeat
 `@`.
 
@@ -2127,7 +2157,7 @@ An evaluation island must not read a runtime-only value. Its result may be used
 by compiler code without materialization. If it flows into residual runtime
 code, it must have an exact HUC0 representation, such as a scalar, boolean,
 floating value, or string literal accepted at that location. Compiler handles
-and phase-2 structures cannot be materialized as runtime values.
+and compiler-only structures cannot be materialized as runtime values.
 
 A standalone phase-expression item has this form:
 
@@ -2137,16 +2167,16 @@ A standalone phase-expression item has this form:
 
 It is legal at module, type-body, function, and nested-block scope. The
 expression must completely evaluate in the compiler and return `void`. The
-item itself is erased. A `fn2` helper or generation intrinsic inherits the
+item itself is erased. A `fn1` helper or generation intrinsic inherits the
 current generation mode, even when entered through `@`. Its output uses the
-forward-only insertion rules in section 11. A forced `fn` or `fn1` call prepares
+forward-only insertion rules in section 11. A forced runtime-capable `fn` call prepares
 its own evaluation-mode body instead. Thus `@generator();` can build program
 code without creating a runtime declaration for the generator itself.
 
 `@this` is reserved for a future contextual-reflection proposal. Bootstrap
 HUC1 diagnoses it rather than treating runtime `this` as compiler metadata.
 
-A normal `fn1` call requests a residual specialization. Applying `@` to that
+A normal generic `fn` call requests a residual specialization. Applying `@` to that
 call selects the same family and specialization rules but requires the selected
 function to execute completely in the compiler.
 
@@ -2156,25 +2186,25 @@ HUC1 has two import forms:
 
 ```huc
 import app.data;
-import2 compiler;
+import1 compiler;
 ```
 
-`import` exposes runtime declarations and phase-1 families and processes the
-imported source in the same translation unit under section 2.1. `import2`
+`import` exposes runtime declarations and generic families and processes the
+imported source in the same translation unit under section 2.1. `import1`
 exposes compiler-only declarations; it does not create a runtime dependency.
 The compiler-supplied `compiler` namespace is bound this way without reading
 a user source file. Both import forms disappear from flattened HUC0; retained
 declarations use namespace sections and canonical references instead.
-There is no `import1` in 0.1. Import cycles are rejected with the complete cycle
-path.
+These are the two import forms in 0.1. Import cycles are rejected with the
+complete cycle path.
 
 Residualization removes the phase mechanism itself:
 
 - unnumbered HUC0 syntax passes through after any selected nested phase
   constructs have been processed;
-- concrete `struct1`, normal `fn1`, and `let1` requests become unnumbered
-  declarations and references;
-- phase-1 family declarations, phase control, phase-2 declarations, `import2`,
+- generic structure, function, and variable requests become concrete declarations
+  and references;
+- generic family declarations, phase control, compiler-only declarations, `import1`,
   and evaluation-island calls disappear;
 - a forced materializable result becomes ordinary HUC0 syntax;
 - generated code parsed and checked under section 11 is printed at its
@@ -2191,17 +2221,17 @@ A concrete family specialization is identified by:
 
 - the primary family's stable declaration identity and definition hash;
 - serialized explicit and deduced phase arguments;
-- for a normal `fn1` call, its concrete runtime argument types;
+- for a normal generic `fn` call, its concrete runtime argument types;
 - the target ABI and enabled language features;
 - hashes of imported or reflected declarations on which selection or preparation
   depended.
 
 Runtime argument values are not part of a normal function-specialization key.
-They are concrete evaluator inputs only for a forced `@fn1` call. Equivalent
+They are concrete evaluator inputs only for a forced generic call using `@`. Equivalent
 requests within one program produce one concrete specialization.
 
 The translator processes one translation unit in deterministic source and
-first-import order. A program-mode `fn1` request reserves its insertion anchor
+first-import order. A program-mode generic `fn` request reserves its insertion anchor
 and prepares the selected body, discovering nested requests as needed. A
 worklist may implement this, but must preserve that observable ordering.
 Compile-time-only requests do not reserve a runtime insertion anchor. The
@@ -2212,14 +2242,14 @@ type identity, while unqualified names still use the family's lexical context.
 
 Preparation caches distinguish program mode from evaluation mode. They retain
 the checked body, generation origins, and, in program mode, ordered module
-output. Each ordinary function definition or concrete `fn1` specialization in
+output. Each ordinary function definition or concrete generic `fn` specialization in
 a translation unit publishes its program-mode output once. Repeated runtime
 uses reference that definition; they do not replay generation. Different
 specializations and distinct generation calls within one preparation remain
 distinct requests; only identical resulting module declarations are shared
 (section 11.3).
 
-An effectful `fn2` helper executes for each actual invocation while its caller
+An effectful `fn1` helper executes for each actual invocation while its caller
 is being prepared. It inherits that caller's mode and insertion context. A
 cached return value alone cannot replace its insertion effects. Evaluation-mode
 module calls evaluate their arguments but emit nothing, introduce no names, and
@@ -2262,16 +2292,16 @@ unfinished public compiler object model.
 The implementation supplies a compiler-only module:
 
 ```huc
-import2 compiler;
+import1 compiler;
 ```
 
 Its types and functions are ordinary qualified HUC names. Phase information
-comes from `import2`, `let2`, `fn2`, and `struct2`; `@` is never used as a type
+comes from `import1`, `let1`, `fn1`, and `struct1`; `@` is never used as a type
 marker.
 
 The module's declarations come from a versioned, inspectable generated
 interface unit loaded before user HUC1 modules, analogous to an always-included
-header. The explicit `import2 compiler` still binds its namespace and makes the
+header. The explicit `import1 compiler` still binds its namespace and makes the
 phase dependency visible. The bootstrap interface declares only the two
 text-generation operations and `compiler::emitting()`; the object-model design
 remains separate.
@@ -2353,17 +2383,17 @@ are two **generation modes**:
 
 Both modes run during compilation. They do not describe when runtime code
 executes. Retained modules, types, ordinary `fn` definitions, and runtime-needed
-`fn1` specializations are prepared in program mode. A value-evaluation call to
-`fn` or `fn1` prepares that callee in evaluation mode, then executes its checked
-body. No runtime function body or module output is published merely for that
+generic `fn` specializations are prepared in program mode. A value-evaluation call to
+any runtime-capable `fn` prepares that callee in evaluation mode, then executes
+its checked body. No runtime function body or module output is published merely for that
 evaluation request. An ordinary `fn` may independently need both preparations
 because its runtime definition remains in HUC0 under section 9.7.
 
-A `fn2` generator inherits the current mode; it does not select evaluation mode
+A `fn1` generator inherits the current mode; it does not select evaluation mode
 merely by being compiler-only. In particular, `@loopForward(...);` inside a
 function being prepared for HUC0 uses program mode. The same helper invoked
 while preparing a private evaluation body uses evaluation mode. Nested helpers
-inherit the context, but evaluating another `fn` or `fn1` opens a separate
+inherit the context, but evaluating a runtime-capable `fn` opens a separate
 context for that callee's body.
 
 #### Querying the mode
@@ -2371,8 +2401,8 @@ context for that callee's body.
 Besides the two operations in section 11.2, the `compiler` module provides
 one query, `compiler::emitting()`. It returns a compiler `bool`: `true` while
 the current body is being prepared in program mode, and `false` in evaluation
-mode. The value is fixed for one preparation. A `fn2` helper inherits it along
-with the mode; a `fn` or `fn1` called for evaluation from that body is
+mode. The value is fixed for one preparation. A `fn1` helper inherits it along
+with the mode; a runtime-capable `fn` called for evaluation from that body is
 prepared in evaluation mode and sees `false`. Specialization predicates must
 not call the query (section 9.3), so selection never depends on the mode.
 
@@ -2380,11 +2410,11 @@ Phase control resolves the query before either branch is parsed, so one
 definition can take a different path in each mode:
 
 ```huc
-fn2 define_square() -> void {
+fn1 define_square() -> void {
     compiler::emit_huc_module("fn square(x: i32) -> i32 { return x * x; }");
 }
 
-fn1 area(Scale: i32)(side: i32) -> i32 {
+fn area<Scale: i32>(side: i32) -> i32 {
     if1 (compiler::emitting()) {
         @define_square();
         return Scale * square(side);
@@ -2417,11 +2447,11 @@ A **generation site** is the source position and scope being prepared. An
 A **module insertion anchor** is the top-level declaration or module item
 whose completion releases queued module output. Keep the anchor separate from
 the output's namespace: a request in `app` can queue declarations named in
-`library` after an `app` function. A `fn2` inherits the active generation site,
+`library` after an `app` function. A `fn1` inherits the active generation site,
 namespace, and anchor, not the location of its own definition.
 
 From otherwise runtime or module source, use `@` to enter compiler execution.
-Calls inside a `fn2`, phase-control evaluation, or an active compiler call do
+Calls inside a `fn1`, phase-control evaluation, or an active compiler call do
 not repeat `@`. Predicates remain pure and cannot call either operation, even
 when module output would be suppressed in evaluation mode.
 
@@ -2456,13 +2486,13 @@ generation site's namespace, after its module insertion anchor:
 - An ordinary `fn` in the active source is prepared when encountered. Its
   anchor is its enclosing top-level declaration, even if the function is never
   called. For a method in an ordinary type, this is the containing top-level type.
-- A first runtime request for `fn1` inherits the anchor of the source being
+- A first runtime request for generic `fn` inherits the anchor of the source being
   prepared. If `main` requests `A`, which requests `B`, their queued module
   declarations follow `main`, not the family declarations or a private `B`
   preparation. Preparing nested functions does not release this queue early.
 - A request made while preparing a concrete type uses the top-level declaration
   whose preparation originally requested that type; registration alone does
-  not execute a deferred body. Methods reached inside a requested `struct1`
+  not execute a deferred body. Methods reached inside a requested generic `struct`
   keep that inherited anchor rather than opening an earlier type-site boundary.
 - A standalone module item uses the boundary immediately after that item.
 
@@ -2493,7 +2523,7 @@ prepared source.
 ### 11.3 Inherited sites and function-owned output
 
 ```huc
-fn2 declare_local_counter() -> void {
+fn1 declare_local_counter() -> void {
     compiler::emit_huc("let mod generated_counter: i32 = 0;");
 }
 
@@ -2505,11 +2535,11 @@ fn main() -> i32 {
 ```
 
 The declaration enters `main`, not the definition of `declare_local_counter`.
-If that helper calls another `fn2`, the nested helper inherits the same mode
+If that helper calls another `fn1`, the nested helper inherits the same mode
 and insertion point. An imported helper uses the active requesting context,
 not its own defining module.
 
-A generator invoked while preparing a `fn` or concrete `fn1` body writes
+A generator invoked while preparing a non-generic or specialized `fn` body writes
 local output into that body. Executing the prepared function, whether at
 runtime or in the evaluator, does not replay generation or inject its body into
 the caller. Local generated code must not be skipped during evaluation; doing
@@ -2517,19 +2547,19 @@ so could change the computed result.
 
 A definition that is both emitted and evaluated is prepared once in each mode,
 and each preparation runs its generators. As with macros, a generator that
-reads or changes mutable `let2` state can therefore produce different emitted
+reads or changes mutable `let1` state can therefore produce different emitted
 and evaluated bodies. A generator whose output depends only on its arguments
 and on `compiler::emitting()` gives predictable results.
 
 For each translation unit, publish the program-mode output of one ordinary
-function definition or concrete `fn1` specialization once. Repeated runtime
+function definition or concrete generic `fn` specialization once. Repeated runtime
 uses reuse that definition and its ordered module output. An evaluation-mode
 preparation does not consume this opportunity; later program-mode demand must
 still produce the required output.
 
 This rule does not discard the second `emit_huc_module` operation within a
 preparation, later phase-loop iterations, different specializations, or distinct
-explicit `fn2` invocations. All such requests keep their normal order.
+explicit `fn1` invocations. All such requests keep their normal order.
 Generated output attached to a retained type or standalone module item likewise
 belongs to that item's preparation, not to a process-global "already emitted"
 flag.
@@ -2546,7 +2576,7 @@ error, reported with both origins.
 
 ### 11.4 Parsing, diagnostics, and source locations
 
-Generated text must be HUC0 syntax: no numbered constructs, `import2`, `@`,
+Generated text must be HUC0 syntax: no numbered constructs, `import1`, `@`,
 compiler handles, or unresolved phase-family requests. HUC1 lexes and parses
 inserted text, resolves its names and types with surrounding source, and applies
 the same runtime permission and lifetime checks. Generated loop headers and
@@ -2611,17 +2641,17 @@ VM, or use another equivalent technique.
 Compile-time values have HUC value semantics. Raw addresses into the compiler
 process are not materializable and must not be used as persistent cache keys.
 
-A `fn2` may call `fn1` in forced-evaluation mode. A `fn1` specialization may
-call `fn2` for metadata computation. Ordinary `fn` calls are also allowed in
+A `fn1` may call generic `fn` in forced-evaluation mode. A generic `fn` specialization may
+call `fn1` for metadata computation. Ordinary `fn` calls are also allowed in
 compiler execution under the following initial restrictions. These restrictions
 apply to ordinary-function evaluation, not to the existing compiler-only types
-and operations of `fn2`.
+and operations of `fn1`.
 
 ### 12.1 Ordinary functions in compiler execution
 
 The evaluator may call an ordinary `fn` whose HUC definition is available.
 Arguments must be compiler-available values; it cannot read a runtime value
-merely because that value's type is supported. Within `fn2` or another active
+merely because that value's type is supported. Within `fn1` or another active
 compiler evaluation, use normal call syntax. From otherwise runtime source,
 `@` requests complete evaluation under the same rules. No new function marker
 or alternative declaration is required.
@@ -2639,7 +2669,7 @@ Within that subset:
 - Local `let` variables and parameters may be changed where `mod` permits it.
   Ordinary conditions, loops, and recursive calls execute in the evaluator.
 - The restrictions follow the evaluated call chain, including ordinary and
-  concrete `fn1` callees; an unsupported operation cannot be hidden in a helper.
+  concrete generic `fn` callees; an unsupported operation cannot be hidden in a helper.
   A call through a declaration without an available HUC body is rejected.
   Arbitrary foreign calls and execution of native host code are not allowed;
   compiler intrinsics have only their separately specified translation-time
@@ -2647,7 +2677,7 @@ Within that subset:
 - Immutable scalar constants with compiler-known values may be read without
   accessing runtime storage. Reading or writing runtime storage, or accessing
   mutable shared compiler state, is rejected. Local working variables remain
-  mutable; this rule does not prohibit `let2 mod` elsewhere in compiler code.
+  mutable; this rule does not prohibit `let1 mod` elsewhere in compiler code.
 - There is no untracked access to files, environment variables, clocks,
   randomness, processes, networks, or other external state. This is broader
   than a ban on direct system calls. Future tracked compiler APIs remain a
@@ -2676,15 +2706,15 @@ fn count_digits(mod value: u32) -> u32 {
     return count;
 }
 
-fn2 field_width(value: u32) -> u32 {
+fn1 field_width(value: u32) -> u32 {
     return count_digits(value);
 }
 
-let2 width: u32 = @field_width(12345); // 5
+let1 width: u32 = @field_width(12345); // 5
 ```
 
 The evaluator uses the function's prepared, checked evaluation-mode body.
-Entering it from a `fn2` does not rerun its generation at the caller's insertion
+Entering it from a `fn1` does not rerun its generation at the caller's insertion
 point. Local generated HUC0 is parsed and checked before that body executes.
 The scalar restrictions apply to the prepared body, including its generated
 operations. Generator helpers may still use compiler text and other existing
@@ -2704,7 +2734,7 @@ not. Instruction and call-depth limits apply across the complete nested call
 chain, including recursive ordinary-function calls.
 
 Evaluating an ordinary function does not suppress its HUC0 definition. A
-`fn1` specialization used only at compile time need not emit a runtime
+generic `fn` specialization used only at compile time need not emit a runtime
 definition; a retained runtime reference requires program-mode preparation and
 its module output even if evaluation mode has already completed the same
 specialization. Section 9.7 defines these emission rules independently of
@@ -2724,8 +2754,8 @@ An `extern "C"` function may use:
 - `void` as a return type;
 - raw pointers, including pointer chains, to built-in types.
 
-It must not expose HUC Advanced values with `drop`, phase-1/2 types, or
-compiler metadata. Resource management across C boundaries is expressed by
+It must not expose HUC Advanced values with `drop`, unresolved generic types,
+compiler-only types, or compiler metadata. Resource management across C boundaries is expressed by
 documented functions returning or accepting raw pointers or scalar handles.
 Copying or passing a raw pointer does not itself establish or release any
 cleanup obligation.
@@ -2803,11 +2833,11 @@ The closest C++ equivalents are conceptual, not emitted C17 declarations:
 | `construct_at(p, value)` / `destruct_at(p)` | `std::construct_at` / `std::destroy_at`, with HUC initialization and cleanup rules |
 | `raw_storage<T, N>` | Typed, aligned storage with manually managed element lifetimes; no implicit element cleanup |
 | `size_of<T>()` / `align_of<T>()` | `sizeof(T)` / `alignof(T)` |
-| `fn1` | a subset spanning templates and `constexpr` |
-| `fn2` | roughly `consteval` plus meta facilities |
+| generic `fn` | a subset spanning templates and `constexpr` |
+| `fn1` | roughly `consteval` plus meta facilities |
 | `if1` | roughly `if constexpr` |
 | `if1 (compiler::emitting())` | roughly `if !consteval` |
-| `struct1` | type generation/monomorphization |
+| generic `struct` | type generation/monomorphization |
 | `compiler::emit_huc` | raw generated source or a build-time code generator |
 
 This comparison is explanatory, not definitional. In C++, `std::move` merely
@@ -2864,7 +2894,7 @@ fn consume(widget: Widget) -> void {
     inspect(&widget);
 }
 
-fn1 choose(T: auto, Greater: bool = true)(mod left: T, mod right: T) -> T {
+fn choose<T: auto, Greater: bool = true>(mod left: T, mod right: T) -> T {
     if1 (Greater) {
         if (left > right) {
             return left;

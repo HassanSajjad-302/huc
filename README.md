@@ -7,19 +7,25 @@ smaller alternative to C++, not a memory-safe alternative to Rust.
 
 Its two central ideas are:
 
-- A set of numbered keywords for runtime code, specialization, compile-time
-  execution, generics, reflection, and code generation: `fn`, `fn1`, `fn2`,
-  `if1`, `for1`, `struct1`, and `struct2`.
+- One staging model for generics, compile-time execution, reflection, and code
+  generation: `<...>` declares generic families; suffix `1` marks compiler-stage
+  declarations and control flow; `@` enters compiler execution.
 - A small value model: Basic values copy, Advanced values transfer, and raw
   `T*` pointers observe without extending lifetimes.
 
-Compiler-only `fn2` helpers can reuse ordinary `fn` functions under an initial
+Compiler-only `fn1` helpers can reuse ordinary `fn` functions under an initial
 [scalar evaluation subset](docs/language-specification.md#121-ordinary-functions-in-compiler-execution):
 booleans and integers, local mutation, bounded execution, and no runtime-memory
 access or external effects. Ordinary `fn` definitions still appear in HUC0;
-a `fn1` specialization used only at compile time is checked and evaluated
+a generic `fn` specialization used only at compile time is checked and evaluated
 without requiring a runtime definition. Ordinary `fn` bodies are prepared when
-encountered; `fn1` and `fn2` bodies stay deferred until requested or called.
+encountered; generic `fn` and `fn1` bodies stay deferred until requested or called.
+
+Runtime-capable declarations use `fn`, `struct`, and `let`, with angle-bracket
+parameters for generic families: `fn choose<T: auto>(left: T, right: T)`.
+Compiler-only declarations use `fn1`, `struct1`, `let1`, and `import1`.
+`if1`, `for1`, and `while1` decide which runtime code is prepared. Compiler-only
+functions and types remain compiler-only even when they use only scalar values.
 
 `module` provides a namespace. `import` processes source once as part of the
 same translation unit, preserving the imported code's lexical scope. Generics
@@ -193,7 +199,7 @@ temporary after the call. Use `(condition ? &a : &b)->size()` to observe instead
 
 HUC is for programmers who want the C/C++ cost model but do not want several
 overlapping languages hiding inside one compiler. Runtime code, specialization,
-and compile-time execution use one set of numbered keywords. Values manage
+and compile-time execution share one staging model. Values manage
 resources through `drop`; `T*` observes. Mutation is explicit. Transferring
 an Advanced value means one thing: destructive relocation. Expensive duplication happens only when the source
 says `copy`.
@@ -220,7 +226,7 @@ needed. This reflection model is not part of the first two compiler milestones.
 - [Default formatting guide](docs/formatting.md)
 - [Resource-transfer example](examples/ownership.huc0)
 - [Value-semantics example](examples/value-semantics.huc0)
-- [Numbered-phase example](examples/phases.huc1)
+- [Staging and generics example](examples/phases.huc1)
 
 ## Status
 

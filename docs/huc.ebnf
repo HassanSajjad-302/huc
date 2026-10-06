@@ -37,7 +37,7 @@ module-section-1 = module-decl, { import-decl-1 }, { module-item-1 } ;
 module-decl       = "module", qualified-module-name, ";" ;
 runtime-import    = "import", qualified-module-name,
                     [ "as", identifier ], ";" ;
-compiler-import   = "import2", qualified-module-name,
+compiler-import   = "import1", qualified-module-name,
                     [ "as", identifier ], ";" ;
 import-decl-1     = runtime-import | compiler-import ;
 
@@ -90,10 +90,10 @@ extern-function-decl-0
 (* ---------- HUC1 module and type declarations ---------- *)
 
 module-item-1     = runtime-declaration-1
-                  | phase1-family-decl
-                  | phase2-function-decl
-                  | phase2-struct-decl
-                  | global-let2-decl
+                  | generic-family-decl
+                  | compiler-function-decl
+                  | compiler-struct-decl
+                  | global-let1-decl
                   | phase-control-item
                   | phase-expression-item ;
 
@@ -124,7 +124,7 @@ struct-decl-1     = "struct", identifier, "{",
 struct-member-1   = field-decl-1
                   | function-decl-1
                   | constructor-decl-1
-                  | phase1-function-decl
+                  | generic-function-decl
                   | phase-control-item
                   | phase-expression-item ;
 
@@ -137,38 +137,46 @@ extern-function-decl-1
                   = "extern", string-literal,
                     function-signature-1, ";" ;
 
-(* ---------- Phase-1 families ---------- *)
+(* ---------- Generic families ---------- *)
 
-phase1-family-decl
-                  = phase1-function-decl
-                  | phase1-struct-decl
-                  | phase1-let-decl ;
+generic-family-decl
+                  = generic-function-decl
+                  | generic-struct-decl
+                  | generic-let-decl ;
 
-phase1-function-decl
-                  = "fn1", identifier, phase-binder-list,
-                    [ specialization-header ],
+generic-function-decl
+                  = "fn", identifier, generic-header,
                     parameter-list-1, [ "mod" ], "->", type-1,
-                    deferred-body ;
+                    [ phase-predicate ], deferred-body ;
 
-phase1-struct-decl
-                  = "struct1", identifier, phase-binder-list,
-                    [ specialization-header ], deferred-body ;
+generic-struct-decl
+                  = "struct", identifier, generic-header,
+                    [ phase-predicate ], deferred-body ;
 
-phase1-let-decl   = "let1", identifier, phase-binder-list,
-                    [ specialization-header ],
-                    deferred-body ;
+generic-let-decl  = "let", identifier, generic-header,
+                    [ phase-predicate ], deferred-body ;
 
-phase-binder-list = "(", [ phase-binder,
-                    { ",", phase-binder }, [ "," ] ], ")" ;
+generic-header   = phase-binder-list, [ phase-pattern-list ]
+                  | phase-pattern-list ;
+
+phase-binder-list = "<", [ phase-binder,
+                    { ",", phase-binder }, [ "," ] ], ">" ;
 phase-binder      = identifier, ":", ( "auto" | type-1 ),
                     [ "=", expression-1 ] ;
 
-specialization-header
-                  = phase-pattern-list, [ phase-predicate ] ;
 phase-pattern-list
                   = "<", phase-argument,
                     { ",", phase-argument }, [ "," ], ">" ;
-phase-predicate   = "(", expression-1, ")" ;
+phase-predicate   = "if1", "(", expression-1, ")" ;
+
+(* After a declaration name, '<' starts a deferred generic declaration.
+   In its first angle list, identifier ':' starts binders; other nonempty
+   lists are full-specialization patterns. '<>' is a zero-binder primary.
+   A second angle list after nonempty binders supplies a partial-specialization
+   pattern. An empty binder list must not be followed by a pattern. Predicates
+   are allowed only on specializations, never on a primary. Parenthesize
+   '<' and '>' comparisons in angle-list value expressions and defaults.
+   Runtime overload sets and generic families cannot share a name in one scope. *)
 
 phase-argument-list
                   = "<", [ phase-argument,
@@ -182,35 +190,36 @@ type-pattern-primary
 
 (* Open-ended phase packs are intentionally absent from 0.1. *)
 
-(* ---------- Phase-2 declarations ---------- *)
+(* ---------- Compiler-only declarations ---------- *)
 
-phase2-function-decl
-                  = phase2-function-signature, ( deferred-body | ";" ) ;
-phase2-function-signature
-                  = "fn2", identifier, parameter-list-1,
+compiler-function-decl
+                  = compiler-function-signature, ( deferred-body | ";" ) ;
+compiler-function-signature
+                  = "fn1", identifier, parameter-list-1,
                     [ "mod" ], "->", type-1 ;
 
-phase2-constructor-decl
-                  = "fn2", "init", parameter-list-1,
+compiler-constructor-decl
+                  = "fn1", "init", parameter-list-1,
                     [ constructor-initializer-list-1 ], deferred-body ;
 
-(* Register fn2 signatures immediately. Parse a deferred function or constructor
-   body as block-1 only when called. Ordinary fn bodies are parsed and prepared
-   when encountered, even if uncalled. *)
+(* Register fn1 signatures immediately. Parse a deferred compiler function or
+   constructor body as block-1 only when called. Non-generic fn bodies are
+   parsed and prepared when encountered, even if uncalled. Compiler-only
+   fn1/struct1/let1 declarations do not have generic headers in 0.1. *)
 
-phase2-struct-decl
-                  = "struct2", identifier, "{",
-                    { phase2-struct-member }, "}", [ ";" ] ;
-phase2-struct-member
-                  = let2-decl
-                  | phase2-function-decl
-                  | phase2-constructor-decl
+compiler-struct-decl
+                  = "struct1", identifier, "{",
+                    { compiler-struct-member }, "}", [ ";" ] ;
+compiler-struct-member
+                  = let1-decl
+                  | compiler-function-decl
+                  | compiler-constructor-decl
                   | phase-control-item
                   | phase-expression-item ;
 
-let2-decl         = "let2", [ "mod" ], identifier, ":", ( type-1 | "auto" ),
+let1-decl         = "let1", [ "mod" ], identifier, ":", ( type-1 | "auto" ),
                     [ "=", expression-1 ], ";" ;
-global-let2-decl  = let2-decl ;
+global-let1-decl  = let1-decl ;
 
 (* ---------- Phase control and erased expression items ---------- *)
 
@@ -250,7 +259,7 @@ selected-function-or-block-body
 
 compiler-statement-1
                   = compiler-block-1
-                  | let2-decl
+                  | let1-decl
                   | phase-control-item
                   | phase-expression-item
                   | compiler-if-statement-1
@@ -346,8 +355,8 @@ expression-statement-0
 block-1           = "{", { statement-1 }, "}" ;
 statement-1       = block-1
                   | local-let-decl-1
-                  | let2-decl
-                  | phase1-let-decl
+                  | let1-decl
+                  | generic-let-decl
                   | phase-control-item
                   | phase-expression-item
                   | if-statement-1

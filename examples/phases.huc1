@@ -2,10 +2,10 @@
 module examples.phases;
 
 import std.io as io;
-import2 compiler;
+import1 compiler;
 
-// All let2 storage and every numbered construct disappear in generated HUC0.
-let2 BuildDiagnostics: bool = true;
+// All let1 storage and every numbered construct disappear in generated HUC0.
+let1 BuildDiagnostics: bool = true;
 
 // Module-scope phase control inserts a module declaration at this position.
 if1 (BuildDiagnostics) {
@@ -27,19 +27,19 @@ struct Report {
 
 // A structure family has one primary, a pointer partial specialization, and a
 // bool full specialization. Requests use angle brackets.
-struct1 Cell(T: auto) {
+struct Cell<T: auto> {
     let mod value: T;
 }
 
-struct1 Cell(T: auto)<T*>(true) {
+struct Cell<T: auto><T*> {
     let mod value: T*;
 }
 
-struct1 Cell()<bool> {
+struct Cell<bool> {
     let mod value: bool;
 }
 
-struct1 CountedCell(T: auto, Count: usize) {
+struct CountedCell<T: auto, Count: usize> {
     let mod value: T;
     let count: usize = Count;
 
@@ -49,27 +49,27 @@ struct1 CountedCell(T: auto, Count: usize) {
 }
 
 // Function families use the same primary/partial/full pattern syntax.
-fn1 describe(T: auto)(value: T) -> c8* {
+fn describe<T: auto>(value: T) -> c8* {
     return "value";
 }
 
-fn1 describe(T: auto)<T*>(true)(value: T*) -> c8* {
+fn describe<T: auto><T*>(value: T*) -> c8* {
     if (value) {
         return "non-null pointer";
     }
     return "null pointer";
 }
 
-fn1 describe()<bool>(value: bool) -> c8* {
+fn describe<bool>(value: bool) -> c8* {
     if (value) {
         return "true";
     }
     return "false";
 }
 
-// The first list contains phase binders; the second contains runtime
+// The angle list contains phase binders; parentheses contain runtime
 // parameters. if1 selects runtime syntax while ordinary if remains runtime.
-fn1 choose(T: auto, Greater: bool = true)(mod left: T, mod right: T) -> T {
+fn choose<T: auto, Greater: bool = true>(mod left: T, mod right: T) -> T {
     if1 (Greater) {
         if (left > right) {
             return left;
@@ -83,26 +83,26 @@ fn1 choose(T: auto, Greater: bool = true)(mod left: T, mod right: T) -> T {
     }
 }
 
-struct2 BuildRecord {
-    let2 generated_declarations: usize;
-    let2 used_text_generation: bool;
+struct1 BuildRecord {
+    let1 generated_declarations: usize;
+    let1 used_text_generation: bool;
 }
 
 // An ordinary scalar function can also run in the compiler evaluator.
-// Its runtime definition still remains in HUC0 even if only used by fn2.
+// Its runtime definition still remains in HUC0 even if only used by fn1.
 fn add_values(left: i32, right: i32) -> i32 {
     // Local generated code is parsed in both program and evaluation mode.
     @compiler::emit_huc("let sum: i32 = left + right;");
     return sum;
 }
 
-fn2 add_at_compile_time(left: i32, right: i32) -> i32 {
+fn1 add_at_compile_time(left: i32, right: i32) -> i32 {
     return add_values(left, right); // Already in compiler execution: no extra @.
 }
 
 // This compiler helper writes code where it is called, not here beside its
 // definition.
-fn2 declare_local_counter() -> void {
+fn1 declare_local_counter() -> void {
     compiler::emit_huc("let mod generated_counter: i32 = 0;");
 }
 
@@ -115,7 +115,7 @@ fn main() -> i32 {
     let left: i32 = 3;
     let right: i32 = 5;
 
-    // Normal fn1 calls produce and call concrete runtime functions.
+    // Normal generic fn calls produce and call concrete runtime functions.
     let greater: i32 = choose<i32, true>(left, right);
     io::println(greater);
     io::println(describe<i32>(greater));
@@ -136,15 +136,15 @@ fn main() -> i32 {
     io::println(buffer.capacity());
 
     // One variable family can produce different runtime let declarations.
-    let1 slot(T: auto) {
+    let slot<T: auto> {
         let slot: T = T();
     }
 
-    let1 slot(T: auto)<T*>(true) {
+    let slot<T: auto><T*> {
         let mod slot: T* = null;
     }
 
-    let1 slot()<bool> {
+    let slot<bool> {
         let mod slot: bool = false;
     }
 

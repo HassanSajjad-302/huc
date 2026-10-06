@@ -59,6 +59,42 @@ fn inspect(widget: Widget*) -> i32 {
 These are presentation choices, not restrictions on operator spacing.
 For example, `a+b`, `a + b`, and `a+ b` are all valid binary additions in HUC.
 
+## Generic and compiler-only declarations
+
+Keep angle-bracket binders attached to the family name. A function's ordinary
+parameters follow in parentheses. Compiler-only declarations use suffix `1`;
+their variables and fields use `let1`, not runtime `let`:
+
+```huc
+fn identity<T: auto>(mod value: T) -> T {
+    return value;
+}
+
+struct Cell<T: auto> {
+    let mod value: T;
+}
+
+struct1 BuildOptions {
+    let1 tracing: bool;
+}
+
+fn1 build_limit() -> usize {
+    let1 limit: usize = 64;
+    return limit;
+}
+```
+
+For a partial specialization, attach the pattern after the binders. Put any
+`if1 (predicate)` after the completed header, immediately before its body:
+
+```huc
+fn identity<T: auto><T*>(value: T*) -> T* if1 (is_basic<T>()) {
+    return value;
+}
+```
+
+A full specialization omits binders: `fn identity<i32>(value: i32) -> i32`.
+
 ## Lists and trailing commas
 
 Keep a short list on one line without a trailing comma. When a list wraps,
