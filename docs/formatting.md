@@ -64,7 +64,7 @@ For example, `a+b`, `a + b`, and `a+ b` are all valid binary additions in HUC.
 Keep angle-bracket binders attached to the family name. A function's ordinary
 parameters follow in parentheses. Use `<>` for a deferred definition without
 parameters. Fields and working locals use `let`; `let1` is for explicit compiler
-storage. Compiler calls use `@`, including calls inside generators:
+storage:
 
 ```huc
 fn identity<T: auto>(mod value: T) -> T {
@@ -97,6 +97,16 @@ fn identity<T: auto><T*>(value: T*) -> T* if1 (is_basic<T>()) {
 A full specialization has an empty first list: `fn identity<><i32>(value: i32) -> i32`.
 Calls use at most one angle list, and omit it when arguments are deduced or
 defaulted: `identity(42)`, `identity<i32>(42)`, and `@build_limit()`.
+
+Attach `@` and `#` to what follows, without a space: `@build_limit()`,
+`#counter_decl();`. When inserted code has a hole, put the block that fills it
+on the same line, as with a control-flow body:
+
+```huc
+#loop_forward("widgets", "item", "index"); {
+    item->draw(index);
+}
+```
 
 ## Lists and trailing commas
 

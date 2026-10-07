@@ -32,7 +32,7 @@ The following syntax and behavior describe language rules, not library proposals
 - ordinary `fn`, deferred `fn name<>()`, and parameterized `fn name<T: auto>`;
 - ordinary `struct`, deferred `struct Name<>`, and parameterized `struct Name<T: auto>`;
 - `if1`, `for1`, and `while1`;
-- `@`;
+- `@` and `#`;
 - `import` and `import1`;
 - constructors named `init`;
 - `clone`, `copy`, and `drop`;
@@ -89,7 +89,7 @@ Notable HUC-specific combinations are:
    including a different type or mutation permission.
 3. Typed phase conditions at module and type-body scope whose discarded bodies
    are never parsed.
-4. Compiler helper functions that insert HUC0 at their inherited generation site,
+4. Compile-time functions that return generated code, inserted with `#` and
    followed by a separately inspectable and independently parsed HUC0 round.
 5. A normal generic `fn` call that generates and calls a runtime specialization, while
    the same call prefixed by `@` must run completely at compile time.
@@ -136,7 +136,7 @@ The examples below cover these use cases:
 | HUC1 | Runtime residualization versus forced execution |
 | HUC1 | Restricted ordinary-function calls from compiler execution |
 | HUC1 | Compiler-only helper functions and state |
-| HUC1 | Parsed, forward-only text generation in program and evaluation modes |
+| HUC1 | Generated code as values, inserted forward with `#` in program and evaluation modes |
 | Pipeline | One flattened HUC1-to-HUC0 translation unit, with module namespaces |
 | Pipeline | Standalone hand-written HUC0 |
 | Pipeline | Generated C17 with explicit evaluation sequencing and cleanup |
@@ -1603,8 +1603,9 @@ struct Cache {
 }
 ```
 
-The `@` requests a compiler value. Compiler API calls inside a helper also use
-`@`; ordinary scalar callees may execute normally under section 6.3 below.
+The `@` requests a compiler value. Code inside a helper running in the
+compiler calls compiler APIs directly; ordinary scalar callees execute under
+section 6.3 below.
 Only compiler use of `clamp_build_value` is requested here, so its deferred
 definition is not emitted. A later runtime call could request it too.
 
@@ -1665,19 +1666,19 @@ The full rules are in specification section 12.1.
 
 ## 7. Text generation examples
 
-### 7.1 A helper generating at its call site
+### 7.1 Code returned to the caller's `#`
 
 ```huc
-module examples.callsite_emit;
+module examples.callsite_insert;
 
 import1 compiler;
 
-fn declare_counter<>() -> void {
-    @compiler::emit_huc("let mod generated_counter: i32;");
+fn counter_decl<>() -> compiler::Code {
+    return compiler::local("let mod generated_counter: i32;");
 }
 
 fn run() -> i32 {
-    @declare_counter();
+    #counter_decl();
     generated_counter = 42;
     return generated_counter;
 }
@@ -1686,7 +1687,7 @@ fn run() -> i32 {
 Generated HUC0:
 
 ```huc
-module examples.callsite_emit;
+module examples.callsite_insert;
 
 fn run() -> i32 {
     let mod generated_counter: i32;
@@ -1695,17 +1696,16 @@ fn run() -> i32 {
 }
 ```
 
-The helper is defined at module scope, but it inherits the generation site
-inside `run`. HUC1 parses its output before processing the following assignment.
-If the helper declared a different name, HUC1 would diagnose the use of
+`counter_decl` only builds a code value; the `#` in `run` inserts it. HUC1
+parses the inserted declaration before processing the following assignment.
+If the builder declared a different name, HUC1 would diagnose the use of
 `generated_counter`; it does not leave that check only to HUC0.
 
-The standalone call is what makes this a generator invocation. A call used as
-a value instead owns a private body:
+`@` never inserts code. A function can still insert code into its own body:
 
 ```huc
 fn answer<>() -> i32 {
-    @compiler::emit_huc("let result: i32 = 42;");
+    #compiler::local("let result: i32 = 42;");
     return result;
 }
 
@@ -1718,38 +1718,35 @@ fn read_answer() -> i32 {
 
 The first initializer becomes `42`; it does not declare `result` in
 `read_answer`. The runtime call needs a definition of `answer` with its own
-`result` local. `@answer<>()` has the same meaning as `@answer()`. Replacing
-`let folded` with a compiler `let1 folded` would not change the insertion site.
-A standalone `@answer();` is rejected because generation statements must
-return `void`. Neither return-type inference nor optimization chooses the site.
+`result` local. `@answer<>()` has the same meaning as `@answer()`. A standalone
+`@counter_decl();` is rejected with a hint to use `#`, because an `@` statement
+must have type `void`.
 
-Type generation likewise keeps fields inside the type being prepared:
+Code inserted into a type body becomes members of that type:
 
 ```huc
 struct Tagged<T: auto> {
     let payload: T;
-    @compiler::emit_huc("let tag: i32;");
+    #compiler::local("let tag: i32;");
 }
 ```
 
 Requesting `Tagged<i32>` creates its `tag` field, not a `tag` local in the
-requesting function. Its module-emission anchor can still belong to the caller.
+requesting function. Its module insertion anchor can still belong to the caller.
 
-### 7.2 Module generation from a helper
+### 7.2 Module code from a builder
 
 ```huc
-module examples.module_emit;
+module examples.module_insert;
 
 import1 compiler;
 
-fn generate_health_check<>() -> void {
-    @compiler::emit_huc_module(
-        "fn health_check() -> i32 { return 200; }",
-    );
+fn health_check_decl<>() -> compiler::Code {
+    return compiler::module("fn health_check() -> i32 { return 200; }");
 }
 
 fn run() -> i32 {
-    @generate_health_check();
+    #health_check_decl();
     return health_check();
 }
 
@@ -1761,7 +1758,7 @@ fn next_function() -> i32 {
 Generated HUC0:
 
 ```huc
-module examples.module_emit;
+module examples.module_insert;
 
 fn run() -> i32 {
     return health_check();
@@ -1776,13 +1773,13 @@ fn next_function() -> i32 {
 }
 ```
 
-`emit_huc_module` inserts declarations after the enclosing top-level declaration:
+Module code inserted in a function follows the enclosing top-level declaration:
 here, after `run`, before `next_function`. Module-level function references may
 refer forward, so the call in `run` is valid. For a method, the insertion point
 would be after its whole top-level type. At module scope, it would be after the
-request itself. `run` is an ordinary `fn`, so this happens when its declaration
-is processed, even if no code ever calls it. Neither operation inserts before
-its anchor or rewrites already processed source.
+`#` item itself. `run` is an ordinary `fn`, so this happens when its declaration
+is processed, even if no code ever calls it. No insertion goes before its
+anchor or rewrites already processed source.
 
 ### 7.3 Program mode and evaluation mode
 
@@ -1795,10 +1792,8 @@ module examples.generation_modes;
 import1 compiler;
 
 fn generated_value<Extra: i32>() -> i32 {
-    @compiler::emit_huc("let local: i32 = 40;");
-    @compiler::emit_huc_module(
-        "fn generation_marker() -> i32 { return 1; }",
-    );
+    #compiler::local("let local: i32 = 40;");
+    #compiler::module("fn generation_marker() -> i32 { return 1; }");
     return local + Extra;
 }
 
@@ -1810,8 +1805,8 @@ fn main() -> i32 {
 }
 ```
 
-- The forced call prepares a private evaluation-mode body. Local generation
-  declares `local`, so evaluation returns `42`. Module generation introduces
+- The forced call prepares a private evaluation-mode body. The local insertion
+  declares `local`, so evaluation returns `42`. The module insertion introduces
   no `generation_marker` declaration and does not mark it as emitted.
 - The runtime calls require the same specialization in program mode. Its local
   declaration appears inside the emitted function, and `generation_marker`
@@ -1820,25 +1815,24 @@ fn main() -> i32 {
 - This remains true if the evaluation request is processed first. If only the
   forced call existed, neither function would be emitted for that request.
 
-Module suppression evaluates the call's arguments, but does not parse the text
-as declarations or make its names available. Evaluation cannot use a helper
-while its declaration is pending after the active anchor. Once that declaration
-has been published and checked, later evaluation can use it. An ordinary `fn`
-follows the same mode rules, but
+Suppressed module code is not parsed as declarations and makes no names
+available. Evaluation cannot use a helper while its declaration is pending
+after the active anchor. Once that declaration has been published and checked,
+later evaluation can use it. An ordinary `fn` follows the same mode rules, but
 independently retains its normal HUC0 definition even when it is never called
 at runtime.
 
 "Once" applies to publishing one function or specialization's program-mode
-output, not to the emission API globally. Two explicit generator calls or loop
+output, not to code values globally. Two `#` statements or phase-loop
 iterations both contribute output. Another specialization, such as
 `generated_value<3>`, generates the same `generation_marker` text. Because the
 declaration is identical, it is inserted once and both specializations share
-it. A generator that produced a different `generation_marker` for another
-specialization would get a duplicate-declaration error showing both origins.
-Generators therefore need distinct names only for declarations that differ.
+it. A specialization that inserted a different `generation_marker` would get
+a duplicate-declaration error showing both origins. Builders therefore need
+distinct names only for declarations that differ.
 
 A definition that needs generated module declarations at runtime can still be
-evaluated if it takes a separate path in each mode. `@compiler::emitting()`
+evaluated if it takes a separate path in each mode. `compiler::emitting()`
 returns `true` in program mode and `false` in evaluation mode:
 
 ```huc
@@ -1846,13 +1840,13 @@ module examples.mode_query;
 
 import1 compiler;
 
-fn define_square<>() -> void {
-    @compiler::emit_huc_module("fn square(x: i32) -> i32 { return x * x; }");
+fn square_decl<>() -> compiler::Code {
+    return compiler::module("fn square(x: i32) -> i32 { return x * x; }");
 }
 
 fn area<Scale: i32>(side: i32) -> i32 {
-    if1 (@compiler::emitting()) {
-        @define_square();
+    if1 (compiler::emitting()) {
+        #square_decl();
         return Scale * square(side);
     } else {
         return Scale * side * side;
@@ -1892,64 +1886,88 @@ function's preparation does not publish it early. An evaluation requested in a
 later declaration, after `square` is published, could use it without the query.
 
 The compiler does not compare the two branches; keeping their results
-consistent is the programmer's responsibility. As with macros, generators that
+consistent is the programmer's responsibility. As with macros, builders that
 read or change mutable `let1` state can also make a definition's emitted and
 evaluated bodies differ.
 
-### 7.4 A generated loop header with an original body
+### 7.4 A generated loop around an original block
 
 ```huc
 module examples.generated_loop;
 
 import1 compiler;
 
-fn forward_four<>() -> void {
-    @compiler::emit_huc("for (; index < 4; index += 1)");
+fn loop_forward<>(items: compiler::Text, item: compiler::Text, index: compiler::Text)
+        -> compiler::Code {
+    let c: compiler::Text = "__items_" + item;
+    return compiler::around(
+        "{ let " + c + ": auto = " + items + "; "
+            + "let mod " + index + ": usize = 0; "
+            + "for (; " + index + " < " + c + "->size(); " + index + " += 1) { "
+            + "let " + item + ": auto = " + c + "->data() + " + index + ";",
+        "} }",
+    );
 }
 
-fn sum_indices() -> i32 {
+fn sum_visible(widgets: Vector<Widget>*) -> i32 {
+    let mod total: i32 = 0;
+    #loop_forward("widgets", "item", "index"); {
+        if (item->hidden()) {
+            continue;
+        }
+        total += item->weight();
+    }
+    return total;
+}
+```
+
+Generated HUC0, with an illustrative concrete name for `Vector<Widget>`:
+
+```huc
+fn sum_visible(widgets: Vector_Widget*) -> i32 {
     let mod total: i32 = 0;
     {
-        let mod index: i32 = 0;
-        @forward_four(); {
-            if (index == 2) {
-                continue;
+        let __items_item: auto = widgets;
+        let mod index: usize = 0;
+        for (; index < __items_item->size(); index += 1) {
+            let item: auto = __items_item->data() + index;
+            {
+                if (item->hidden()) {
+                    continue;
+                }
+                total += item->weight();
             }
-            total += index;
         }
     }
     return total;
 }
 ```
 
-HUC1 parses the generated header together with the next source block. The body
-is not passed to `forward_four`. Its `continue` advances the generated loop's
-step, and the result is `4`. An enclosing source block keeps `index` local to
-this example; the existing `for` grammar still has three optional expression
-clauses, without declarations or comma-separated steps.
+`compiler::around` returns code with one hole. HUC1 parses the text around the
+hole together with the next source block, which fills it; the block is never
+passed to `loop_forward`. `continue` runs the generated step. `item` and `index`
+live in the generated block, so a second such loop in the same function does
+not collide, and no `for`-header grammar change is needed.
 
-Only a complete final `for (...)` header gets this fragment exception. A missing
-following block is an error. If the generator emits nothing, the block remains
-an ordinary block; there is no implicit promise that a helper creates a loop.
-Names are not made unique automatically: this helper deliberately uses the
-caller's `index`.
+A missing block after a `#` whose code has a hole is an error. A code value has
+at most one hole, and the hole stands where a statement could. Names are not
+made unique automatically; `__items_item` is derived from the caller's binding
+name.
 
 ### 7.5 Generated text must be HUC0
 
 ```huc
-@compiler::emit_huc_module(
-    "if1 (true) { fn illegal() -> i32 { return 1; } }",
-);
+#compiler::module("if1 (true) { fn illegal() -> i32 { return 1; } }");
 ```
 
 In program mode, HUC1 rejects the generated `if1` while parsing the inserted
-text. Generation does not run staging a second time: its output must already
+text. Insertion does not run staging a second time: inserted code must already
 be valid HUC0. The standalone HUC0 translator independently rejects numbered
 constructs if handed such a file. In evaluation mode, this particular module
-emission is suppressed; its text is not parsed or inserted.
+insertion is suppressed; its text is not parsed or inserted.
 
-Errors in generated text point to that text and its generator call chain.
-Errors in the original loop body still point to the original source. Original
+Errors in generated text point to that text, its `#` site, and the call chain
+that built it. Errors in an original block still point to the original source. Original
 and generated buffers keep their own immutable locations; printing final HUC0
 adds an output map rather than changing those locations.
 
@@ -1965,9 +1983,7 @@ fn B<Tag: i32>() -> i32 {
 }
 
 fn A<Tag: i32>() -> i32 {
-    @compiler::emit_huc_module(
-        "fn generated() -> i32 { return 42; }",
-    );
+    #compiler::module("fn generated() -> i32 { return 42; }");
     return B<Tag>();
 }
 
@@ -1981,7 +1997,7 @@ fn later() -> i32 {
 ```
 
 Registering `A` and `B` does not prepare their bodies. Preparing `main` requests
-`A<0>`, which queues `generated` and requests `B<0>`. Both requests use `main`
+`A<0>`, whose `#` queues `generated` and which requests `B<0>`. Both requests use `main`
 as their module insertion anchor. The runtime call in `B` may refer forward,
 but `generated` is not available for compiler execution yet.
 
@@ -1993,8 +2009,8 @@ than `B`, generated that declaration. No origin-based exception bypasses the
 insertion boundary.
 
 Concrete `A<0>` and `B<0>` definitions occupy their family declaration positions
-in printed HUC0. This ordinary specialization step is separate from explicit
-module generation, which inserts `generated` after `main`.
+in printed HUC0. This ordinary specialization step is separate from the module
+code inserted with `#`, which places `generated` after `main`.
 
 ### 7.7 Imported families can use caller-defined types
 
@@ -2006,9 +2022,7 @@ module library.read;
 import1 compiler;
 
 fn read_value<T: auto>(item: T*) -> i32 {
-    @compiler::emit_huc_module(
-        "fn bonus() -> i32 { return 1; }",
-    );
+    #compiler::module("fn bonus() -> i32 { return 1; }");
     return item->value + bonus();
 }
 ```
@@ -2285,21 +2299,9 @@ struct RegisterSpec<> {
     }
 }
 
-fn emit_register<>(spec: RegisterSpec<>) -> void {
-    if (spec.writable) {
-        @compiler::emit_huc_module(
-            @compiler::format(
-                "fn write_{0}(base: mod u32*, value: u32) -> void { "
-                "base[{1}] = value; "
-                "}",
-                spec.name,
-                spec.offset / 4,
-            ),
-        );
-    }
-
-    @compiler::emit_huc_module(
-        @compiler::format(
+fn register_code<>(spec: RegisterSpec<>) -> compiler::Code {
+    let read: compiler::Code = compiler::module(
+        compiler::format(
             "fn read_{0}(base: u32*) -> u32 { "
             "return base[{1}]; "
             "}",
@@ -2307,11 +2309,25 @@ fn emit_register<>(spec: RegisterSpec<>) -> void {
             spec.offset / 4,
         ),
     );
+
+    if (spec.writable) {
+        return compiler::module(
+            compiler::format(
+                "fn write_{0}(base: mod u32*, value: u32) -> void { "
+                "base[{1}] = value; "
+                "}",
+                spec.name,
+                spec.offset / 4,
+            ),
+        ) + read;
+    }
+
+    return read;
 }
 
-@emit_register(@RegisterSpec<>("status", 0x00, false));
-@emit_register(@RegisterSpec<>("control", 0x04, true));
-@emit_register(@RegisterSpec<>("baud", 0x08, true));
+#register_code(RegisterSpec<>("status", 0x00, false));
+#register_code(RegisterSpec<>("control", 0x04, true));
+#register_code(RegisterSpec<>("baud", 0x08, true));
 
 fn initialize_uart(base: mod u32*, baud: u32) -> void {
     write_control(base, 0);
@@ -2355,7 +2371,7 @@ Usefulness:
 
 `compiler::Text`, `compiler::format`, and construction of compiler-resident records
 belong to the future compiler-library proposal; this case study records the
-intended experience, not bootstrap API commitments beyond text generation.
+intended experience, not bootstrap API commitments beyond code values and `#`.
 
 ## 10. Large case study: protocol messages
 
@@ -2495,8 +2511,8 @@ fn command_test(arguments: text::Text) -> i32 {
     return 0;
 }
 
-fn emit_dispatcher<>() -> void {
-    @compiler::emit_huc_module(
+fn dispatcher_code<>() -> compiler::Code {
+    return compiler::module(
         "fn dispatch(name: text::Text, "
         "mod arguments: text::Text) -> i32 {"
         "  if (name == \"build\") { return command_build(arguments); }"
@@ -2508,7 +2524,7 @@ fn emit_dispatcher<>() -> void {
     );
 }
 
-@emit_dispatcher();
+#dispatcher_code();
 ```
 
 Usefulness:
@@ -2552,7 +2568,7 @@ struct Sprite {
 }
 
 struct ComponentStore<T: auto> {
-    if1 (@(@compiler::type<T>()).is_advanced()) {
+    if1 (compiler::type<T>().is_advanced()) {
         let mod values: collections::Vector<T>;
 
         fn add(mod value: T) mod -> usize {
@@ -2609,23 +2625,25 @@ describe the capabilities required from the future `import1 compiler` design.
 import1 compiler;
 
 fn report_environment<>() -> void {
-    let environment: compiler::Environment =
-        @compiler::current_environment();
+    let environment: compiler::Environment = compiler::current_environment();
 
-    let target: compiler::Target = @environment.target();
-    @compiler::log(@target.triple());
-    @compiler::log(@environment.language_revision());
+    let target: compiler::Target = environment.target();
+    compiler::log(target.triple());
+    compiler::log(environment.language_revision());
 
-    let modules: auto = @environment.modules();
+    let modules: auto = environment.modules();
     let mod index: usize = 0;
-    for (; index < @modules.size(); index += 1) {
+    for (; index < modules.size(); index += 1) {
         let module: compiler::Module = modules[index];
-        @compiler::log(@module.qualified_name());
+        compiler::log(module.qualified_name());
     }
 }
 
 @report_environment();
 ```
+
+The function runs in a compiler call, so its body calls the compiler library
+directly. The standalone `@` statement returns `void` and inserts nothing.
 
 Required design properties:
 
@@ -2641,33 +2659,25 @@ Required design properties:
 ```huc
 import1 compiler;
 
-fn generate_serializer<>(target_type: compiler::Type) -> void {
-    let record: compiler::Class = @target_type.as_class();
-    let mod body: compiler::Code = @compiler::Code();
-
-    let fields: auto = @record.fields();
+fn serializer<>(target_type: compiler::Type) -> compiler::Code {
+    let record: compiler::Class = target_type.as_class();
+    let fields: auto = record.fields();
+    let mod body: compiler::Code = compiler::Code();
     let mod index: usize = 0;
-    for (; index < @fields.size(); index += 1) {
+    for (; index < fields.size(); index += 1) {
         let field: compiler::Field = fields[index];
-        let attributes: auto = @field.attributes();
-        if (!@attributes.contains("skip")) {
-            @body.append(
-                @compiler::statement(
-                    "writer.write_field({name}, value.{field})",
-                    @field.name(),
-                    @field.identifier(),
-                ),
+        if (!field.attributes().contains("skip")) {
+            body = body + compiler::statement(
+                "writer.write_field({name}, value.{field})",
+                field.name(),
+                field.identifier(),
             );
         }
     }
-
-    @compiler::emit_module(
-        @compiler::function(
-            "serialize_" + @record.name(),
-            @body.commit(),
-        ),
-    );
+    return compiler::function("serialize_" + record.name(), body);
 }
+
+#serializer(compiler::type<Packet>());
 ```
 
 The future structured API should eventually replace strings and provide:
@@ -2747,9 +2757,9 @@ Possible tools include:
 | generic `fn` partial specialization | overloads, traits, macros | Same primary/partial/full mechanism as structure and variable families |
 | generic `let` | variable templates, macros, generated locals | Selected leaf is a complete ordinary `let`, including type and mutation permissions |
 | `@family<T>(...)` | constant evaluation or interpreter call | Same family either residualizes or must fully execute |
-| Text generation | macros, mixins, compiler plugins | Standalone generation calls inherit the site; value calls keep generated locals private; inserted HUC0 is parsed and checked |
+| Text generation | macros, mixins, compiler plugins | Functions return code values; `#` inserts them where it appears; inserted HUC0 is parsed and checked |
 | Printable HUC0 boundary | internal compiler IR or generated source | Second public translator parses the exact intermediate source |
-| Future semantic reflection | procedural macros, plugins, build generators | Stable compiler-only semantic snapshots plus explicit emission |
+| Future semantic reflection | procedural macros, plugins, build generators | Stable compiler-only semantic snapshots plus explicit insertion |
 
 HUC's goal is not to have the most features. It aims to make these mechanisms
 work together without the overlap between C++ template substitution,

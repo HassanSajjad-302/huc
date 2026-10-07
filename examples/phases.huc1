@@ -91,8 +91,8 @@ struct BuildRecord<> {
 // An ordinary scalar function can also run in the compiler evaluator.
 // Its runtime definition remains in HUC0 even if only used by compiler calls.
 fn add_values(left: i32, right: i32) -> i32 {
-    // Local generated code is parsed in both program and evaluation mode.
-    @compiler::emit_huc("let sum: i32 = left + right;");
+    // Inserted local code is parsed in both program and evaluation mode.
+    #compiler::local("let sum: i32 = left + right;");
     return sum;
 }
 
@@ -100,30 +100,28 @@ fn add_at_compile_time<>(left: i32, right: i32) -> i32 {
     return add_values(left, right); // Already in compiler execution: no extra @.
 }
 
-// A standalone @ call writes at its insertion site, not beside this definition.
-fn declare_local_counter<>() -> void {
-    @compiler::emit_huc("let mod generated_counter: i32 = 0;");
+// A code builder returns code; the # that uses it decides where it goes.
+fn counter_decl<>() -> compiler::Code {
+    return compiler::local("let mod generated_counter: i32 = 0;");
 }
 
 // Both value evaluation and runtime preparation keep this local inside answer.
 fn answer<>() -> i32 {
-    @compiler::emit_huc("let result: i32 = 42;");
+    #compiler::local("let result: i32 = 42;");
     return result;
 }
 
-// At module scope, the generated declaration is inserted after this request.
-@compiler::emit_huc_module(
-    "fn generated_answer() -> i32 { return 42; }",
-);
+// At module scope, the generated declaration is inserted after this item.
+#compiler::module("fn generated_answer() -> i32 { return 42; }");
 
 fn main() -> i32 {
     let left: i32 = 3;
     let right: i32 = 5;
 
-    let folded: i32 = @answer();
-    let folded_explicit: i32 = @answer<>(); // Same zero-binder call.
-    let live: i32 = answer();
-    io::println(folded, folded_explicit, live);
+    let answer_folded: i32 = @answer();
+    let answer_explicit: i32 = @answer<>(); // Same zero-binder call.
+    let answer_live: i32 = answer();
+    io::println(answer_folded, answer_explicit, answer_live);
 
     // Normal generic fn calls produce and call concrete runtime functions.
     let greater: i32 = choose(left, right); // Deduce T; Greater defaults to true.
@@ -162,16 +160,16 @@ fn main() -> i32 {
     slot<i32*> = pointer_cell.value;
     slot<bool> = true;
 
-    // @ runs the whole call at compile time and inserts the result as a literal.
+    // @ runs the whole call at compile time and writes the result as a literal.
     let folded: i32 = @add_at_compile_time(20, 22);
     // This specialization is compile-time-only, unlike choose<i32, true> above.
     // Its body is checked and evaluated, but no runtime definition is needed.
     let smaller: i32 = @choose<i32, false>(3, 5);
     io::println(folded + smaller);
 
-    // The helper inherits this generation site. HUC1 parses its output before
-    // checking the following use; HUC0 independently checks the printed program.
-    @declare_local_counter();
+    // The # inserts the returned code here. HUC1 parses it before checking the
+    // following use; HUC0 independently checks the printed program.
+    #counter_decl();
     generated_counter += 1;
 
     if1 (BuildDiagnostics) {

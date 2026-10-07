@@ -9,7 +9,8 @@ Its two central ideas are:
 
 - One staging model for generics, compile-time execution, reflection, and code
   generation: `<...>` marks deferred definitions and their parameters; suffix `1`
-  marks compiler storage, imports, and control flow; `@` enters compiler execution.
+  marks compiler storage, imports, and control flow; `@` evaluates at compile
+  time; `#` inserts generated code.
 - A small value model: Basic values copy, Advanced values transfer, and raw
   `T*` pointers observe without extending lifetimes.
 
@@ -37,14 +38,18 @@ same translation unit, preserving the imported code's lexical scope. Generics
 can accept caller-defined types without reverse imports. Staging writes one
 flattened HUC0 file, using `module name;` sections to preserve namespaces.
 
+Generated code is a value. Compile-time functions return `compiler::Code`,
+built with `compiler::local`, `compiler::module`, or `compiler::around`, and
+`#code;` inserts it where the `#` appears. `@` only computes values; a call such
+as `let x: i32 = @compute();` never inserts code into its caller. Inside an `@`
+or `#` operand, and in code already running in the compiler, compiler calls
+need no further `@`.
+
 Text generation has two [generation modes](docs/language-specification.md#111-program-mode-and-evaluation-mode):
 **program mode** prepares the HUC0 program; **evaluation mode** prepares a private
-body for the compiler to execute. Local generated code is parsed and checked
-in both. Module output is inserted forward in program mode and suppressed in
-evaluation mode. A standalone `@generate();` inherits the insertion context;
-a value call such as `let x: i32 = @compute();` uses a private evaluation body
-and cannot introduce locals into its caller. Compiler API calls always use `@`,
-including nested calls. Repeated runtime uses publish a function or specialization's
+body for the compiler to execute. Inserted local code is parsed and checked
+in both. Module code is inserted forward in program mode and suppressed in
+evaluation mode. Repeated runtime uses publish a function or specialization's
 generated declarations only once; compile-time evaluation does not consume
 that opportunity. Nested specialization requests share the original requesting
 top-level declaration as their module insertion anchor: a request inside `main`

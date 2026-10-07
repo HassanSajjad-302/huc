@@ -10,10 +10,9 @@
    using the grammar for its enclosing module, type, function, or block.
 
    HUC1 parses inserted text using the applicable HUC0 productions: generated
-   text cannot contain numbered constructs or @. At function/block scope, a
-   local generation request may end with a complete for-header-0 followed by
-   the next original block-1. Parse them together, process the original body's
-   phase constructs, and retain an ordinary for-statement-0. The language
+   text cannot contain numbered constructs, @, or #. When an insertion-item's
+   code has a hole, the next original block-1 fills it; parse the text around
+   the hole and that block together as complete items. The language
    specification section 11 defines generation modes and forward insertion.
 
    Semantic restrictions such as phase availability, fixed-global
@@ -93,7 +92,8 @@ module-item-1     = runtime-declaration-1
                   | generic-family-decl
                   | global-let1-decl
                   | phase-control-item
-                  | phase-expression-item ;
+                  | phase-expression-item
+                  | insertion-item ;
 
 runtime-declaration-1
                   = function-decl-1
@@ -124,7 +124,8 @@ struct-member-1   = field-decl-1
                   | constructor-decl-1
                   | generic-function-decl
                   | phase-control-item
-                  | phase-expression-item ;
+                  | phase-expression-item
+                  | insertion-item ;
 
 field-decl-1      = "let", [ "mod" ], identifier, ":", type-1,
                     [ "=", expression-1 ], ";" ;
@@ -216,11 +217,15 @@ phase-while-item  = "while1", "(", expression-1, ")", deferred-body ;
 
 phase-expression-item
                   = "@", unary-expression-1, ";" ;
+insertion-item    = "#", expression-1, ";" ;
 
-(* A standalone phase-expression-item must return void and executes as a
-   generation statement in the inherited insertion context. A value-context
-   @ call evaluates in a private body. Compiler API calls require @ even when
-   nested in another compiler call. These are semantic checks on the AST. *)
+(* A phase-expression-item evaluates its expression in the compiler; it must
+   have type void and never inserts code. An insertion-item's expression is
+   compiler code of type compiler::Code; the item inserts that code here (its
+   module parts after the insertion anchor). If the code has a hole, the next
+   source item must be a block-1, which fills it. Inside an @ or # operand,
+   and in other compiler-only clauses, nested calls need no further @. These
+   are semantic checks on the AST. *)
 
 deferred-body     = "{", ? scanner-delimited opaque source span ?, "}" ;
 
@@ -343,6 +348,7 @@ statement-1       = block-1
                   | generic-let-decl
                   | phase-control-item
                   | phase-expression-item
+                  | insertion-item
                   | if-statement-1
                   | while-statement-1
                   | for-statement-1
