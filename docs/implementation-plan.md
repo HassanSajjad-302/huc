@@ -872,16 +872,24 @@ an empty `<>`. `let1` marks explicit compiler storage. Fields and working
 locals use plain `let` and live in the evaluator or runtime according to use.
 Compiler-only field types propagate to the containing type. Deferred functions
 may accept/return compiler-only values for compiler calls, but not runtime calls.
-A scalar-only deferred function/type is runtime-capable if its prepared
-definition is valid. No separate compiler-only declaration marker is inferred.
+A deferred function/type without compiler-only types is runtime-capable if its
+prepared definition is valid. No separate compiler-only declaration marker is
+inferred.
 
 A `let1` acts like a typed, scoped macro. A module-level `let1` has one copy
 per translation unit; a function-local `let1` has one per preparation of its
 block. Compile-time code that can name a `let1 mod` may assign it, except
-ordinary functions evaluated under the scalar subset. Assignments happen in
-processing order. Reads made while a body is prepared are fixed into it; reads
-in executing compiler code see current values. Redeclaring a `let1` in the same
-scope, including from another file's section of that namespace, is an error.
+ordinary functions evaluated under specification section 12.1; those may change
+compile-time objects only through pointers they receive, including `this`.
+Assignments happen in processing order. Reads made while a body is prepared are
+fixed into it; reads in executing compiler code see current values. Redeclaring
+a `let1` in the same scope, including from another file's section of that
+namespace, is an error. A function-local `let1` lives until its preparation
+completes in program mode, or until the compiler call finishes executing in
+evaluation mode, because the executing body may still assign it. Module-level
+ones last until the end of the translation unit. Values are destroyed in
+reverse processing order, so a `let1` can own compile-time allocations across
+calls.
 
 Register angle-header signatures without parsing or preparing their bodies.
 Parse the selected body on request; an unused body remains opaque. Each
@@ -892,17 +900,23 @@ are encountered, even if never called. Runtime forward-name checks can wait
 for declaration collection; compiler-stage work is not postponed until a call.
 
 A compiler evaluation can call an ordinary `fn` without another `@` when the call meets
-specification section 12.1. Start with available HUC bodies, boolean and integer
-values, `void` results, local mutation, bounded control flow/calls, and immutable
-compiler-known scalar constants. Pointers and Basic structures are not
-included merely because they are Basic. Locals in the ordinary function retain
-their `let` spelling and use evaluator-owned storage during the call.
+specification section 12.1. No marker is needed: an ordinary function computes
+what it would compute at run time, or evaluation fails. Support the runtime
+language on available HUC bodies: every scalar type including `c8` and floats,
+Basic and Advanced structures with constructors, methods, `copy`, relocation,
+and `drop`, pointers to compile-time objects, raw storage with `construct_at`
+and `destruct_at`, and compile-time allocation (specification section 12.3).
+Locals in the ordinary function retain their `let` spelling and use
+evaluator-owned storage during the call.
 
 Check executed operations transitively. Untaken ordinary branches remain
 normally parsed and type-checked, but do not execute unsupported operations.
-Reject runtime-storage access, shared mutable compiler state, arbitrary foreign
-calls, and external effects. Target arithmetic and evaluator limits determine
-results and diagnostics; failed evaluation never falls back to runtime.
+Reject runtime-storage access, naming `let1 mod` from an ordinary function,
+foreign or native calls, untracked external effects, and observing numeric
+addresses. Every undefined operation, including null, dangling, out-of-bounds,
+uninitialized, and inactive-slot access, is a diagnostic. Target arithmetic,
+strict IEEE floating point, and evaluator limits determine results and
+diagnostics; failed evaluation never falls back to runtime.
 
 ### 6.9 The `@` operator
 
@@ -924,7 +938,7 @@ The same holds in phase-control clauses, `let1` initializers, `#`
 operands, and code executing in a compiler call. Inside a function body, `@`
 marks a value computed once while the body is prepared; it cannot read the
 body's parameters or `let` locals. Ordinary runtime-capable calls inside an
-evaluated body keep the restricted scalar rules above.
+evaluated body follow the ordinary-function rules above.
 
 A standalone `@expression;` is an erased phase-expression item. It is legal at
 module, type-body, function, and nested-block scope, must evaluate completely
@@ -947,7 +961,7 @@ evaluation. A never-requested family body stays deferred. Ordinary `fn`
 declarations in retained modules still pass through even when only evaluated
 at compile time or never called; unused-function removal is a later optimization.
 
-The same scalar ordinary-function evaluator is available through explicit `@`
+The same ordinary-function evaluator is available through explicit `@`
 entry. Prepare and evaluate the callee privately in evaluation mode. Deferred
 compiler calls can use their concrete ordinary inputs during execution, but
 not during preparation. These are evaluator inputs, not family binders, and
@@ -1397,6 +1411,8 @@ Emit:
 - fixed-signature C-linkage declarations;
 - structures, functions, and runtime control flow;
 - explicit temporaries preserving left-to-right evaluation;
+- `#pragma STDC FP_CONTRACT OFF` and no fast-math options unless the program
+  selects relaxed math, so floating point matches compile-time evaluation;
 - generated free functions for methods and constructor initialization, using
   explicit receivers and final-destination pointers where needed;
 - `#line` or sidecar source-map information where practical.
@@ -1497,27 +1513,34 @@ Implement:
 Acceptance:
 
 - a phase-free HUC1 program translates to semantically equivalent HUC0;
-- zero-binder functions/types remain deferred until requested; scalar-only ones
-  are runtime-capable if requested, while compiler-only fields/signatures cannot
-  enter runtime code;
+- zero-binder functions/types remain deferred until requested; ones without
+  compiler-only types are runtime-capable if requested, while compiler-only
+  fields/signatures cannot enter runtime code;
 - ordinary imports are processed once and their namespace identities preserved;
 - `import1` is erased;
 - skipped bodies, including unrequested zero-binder bodies, are never sent to the lexer/parser;
 - ordinary `fn` bodies are prepared when encountered, even if uncalled.
 
-### 11.3 Increment B: compiler-only interpreter
+### 11.3 Increment B: compile-time interpreter
 
-Interpret typed phase AST in process.
+Interpret typed IR in process. Lower ordinary bodies to the sequenced MIR of
+section 10.5, extended with compiler-only values, so evaluation order,
+relocation, and cleanup match the C backend.
 
 Values include:
 
-- booleans and integers;
-- floating values if required by phase expressions;
+- booleans, integers, `c8`, and IEEE `f32`/`f64` with strict rounding;
 - immutable UTF-8 text;
 - indexed lists/tuples for compiler-only computations;
-- compiler-only structures;
+- structures, both compiler-only and runtime-capable;
+- pointers as a block ID plus a path to a slot or subobject, never a host
+  address;
 - canonical type and stable semantic IDs as implementation values;
 - symbolic runtime expressions for generic `fn`.
+
+Every compile-time object lives in a block: a frame slot, a `let1` object, a
+string literal, or an allocation. Each block records its type and which slots
+hold live values, so every access can be checked.
 
 Enforce:
 
@@ -1535,14 +1558,21 @@ Acceptance:
 - explicit `let1` storage and compiler calls of deferred functions/types run deterministically;
 - `let1 mod` assignments follow processing order across imports, and
   redeclaring a `let1` in the same scope is an error;
-- scalar ordinary `fn` calls from compiler execution use available checked HUC
-  bodies, target-width arithmetic, local mutation, and shared call/instruction
-  limits;
+- ordinary `fn` calls from compiler execution use available checked HUC
+  bodies, structures, methods, pointers, raw storage, floats, target-width
+  arithmetic, local mutation, and shared call/instruction limits;
 - unsupported signatures and reached operations fail; an untaken ordinary
   branch is still checked as HUC but its unsupported operations are not executed;
-- mutable globals, runtime memory, and arbitrary foreign calls cannot be
-  evaluated through an ordinary function;
-- local generated scalar code is parsed and can run in evaluation mode;
+- mutable globals, runtime memory, `let1 mod` names, and arbitrary foreign calls
+  cannot be evaluated through an ordinary function, though it may change a
+  `let1` object through a pointer it receives;
+- null, dangling, out-of-bounds, uninitialized, and inactive-slot accesses,
+  pointer-to-integer conversion, and ordering of unrelated pointers are
+  diagnostics with the evaluation call stack;
+- a function-local `let1` assigned by its executing body stays alive until the
+  compiler call finishes, then is destroyed with `drop` running in the
+  compiler; module-level ones are destroyed at the end of translation;
+- local generated code is parsed and can run in evaluation mode;
 - repeated identical compiler calls prepare and execute again, preserving all
   permitted compiler-state effects; there is no caching analysis;
 - failure includes the phase call stack;
@@ -1620,12 +1650,16 @@ Implement:
 - compile-time evaluation islands;
 - erased module/type/function/block phase-expression items;
 - forced generic `fn` evaluation;
-- restricted ordinary `fn` evaluation from compiler code and explicit `@` entry;
+- ordinary `fn` evaluation from compiler code and explicit `@` entry;
 - result materialization rules;
 - the compiler-supplied `import1 compiler` module;
 - `compiler::Code` with `local`, `module`, and `around` constructors and `+`;
 - `#` insertion statements, including holes filled by the next block;
 - `compiler::emitting()` and `compiler::error(message)`;
+- `compiler::allocate` and `compiler::deallocate`, with allocations that can
+  persist in `let1` storage, leak checks at the end of each top-level
+  evaluation and of the translation unit, and rejection of retained runtime
+  calls;
 - generation modes and forward insertion points;
 - immutable generated buffers parsed before following source;
 - ordered module output after the original request's top-level anchor;
@@ -1806,6 +1840,16 @@ Include:
 - a reached `compiler::error`, including in a selected specialization with an
   otherwise valid primary fallback;
 - multiple residual declarations from generic `let`;
+- compile-time undefined behavior: null, dangling, out-of-bounds,
+  uninitialized, and inactive-slot access, constructing over a live value,
+  and destroying an inactive slot;
+- compile-time pointer-to-integer conversion, ordering of unrelated pointers,
+  and viewing an object of another type through `u8*` or `c8*`;
+- an ordinary function naming `let1 mod` storage during evaluation;
+- a reached foreign call or runtime-storage access during evaluation;
+- `compiler::deallocate` with the wrong pointer or count or a live slot,
+  allocations leaked at the end of a top-level evaluation, and a retained
+  runtime call to either allocation operation;
 - resource-limit exhaustion;
 - numbered syntax emitted into HUC0.
 - invalid C-linkage structures, arrays, and phase types,
@@ -1860,6 +1904,12 @@ Compile generated C17 and test:
   and manually cleaning a value constructed in a root tracked as Inactive;
 - user `drop` and reverse field cleanup;
 - module imports;
+- the same ordinary functions producing equal results through `@` and at run
+  time, covering structures, methods, pointers, raw storage, and strict IEEE
+  floating point;
+- a library container whose allocator selects compile-time allocation, built
+  across several compiler calls in a `let1 mod` and destroyed at the end of
+  translation;
 - full HUC1-to-program examples.
 
 Use ASan and UBSan to find compiler/backend mistakes. Tests must not treat

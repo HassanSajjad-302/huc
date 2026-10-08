@@ -680,8 +680,10 @@ Examples of rejected edges:
 
 - a runtime value used as an `if1` condition;
 - a type with compiler-only fields stored in runtime memory;
-- a runtime-only argument passed to an ordinary `fn` during compiler execution,
-  or an ordinary call outside the scalar evaluator subset;
+- a runtime-only argument passed to an ordinary `fn` during compiler execution;
+- a reached operation that cannot run in the compiler (specification section
+  12), such as a foreign call or runtime-storage access. This is checked on the
+  executed path, not from the callee's signature;
 - a compiler-only signature or executable operation surviving a runtime request;
 - an `@` in a function body that reads the body's parameters or `let` locals;
 - a standalone `@` statement whose type is `compiler::Code` (use `#`);
@@ -818,8 +820,10 @@ tracked source consumed by `Relocate` still updates its own state normally.
 
 ### 8.1 Initial strategy
 
-Interpret typed HUC1 phase AST and supported scalar ordinary-function bodies
-in-process. Do not:
+Interpret typed HUC1 phase code and ordinary-function bodies in-process. Lower
+ordinary bodies to the same sequenced MIR the C backend uses (section 11),
+extended with compiler-only values, so evaluation order, relocation, and
+cleanup cannot drift from generated code. Do not:
 
 - generate and compile a temporary C++ program for every compiler call;
 - execute arbitrary host C++ plugins;
@@ -840,10 +844,16 @@ typedef enum HucCtValueKind {
     HUC_CT_STRING,
     HUC_CT_LIST,
     HUC_CT_STRUCT,
+    HUC_CT_POINTER,
     HUC_CT_TYPE,
     HUC_CT_SYMBOLIC_EXPR,
     HUC_CT_SEMANTIC_ID,
 } HucCtValueKind;
+
+typedef struct HucCtPointer {
+    HucCtBlockId block; /* zero for null */
+    HucCtPathId path;   /* slot index and subobject path within the block */
+} HucCtPointer;
 
 typedef struct HucCtValue {
     HucCtValueKind kind;
@@ -853,6 +863,7 @@ typedef struct HucCtValue {
         HucCtFloat floating;
         HucCtStringId string_id;
         HucCtObjectId object_id; /* list or structure in the CT heap */
+        HucCtPointer pointer;
         HucTypeId type_id;
         HucSymbolicExprId symbolic_expr_id;
         HucSemanticId semantic_id; /* internal stable identity */
@@ -864,6 +875,21 @@ The evaluator owns a compile-time heap with deterministic object IDs. Its
 allocation order is not observable except through equality defined by HUC.
 The stable semantic-ID case is an implementation facility for family
 selection and residualization; it is not yet a public reflection API.
+
+Every compile-time object lives in a block: a frame slot, a `let1` object, a
+string literal, or a `compiler::allocate` allocation. A pointer is a block ID
+plus a path to a slot or subobject, never a host address. Each block records
+its element type, slot count, and which slots and `raw_storage` elements hold
+live values, so every dereference, `construct_at`, `destruct_at`, extraction,
+and deallocation is checked against specification section 12.1. Pointer
+arithmetic moves within one slot sequence, a block's slots or a `raw_storage`
+field, or to one past its end; a pointer to any other object behaves like a
+pointer into a one-element sequence. Ordering pointers into different blocks
+and converting a pointer to an integer are diagnostics. Actual `u8` and `c8`
+objects are ordinary values; viewing an object of another type through `u8*`
+or `c8*` is a diagnostic until a byte-level layout model exists. Integers use
+target widths; floats use strict IEEE binary32 or binary64 arithmetic,
+independent of host floating-point settings.
 
 ### 8.3 Symbolic execution for generic `fn`
 
@@ -920,31 +946,35 @@ call normally, require its HUC definition, and evaluate its prepared, checked
 body under specification section 12.1. Local variables keep
 their ordinary `let` spelling; their storage is evaluator-owned for this call.
 
-Initially accept only boolean and integer parameters/results, with `void`
-results also allowed. Check aliases canonically and apply the same subset to
-locals and intermediate values actually created. Reject pointers, `c8`, floats,
-structures, strings, and raw storage. These restrictions do not narrow existing
-compiler-only value kinds or compiler intrinsics available to deferred compiler
-calls. Such calls can use compiler-resident records and metadata; their runtime
-requests must still reject compiler-only signatures and residual operations.
+Accept the runtime language: every scalar type including `c8` and floats,
+Basic and Advanced structures with constructors, methods, `copy`, relocation,
+and `drop`, pointers to compile-time objects, raw storage with `construct_at`,
+`destruct_at`, and extraction, and compile-time allocation. Execute them over
+the checked block model of section 8.2. Deferred compiler calls additionally
+keep their compiler-only value kinds, compiler intrinsics, and `let1 mod`
+assignment; their runtime requests must still reject compiler-only signatures
+and residual operations.
 
 Support local mutation, control flow, and nested calls with shared instruction
-and recursion budgets. Propagate the restricted mode into callees, including
-concrete generic `fn` bodies. Check executed operations, not merely the outer
+and recursion budgets. Apply the same rules in callees, including concrete
+generic `fn` bodies. Check executed operations, not merely the outer
 signature. An untaken ordinary branch may contain an unsupported operation,
 but must still pass ordinary syntax and type checking. Never invoke arbitrary
-native or foreign code. Reject accesses to runtime storage, mutable shared
-compiler state, and untracked external inputs. Immutable compiler-known scalar
-constants are readable and become dependencies.
+native or foreign code. Reject accesses to runtime storage, an ordinary
+function naming `let1 mod` storage, and untracked external inputs. An ordinary
+function may change `let1` objects through pointers it receives, including
+`this`. Immutable compiler-known constants are readable and become
+dependencies.
 
 Use target-width integer operations: unsigned overflow wraps, while signed
-overflow, division by zero, and invalid shifts produce diagnostics with the
-evaluation call stack. Unsupported operations and exhausted budgets also
-diagnose; no forced call falls back to runtime execution.
+overflow, division by zero, invalid shifts, and every memory error from
+section 8.2 produce diagnostics with the evaluation call stack. Unsupported
+operations and exhausted budgets also diagnose; no forced call falls back to
+runtime execution.
 
 Prepare the function's phase work and `#` insertions in evaluation mode before
 executing it; never insert into its caller. Parse inserted local code into that
-private body and apply the scalar subset to its executed operations.
+private body and apply the same rules to its executed operations.
 Compile-time operations may use compiler text while preparing it. Suppress
 inserted module code; it supplies no declarations. Later program-mode
 preparation must still produce and publish its module output. None of this
@@ -976,6 +1006,21 @@ graph consists of loaded HUC1/HUC0 modules and configured target inputs.
 Any future explicit external-input API must return a dependency record with
 its value and is part of the separate compiler-library design.
 
+`compiler::allocate<T>(count)` creates a block of `count` inactive slots;
+`compiler::deallocate<T>(slots, count)` requires the same block start and
+count and only inactive slots. Reject a retained runtime call to either. When
+a top-level evaluation finishes, mark blocks reachable from live `let1`
+storage and report every unreachable allocation as a leak.
+
+Keep a function-local `let1` alive while the body it was prepared for can run.
+In program mode, release it when that preparation completes; the runtime body
+retains only the values it read. In evaluation mode, the executing body may
+read and assign it, so tie it to the compiler call's execution frame and
+release it when the call finishes. Release module-level `let1` values at the
+end of the translation unit. Destroy values in reverse processing order,
+running `drop` in the evaluator. After the module-level values are destroyed,
+no allocation may remain.
+
 ### 8.7 Staging contexts
 
 `if1`, `for1`, and `while1` execute while HUC1 prepares code and may occur at
@@ -988,7 +1033,8 @@ tokens exist.
 `let1` marks explicit compiler storage. Fields and working locals use plain `let`
 and belong to the evaluator or runtime according to the call/type request.
 Compiler-only requests do not demand HUC0 definitions. Angle headers do not
-automatically erase scalar-only types or functions if runtime code needs them.
+automatically erase types or functions without compiler-only parts if runtime
+code needs them.
 `@` opens a compile-time evaluation island and never qualifies a type. A
 selected generic `let` specialization must leave exactly one ordinary runtime `let`
 with the family name and no other residual statement. Text generation remains
@@ -1825,7 +1871,10 @@ Generated code must use:
 
 These rules stop C from silently becoming the specification. C integer
 promotions, floating-point transformations, and expression sequencing must not
-change defined HUC behavior.
+change defined HUC behavior. Unless the program selects relaxed math, emit
+`#pragma STDC FP_CONTRACT OFF` and use no fast-math options, so run-time
+floating-point results match compile-time evaluation (specification section
+5.2).
 
 ## 14. Additional backends and C++ interoperability later
 
@@ -2089,12 +2138,17 @@ Compile and run small programs that record:
 - ordinary compiler-executed `for` loops using plain `let` header storage,
   including inside selected module/type bodies;
 - forced `@` evaluation;
-- ordinary scalar `fn` calls from compiler code, nested calls, local mutation, bounded
-  recursion, and direct `@` entry;
-- target-width integer arithmetic, unsigned wrapping, and diagnostics for
-  signed overflow, division by zero, and invalid shifts;
-- rejection of unsupported scalar-call signatures/aliases, pointers, foreign
-  calls, runtime-storage access, and shared mutable state;
+- ordinary `fn` calls from compiler code with structures, methods, pointers,
+  raw storage, and floats, nested calls, local mutation, bounded recursion, and
+  direct `@` entry, producing the same results as at run time;
+- target-width integer arithmetic, unsigned wrapping, strict IEEE floating
+  point, and diagnostics for signed overflow, division by zero, invalid
+  shifts, and every compile-time memory error;
+- rejection of reached foreign calls, runtime-storage access, pointer-to-integer
+  conversion, ordering of unrelated pointers, and `let1 mod` names in ordinary
+  functions, while `u8` and `c8` objects remain ordinary values;
+- a function-local `let1 mod` assigned while its compiler call executes, alive
+  until the call finishes;
 - unsupported operations skipped by ordinary branches versus reached operations,
   while both branches still receive normal syntax/type checks;
 - repeated compiler calls executing again, observing permitted compiler-state
@@ -2105,8 +2159,9 @@ Compile and run small programs that record:
 - compile-time-only generic `fn` calls omitted from HUC0, later runtime demand causing
   emission, transitive runtime dependencies, and uncalled ordinary `fn` retention;
 - parsed generation at local, type-body, and forward module insertion points;
-- local generation in both modes, with scalar checks on the prepared evaluation
-  body; suppressed module output evaluates arguments but introduces no names;
+- local generation in both modes, with the evaluator's checks on the prepared
+  evaluation body; suppressed module output evaluates arguments but introduces
+  no names;
 - evaluation-first/program-later preparation still publishing module output;
 - once-per-owner program publication, distinct emissions/iterations preserved,
   identical generated declarations inserted once, and other duplicates
@@ -2116,8 +2171,12 @@ Compile and run small programs that record:
   `fn` bodies prepared with module output immediately following their declaration;
 - zero-binder helpers called with and without `<>`, deduced/defaulted calls, and
   explicit `<><T>` full specializations versus `<U: auto><U*>` partial ones;
-- scalar-only deferred functions/types accepted at runtime when needed, while
-  compiler-only signatures/fields are rejected on runtime requests;
+- deferred functions/types without compiler-only parts accepted at runtime
+  when needed, while compiler-only signatures/fields are rejected on runtime
+  requests;
+- a container built through `compiler::allocate` across several compiler calls
+  in a `let1 mod`, with leaks diagnosed at the end of a top-level evaluation
+  and of the translation unit;
 - compiler-only parameters/results accepted in compiler calls; direct compiler
   API calls in executed compiler code, plain `let` working locals and fields, and
   `let1` staging storage;
@@ -2199,7 +2258,7 @@ Implement in this order:
 
 1. staged module indexing, `import1`, opaque deferred-body spans, phase-free
    pass-through, flattened HUC0 namespace sections, and origin maps;
-2. the deterministic compiler-only interpreter with resource and effect limits;
+2. the deterministic compile-time interpreter with resource and effect limits;
 3. `if1`, three-part `for1`, bounded phase loops, selected-body parsing, and
    module/type/function/block insertion contexts;
 4. generic `struct`, generic `fn`, and generic `let` primary/partial/full family selection with

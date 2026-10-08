@@ -14,14 +14,17 @@ Its two central ideas are:
 - A small value model: Basic values copy, Advanced values transfer, and raw
   `T*` pointers observe without extending lifetimes.
 
-Compiler helpers use the same `fn` spelling and can reuse ordinary functions under an initial
-[scalar evaluation subset](docs/language-specification.md#121-ordinary-functions-in-compiler-execution):
-booleans and integers, local mutation, bounded execution, and no runtime-memory
-access or external effects. Ordinary `fn` definitions still appear in HUC0;
-a generic `fn` specialization used only at compile time is checked and evaluated
-without requiring a runtime definition. Ordinary `fn` bodies are prepared when
-encountered; angle-header `fn` and `struct` bodies stay deferred until requested,
-even when their parameter list is empty (`fn helper<>()`).
+Compiler helpers use the same `fn` spelling, and
+[ordinary functions run in the compiler](docs/language-specification.md#121-ordinary-functions-in-compiler-execution)
+without a marker. Structures, methods, pointers, floating point, and
+[compile-time allocation](docs/language-specification.md#123-compile-time-allocation)
+all work; runtime memory, foreign calls, and untracked external effects are
+excluded, and undefined behavior is a compile-time error. Compile-time data can
+persist in `let1` storage across calls. Ordinary `fn` definitions still appear
+in HUC0; a generic `fn` specialization used only at compile time is checked and
+evaluated without requiring a runtime definition. Ordinary `fn` bodies are
+prepared when encountered; angle-header `fn` and `struct` bodies stay deferred
+until requested, even when their parameter list is empty (`fn helper<>()`).
 
 Declarations use `fn`, `struct`, and `let`, with angle-bracket parameters for
 families: `fn choose<T: auto>(left: T, right: T)`. A second list supplies a

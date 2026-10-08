@@ -135,7 +135,12 @@ The examples below cover these use cases:
 | HUC1 | Body-level compile-time checks and explicit diagnostics |
 | HUC1 | Family argument deduction |
 | HUC1 | Runtime residualization versus forced execution |
-| HUC1 | Restricted ordinary-function calls from compiler execution |
+| HUC1 | Ordinary-function calls from compiler execution, with structures, pointers, and floats |
+| HUC1 | Compile-time data persisting in `let1` storage across calls |
+| HUC1 | Identical floating-point results at compile time and run time |
+| HUC1 | In-place construction in raw storage during compile-time execution |
+| HUC1 | Turning compile-time data into runtime code with `for1` and `@` |
+| HUC1 | Undefined behavior and leaks reported as compile-time errors |
 | HUC1 | Compiler-only helper functions and state |
 | HUC1 | Generated code as values, inserted forward with `#` in program and evaluation modes |
 | Pipeline | One flattened HUC1-to-HUC0 translation unit, with module namespaces |
@@ -1629,7 +1634,7 @@ struct Cache {
 ```
 
 The `@` requests a compiler value. Code inside a helper running in the
-compiler calls compiler APIs directly; ordinary scalar callees execute under
+compiler calls compiler APIs directly; ordinary callees execute under
 section 6.3 below.
 Only compiler use of `clamp_build_value` is requested here, so its deferred
 definition is not emitted. A later runtime call could request it too.
@@ -1640,7 +1645,7 @@ survives.
 ### 6.3 Reusing an ordinary function at compile time
 
 ```huc
-module examples.scalar_evaluation;
+module examples.ordinary_evaluation;
 
 fn count_digits(mod value: u32) -> u32 {
     let mod count: u32 = 1;
@@ -1673,21 +1678,228 @@ fn fixed_width() -> u32 {
 
 The deferred `field_width` definition is not needed in HUC0. Calling `count_digits` only at compile time
 does not suppress its ordinary runtime definition. Writing
-`@count_digits(12345)` directly would use the same restricted evaluator.
+`@count_digits(12345)` directly would use the same evaluator.
 
-The initial subset accepts booleans and integers, `void` results, local
-mutation, and bounded loops/calls. It excludes pointers, floating-point values,
-structures, runtime-storage access, mutable shared state, and arbitrary foreign
-calls. Basic does not mean eligible: a raw pointer is Basic but is not part of
-this subset. Immutable compiler-known scalar constants are permitted and are
+The evaluator runs the runtime language: scalars including `c8` and floats,
+structures with constructors, methods, `copy`, relocation, and `drop`, pointers
+to compile-time objects, raw storage, and compile-time allocation. It excludes
+runtime storage, foreign or native calls, untracked external state, and
+numeric addresses. An ordinary function computes what it would compute at run
+time; it cannot name `let1 mod` storage, though it can change objects through
+pointers it receives. Immutable compiler-known constants are permitted and are
 tracked as dependencies.
 
-For example, a runtime-valid scalar function may conditionally call an external
-logging function. A compile-time call that skips the logging branch can succeed;
-one that reaches it is rejected. Both branches still undergo normal parsing and
-type checking. Signed overflow, division by zero, invalid shifts, and exceeded
-evaluation limits are also compile-time diagnostics, with no runtime fallback.
-The full rules are in specification section 12.1.
+For example, a runtime function may conditionally call an external logging
+function. A compile-time call that skips the logging branch can succeed; one
+that reaches it is rejected. Both branches still undergo normal parsing and
+type checking. Every undefined operation, including signed overflow, division
+by zero, invalid shifts, and null, dangling, or out-of-bounds access, is a
+compile-time diagnostic, as are exceeded evaluation limits, with no runtime
+fallback. The full rules are in specification section 12.1.
+
+### 6.4 Compile-time data that persists across calls
+
+This example assumes a probable library `Vector<T>` whose allocator selects
+`compiler::allocate` while code runs in the compiler (specification section
+12.3).
+
+```huc
+module examples.compile_time_data;
+
+fn has_divisor(known: Vector<u32>*, n: u32) -> bool {
+    for (let mod i: usize = 0; i < known->size(); i += 1) {
+        let p: u32 = *(known->data() + i);
+        if (p * p > n) {
+            return false;
+        }
+        if (n % p == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+let1 mod primes: Vector<u32> = Vector<u32>();
+
+fn extend_primes<>(limit: u32) -> void {
+    let mod n: u32 = 2;
+    if (primes.size() > 0) {
+        n = *(primes.data() + (primes.size() - 1)) + 1;
+    }
+    for (; n < limit; n += 1) {
+        if (!has_divisor(&primes, n)) {
+            primes.push(n);
+        }
+    }
+}
+
+@extend_primes(30);  // 2, 3, 5, ..., 29
+@extend_primes(100); // continues from the stored primes
+let1 prime_count: usize = primes.size(); // 25
+```
+
+`has_divisor` is an ordinary function with no marker. In the compiler it reads
+the vector through a pointer, exactly as it would at run time, and it remains a
+runtime function in HUC0. `extend_primes` names the `let1 mod`, so it is
+deferred. `primes.push(n)` is an ordinary method updating the vector through
+`this`.
+
+The vector's buffer is a compile-time allocation owned by `primes`, so it
+survives between the two calls, and the vector is destroyed at the end of the
+translation unit. C++ would instead require the buffer to be freed before each
+constant evaluation ends. Pointers into the buffer never reach runtime code;
+section 6.7 turns the stored primes into runtime code instead.
+
+### 6.5 Floating point gives the same bits in both phases
+
+```huc
+module examples.compile_time_float;
+
+fn newton_sqrt(x: f64) -> f64 {
+    let mod guess: f64 = x;
+    for (let mod step: i32 = 0; step < 8; step += 1) {
+        guess = 0.5 * (guess + x / guess);
+    }
+    return guess;
+}
+
+fn diagonal(side: f64) -> f64 {
+    return side * @newton_sqrt(2.0);
+}
+```
+
+HUC0 output:
+
+```huc
+fn diagonal(side: f64) -> f64 {
+    return side * 1.414213562373095;
+}
+```
+
+`newton_sqrt` is ordinary code. In the compiler it uses IEEE binary64
+arithmetic, rounding each operation to nearest and fusing nothing. The
+generated C forbids contraction too (specification section 5.2), so calling
+`newton_sqrt(2.0)` at run time returns the same bits. The literal is what this
+function computes, one unit in the last place below the correctly rounded
+square root of 2; the compiler never substitutes a host `sqrt`.
+
+### 6.6 In-place construction in raw storage
+
+```huc
+module examples.compile_time_storage;
+
+fn reverse_digits(mod value: u32) -> u32 {
+    let mod digits: raw_storage<u32, 10> = raw_storage<u32, 10>();
+    let slots: mod u32* = storage_ptr(&digits);
+    let mod count: usize = 0;
+    while (value > 0) {
+        construct_at(slots + count, value % 10);
+        count += 1;
+        value /= 10;
+    }
+
+    let mod result: u32 = 0;
+    for (let mod i: usize = 0; i < count; i += 1) {
+        result = result * 10 + *(slots + i);
+    }
+    return result;
+}
+
+let1 reversed: u32 = reverse_digits(1234); // 4321
+```
+
+A `let1` initializer is compiler code, so the plain call runs in the compiler.
+Each `construct_at` starts a value's lifetime in a slot, like C++ placement
+`new`. The evaluator records which slots are live, so reading `*(slots + count)`
+before constructing it would be a compile-time diagnostic, not an uninitialized
+read. The same function also remains an ordinary runtime function.
+
+### 6.7 Turning compile-time data into runtime code
+
+Continuing section 6.4:
+
+```huc
+fn is_small_prime(n: u32) -> bool {
+    for1 (let1 mod i: usize = 0; i < primes.size(); i += 1) {
+        if (n == @*(primes.data() + i)) {
+            return true;
+        }
+    }
+    return false;
+}
+```
+
+HUC0 output:
+
+```huc
+fn is_small_prime(n: u32) -> bool {
+    if (n == 2u32) {
+        return true;
+    }
+    if (n == 3u32) {
+        return true;
+    }
+    // ... one test for each remaining prime, up to 97u32 ...
+    return false;
+}
+```
+
+`for1` runs while the ordinary function is prepared, and each `@` reads one
+stored prime, which becomes a `u32` literal. Only those literals reach HUC0;
+the vector and its buffer stay in the compiler. An ordinary function is
+prepared when encountered, so it sees the 25 primes stored by then.
+
+### 6.8 Undefined behavior and leaks stop translation
+
+This example also assumes the probable `Vector<T>` from section 6.4.
+
+```huc
+module examples.compile_time_checks;
+
+import1 compiler;
+
+extern "C" fn report_error(code: i32) -> void;
+
+fn checked_div(a: i32, b: i32) -> i32 {
+    if (b == 0) {
+        report_error(1);
+        return 0;
+    }
+    return a / b;
+}
+
+fn last_of(values: Vector<i32>*) -> i32 {
+    return *(values->data() + values->size()); // one past the end
+}
+
+fn read_last<>() -> i32 {
+    let mod values: Vector<i32> = Vector<i32>();
+    values.push(7);
+    return last_of(&values);
+}
+
+fn lose_slots<>() -> void {
+    let slots: mod i32* = compiler::allocate<i32>(4);
+}
+
+let1 quotient: i32 = checked_div(10, 2); // 5; report_error is not reached
+let1 failed: i32 = checked_div(1, 0);    // diagnostic: foreign call reached
+let1 too_big: i32 = 2147483647 + 1;      // diagnostic: signed overflow
+let1 last: i32 = read_last();            // diagnostic: read one past the end
+@lose_slots();                           // diagnostic: 4 slots leaked
+```
+
+Each failing line is a separate example; in one file, the first failure stops
+translation. At run time, the overflow and the past-the-end read would be
+unchecked undefined behavior. In the compiler, each failure is reported with
+the evaluation call stack, such as `read_last -> last_of`, and nothing falls
+back to run time. `checked_div(10, 2)` succeeds because its foreign call sits
+on a branch that does not run.
+
+`values` in `read_last` is an Advanced local. When such a call returns
+normally, its `drop` releases the buffer, as at run time. `lose_slots` keeps
+only a raw pointer, which owns nothing, so its allocation is unreachable when
+`@lose_slots()` finishes.
 
 ## 7. Text generation examples
 

@@ -92,7 +92,7 @@ struct BuildRecord<> {
     let used_text_generation: bool;
 }
 
-// An ordinary scalar function can also run in the compiler evaluator.
+// An ordinary function can also run in the compiler evaluator.
 // Its runtime definition remains in HUC0 even if only used by compiler calls.
 fn add_values(left: i32, right: i32) -> i32 {
     // Inserted local code is parsed in both program and evaluation mode.

@@ -616,7 +616,11 @@ return, argument, or method receiver.
 - A shift by a negative amount or by an amount not less than the left operand
   width is undefined behavior.
 - Floating-point behavior follows the selected target's IEEE-754 support unless
-  a compilation mode explicitly permits relaxed math.
+  a compilation mode explicitly permits relaxed math. Without such a mode, each
+  operation is rounded to its own type: the backend must not fuse operations,
+  for example into a multiply-add, or reassociate them. Compile-time evaluation
+  always uses these strict rules (section 12.1), so a relaxed mode can make
+  run-time results differ from compile-time ones.
 
 ### 5.3 Pointer operations
 
@@ -2284,10 +2288,11 @@ methods and constructors inside a deferred type are processed in that type's
 requested context.
 
 Compiler-only values may be used by phase control, family arguments,
-evaluation, reflection, and generation. None may leak into HUC0. A scalar-only
-deferred function is allowed at runtime if its resulting definition is valid;
-there is no replacement `consteval` marker. Compiler calls may reuse ordinary
-functions under section 12.1; this does not make their runtime emission lazy.
+evaluation, reflection, and generation. None may leak into HUC0. A deferred
+function without compiler-only types is allowed at runtime if its resulting
+definition is valid; there is no replacement `consteval` marker. Compiler calls
+may reuse ordinary functions under section 12.1; this does not make their
+runtime emission lazy.
 
 #### Compiler storage
 
@@ -2299,10 +2304,13 @@ same function, or two iterations of a phase loop each get their own.
 
 Compile-time code that can name a `let1 mod` may assign it: phase-control
 clauses, `@` and `#` operands, and deferred functions executing in a compiler
-call. Ordinary functions evaluated under section 12.1 cannot read or write
-mutable compiler state. Assignments take effect immediately, in processing
-order: source order, each import at its first import, each body when it is
-prepared, and each compiler call as it runs.
+call. Ordinary functions evaluated under section 12.1 cannot name mutable
+compiler storage, which has no run-time equivalent. They may still change
+compile-time objects through pointers they receive, including `this`, so
+`registry.push(entry)` can update a container held in a `let1 mod`.
+Assignments take effect immediately, in processing order: source order, each
+import at its first import, each body when it is prepared, and each compiler
+call as it runs.
 
 A read observes the value at the moment the code containing it runs. A read
 made while a body is prepared, in phase control, an `@` or `#` operand, or a
@@ -2312,6 +2320,27 @@ what it saw. A read by code executing in a compiler call sees the current
 value, so `next_id()` in section 12.2 returns a new value on each call. Results
 that depend on processing order, such as a counter incremented from two
 imported files, are the programmer's responsibility, as with macros.
+
+A `let1` value lives as long as code can still use it. A function-local one
+lasts while the body it was prepared for can run: in program mode, until that
+preparation completes, because the runtime body keeps only the values it read;
+in evaluation mode, until the compiler call that prepared the body finishes
+executing, because the executing body may read and assign it. A module-level
+`let1` lasts until the end of the translation unit. Values are then destroyed
+in reverse processing order, and any `drop` runs in the compiler.
+Assigning a `let1 mod` destroys the old value as ordinary assignment does
+(section 6.3). A `let1` can therefore own compile-time allocations that persist
+across compiler calls (section 12.3).
+
+```huc
+fn count<>() -> usize {
+    let1 mod n: usize = 0;
+    n += 1; // runs during the call, while n is still alive
+    return n;
+}
+
+let1 result: usize = count(); // 1
+```
 
 Declaring a `let1` again in the same scope is a redefinition error, even from
 another file or another section of the same namespace. To change a value,
@@ -2353,8 +2382,9 @@ An evaluation island must not read a runtime-only value. Its result may be used
 by compiler code without materialization. If it flows into residual runtime
 code, it must have an exact HUC0 representation, such as a scalar, boolean,
 floating value, or string literal accepted at that location. Compiler handles,
-`compiler::Code` values, and compiler-only structures cannot be materialized as
-runtime values.
+`compiler::Code` values, compiler-only structures, and pointers to compile-time
+objects, including values that contain them, cannot be materialized as runtime
+values.
 
 A standalone phase-expression item has this form:
 
@@ -2493,11 +2523,11 @@ candidate ordering, serialization, and generated naming are required.
 
 The bootstrap HUC1 language does not standardize the full reflection and
 structured-editing library. It supplies the phase evaluator, internal canonical
-type and declaration identities needed for specialization, and the
+type and declaration identities needed for specialization, the
 generated-code values, `#` insertion, generation-mode query, and explicit
-compile-time diagnostics in section 11. This deliberately keeps the first
-HUC1-to-HUC0 milestone independent of an
-unfinished public compiler object model.
+compile-time diagnostics in section 11, and compile-time allocation in
+section 12.3. This deliberately keeps the first HUC1-to-HUC0 milestone
+independent of an unfinished public compiler object model.
 
 The implementation supplies a compiler-only module:
 
@@ -2513,8 +2543,9 @@ The module's declarations come from a versioned, inspectable generated
 interface unit loaded before user HUC1 modules, analogous to an always-included
 header. The explicit `import1 compiler` still binds its namespace and makes the
 phase dependency visible. The bootstrap interface declares only
-`compiler::Code`, its three constructors, `compiler::emitting()`, and
-`compiler::error(message)`; the object-model design remains separate.
+`compiler::Code`, its three constructors, `compiler::emitting()`,
+`compiler::error(message)`, `compiler::allocate`, and `compiler::deallocate`;
+the object-model design remains separate.
 
 ### 10.2 Future reflection model
 
@@ -2980,24 +3011,39 @@ The language specifies observable results, not a particular evaluator. A
 conforming implementation may interpret typed HUC IR, compile it to a sandboxed
 VM, or use another equivalent technique.
 
+Code that runs in the compiler follows HUC's semantics for the selected target.
+An ordinary function computes what it would compute at run time, or evaluation
+fails with a diagnostic. No marker is needed: any function whose HUC body is
+available may run in the compiler, and eligibility is checked along the path
+that actually executes (section 12.1). C++ instead requires `constexpr` on
+such functions.
+
 Compile-time values have HUC value semantics. Raw addresses into the compiler
 process are not materializable and must not be used as stable declaration or
 type identities.
 
 Deferred `fn` definitions can compute values, including `compiler::Code`
 values, under the call rules in sections 9.7 and 9.9. Code executing in a
-compiler call may use the compiler's supported text, metadata, and
-compiler-resident structures, with plain `let` working locals and the call's
-concrete arguments, calling compiler APIs directly. Compiler-only fields,
-parameters, and results are permitted for these calls but not for runtime
-requests. Compiler execution never grants access to runtime memory, arbitrary
-foreign code, or untracked external inputs.
+compiler call can also use compiler-only values, call compiler APIs directly,
+and assign `let1 mod` storage (section 9.8). Compiler-only fields, parameters,
+and results are permitted for these calls but not for runtime requests.
 
-Ordinary runtime functions can also be reused under the narrower initial
-scalar subset below. Calling one from compiler code does not relax that subset.
-An unsupported runtime operation cannot be hidden inside a deferred wrapper.
-Explicit compiler APIs retain their separately specified capabilities; they do
-not make every runtime operation evaluable.
+These operations never run in the compiler:
+
+- reading or writing runtime storage, which does not exist yet;
+- calling foreign or native code, including any declaration without an
+  available HUC body;
+- reading untracked external state, such as files, environment variables,
+  clocks, randomness, processes, or networks;
+- observing the numeric address of a compile-time object, by converting a
+  pointer to an integer or by ordering pointers into different objects;
+- undefined behavior, which is a diagnostic instead (section 12.1).
+
+These limits apply to deferred and ordinary code alike; an unsupported
+operation cannot be hidden inside a deferred wrapper. Explicit compiler APIs
+have only their separately specified capabilities. Future tracked compiler APIs
+may read declared inputs, such as files, but do not make arbitrary runtime APIs
+evaluable.
 
 ### 12.1 Ordinary functions in compiler execution
 
@@ -3008,41 +3054,51 @@ the compiler, use normal call syntax. From otherwise runtime source,
 `@` requests complete evaluation under the same rules. No new function marker
 or alternative declaration is required.
 
-The initial value subset is `bool`, `i8`, `i16`, `i32`, `i64`, `isize`, `u8`,
-`u16`, `u32`, `u64`, and `usize`; `void` is also allowed as a result. Aliases
-are checked after resolving their underlying types. Parameters and results
-must use this subset, as must locals and intermediate values actually created
-during evaluation. Pointers, `c8`, floating-point values, structures, strings,
-and manually managed storage are outside this initial subset. Being Basic is
-not sufficient: raw pointers and many structures are Basic too.
+The evaluator supports the runtime language, including:
 
-Within that subset:
+- `bool`, every integer type, `c8`, `f32`, and `f64`, with `void` results;
+- structures, Basic and Advanced: construction with `init`, fields, methods,
+  `copy`, destructive relocation, `drop`, and the checked-use rules of
+  section 6.12;
+- raw pointers to compile-time objects: `&`, `*`, `->`, `null`, equality, and
+  arithmetic and ordering within one object or allocation;
+- `raw_storage<T, N>`, `construct_at`, `destruct_at`, and extraction through
+  `mod T*` (sections 6.4 and 6.7);
+- compile-time allocation (section 12.3);
+- string literals, as read-only compile-time data;
+- immutable constants with compiler-known values, without accessing runtime
+  storage;
+- local mutation where `mod` permits it, ordinary control flow, and recursion.
 
-- Local `let` variables and parameters may be changed where `mod` permits it.
-  Ordinary conditions, loops, and recursive calls execute in the evaluator.
-- The restrictions follow the evaluated call chain, including ordinary and
-  concrete generic `fn` callees; an unsupported operation cannot be hidden in a helper.
-  A call through a declaration without an available HUC body is rejected.
-  Arbitrary foreign calls and execution of native host code are not allowed;
-  compiler intrinsics have only their separately specified translation-time
-  behavior.
-- Immutable scalar constants with compiler-known values may be read without
-  accessing runtime storage. Reading or writing runtime storage, or accessing
-  mutable shared compiler state, is rejected. Local working variables remain
-  mutable; this rule does not prohibit `let1 mod` elsewhere in compiler code.
-- There is no untracked access to files, environment variables, clocks,
-  randomness, processes, networks, or other external state. This is broader
-  than a ban on direct system calls. Future tracked compiler APIs remain a
-  separate facility, not permission to execute arbitrary runtime APIs.
-- Arithmetic follows HUC's target widths and rules, not the host compiler's
-  native arithmetic. Unsigned arithmetic wraps as usual. Executed signed
-  overflow, division by zero, invalid shifts, and other undefined operations
-  must produce compile-time diagnostics instead of host undefined behavior.
+Integer arithmetic uses HUC's target widths, and unsigned arithmetic wraps.
+Floating-point arithmetic is IEEE 754 binary32 or binary64, rounding each
+operation to nearest, ties to even, with no fused or reassociated operations
+(section 5.2). `size_of` and `align_of` report the target, never the host.
 
-Eligibility is checked along the executed path. An unsupported operation in
-an untaken ordinary branch does not prevent evaluation. That branch must still
-be valid HUC and undergo normal parsing and type checking; it does not receive
-the opaque-body exemption of an unselected `if1`. Reaching an unsupported
+The evaluator checks every executed operation. Each of these is a compile-time
+diagnostic with the evaluation call stack, never host undefined behavior:
+
+- signed overflow, division by zero, and invalid shifts;
+- access through a null, dangling, or past-the-end pointer, or to a slot that
+  holds no live value of the accessed type, including one whose value was
+  relocated, extracted, or destroyed;
+- pointer arithmetic beyond one past the end of its object or allocation;
+- reading storage that was never initialized;
+- constructing over a live value or destroying an inactive slot;
+- deallocation errors and leaks (section 12.3).
+
+An ordinary function cannot name `let1 mod` storage, which has no run-time
+equivalent. It may still change compile-time objects through pointers it
+receives, including `this` (section 9.8). Actual `u8` and `c8` objects, such
+as string literal bytes or `Vector<u8>` elements, are accessed like any other
+values. Viewing an object of another type as bytes through `u8*` or `c8*` is
+deferred; it needs a byte-level model of target layout.
+
+Eligibility is checked along the executed path, following the call chain into
+ordinary and concrete generic callees. An unsupported operation in an untaken
+ordinary branch does not prevent evaluation. That branch must still be valid
+HUC and undergo normal parsing and type checking; it does not receive the
+opaque-body exemption of an unselected `if1`. Reaching an unsupported
 operation or exceeding an evaluator resource limit is a diagnostic with the
 call stack. There is no fallback to a runtime call.
 
@@ -3065,14 +3121,32 @@ fn field_width<>(value: u32) -> u32 {
 let1 width: u32 = @field_width(12345); // 5
 ```
 
+Structures and methods work the same way:
+
+```huc
+struct Span {
+    let first: i32;
+    let last: i32;
+
+    fn init(first: i32, last: i32) : first(first), last(last) {
+    }
+
+    fn length() -> i32 {
+        return this->last - this->first;
+    }
+}
+
+let1 span_length: i32 = Span(3, 10).length(); // 7
+```
+
 The evaluator uses the function's prepared, checked evaluation-mode body.
 Calling it from compiler code never inserts code at the caller. Local code
 inserted into the body with `#` is parsed and checked before that body
-executes. The scalar restrictions apply to the prepared body, including
-inserted code. Compile-time operations that run while it is prepared may still
-use compiler text and other compiler-only facilities. Inserted module code is
-suppressed in evaluation mode (section 11.2); a declaration that only it would
-provide cannot be used during evaluation.
+executes, and these rules apply to it too. Compile-time operations that run
+while it is prepared may still use compiler text and other compiler-only
+facilities. Inserted module code is suppressed in evaluation mode (section
+11.2); a declaration that only it would provide cannot be used during
+evaluation.
 
 ### 12.2 Repeated compiler calls
 
@@ -3090,9 +3164,10 @@ can observe the difference.
 Preparation still cannot read ordinary arguments (section 9.7). The current
 compiler storage and published declarations supply the inputs visible to each
 new preparation. Explicit `let1` storage can retain a computed value; that is a
-programmer-written variable, not automatic result reuse. Instruction and
-call-depth limits apply across preparation and execution of the complete nested
-call chain, including recursive calls.
+programmer-written variable, not automatic result reuse. It may also own
+compile-time allocations (section 12.3). Instruction, call-depth, and memory
+limits apply across preparation and execution of the complete nested call
+chain, including recursive calls.
 
 For example, these identical calls both execute:
 
@@ -3121,6 +3196,58 @@ definition; a retained runtime reference requires program-mode preparation and
 its module output even if evaluation mode has already completed the same
 specialization. Section 9.7 defines these emission rules independently of
 compiler-call execution.
+
+### 12.3 Compile-time allocation
+
+Two compiler operations allocate memory while code runs in the compiler:
+
+```huc
+compiler::allocate<T>(count)          // mod T* to count inactive slots
+compiler::deallocate<T>(slots, count) // releases them
+```
+
+`allocate` returns a pointer to `count` inactive slots for `T`, like a
+`raw_storage<T, count>` that lives on the heap; `count` may be zero. Values
+enter and leave the slots through `construct_at`, `destruct_at`, and
+extraction (section 6.7), and pointer arithmetic stays within the allocation.
+`deallocate` requires the pointer and count that `allocate` returned, and every
+slot must be inactive. Allocated memory counts toward the evaluator's memory
+limit.
+
+Both operations exist only in compiler execution. A runtime request that
+retains a call to either is rejected, so a library allocator selects them with
+the mode query, and the same container works in both phases:
+
+```huc
+import1 compiler;
+
+extern "C" fn malloc(size: usize) -> mod u8*; // probable runtime allocator
+
+fn allocate_slots<T: auto>(count: usize) -> mod T* {
+    if1 (compiler::emitting()) {
+        // Overflow checking of count * size_of<T>() is omitted here.
+        return ptr_as<mod T*>(malloc(count * size_of<T>()));
+    } else {
+        return compiler::allocate<T>(count);
+    }
+}
+```
+
+Deallocation follows the same pattern. An allocation lives until it is
+deallocated, not until the compiler call that made it returns. A value in
+`let1` storage can own allocations, so data such as a `Vector` built in one
+compiler call remains available to later calls in that `let1`'s scope
+(section 9.8). C++ instead requires memory allocated during constant
+evaluation to be freed before that evaluation ends.
+
+When a top-level compile-time evaluation finishes, such as an `@` or `#`
+operand, a phase clause, or a `let1` initializer, every live allocation must
+be reachable from `let1` storage. An unreachable allocation is reported as a
+leak. At the end of the translation unit, after module-level `let1` values are
+destroyed, no allocation may remain.
+
+Pointers into compile-time allocations never become runtime values
+(section 9.9). To use such data at run time, generate code from it with `#`.
 
 ## 13. Foreign interfaces
 
