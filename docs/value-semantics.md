@@ -523,8 +523,8 @@ often removes custom cleanup and move code. A `std::string` member could
 provide this text wrapper's resource management and copying with no custom
 special members. A `unique_ptr` member supplies cleanup and ownership transfer,
 but a copyable wrapper still needs to define how to duplicate its resource.
-The first HUC backend emits C17 with explicit lifetime operations; this source
-comparison does not describe the generated backend code.
+The first HUC backend emits LLVM IR with explicit lifetime operations; this
+source comparison does not describe the generated backend code.
 
 ### 6.2 Copying through a raw pointer
 
@@ -1356,10 +1356,10 @@ Reversing the arguments is a compile-time error: `document` is already
 inactive when `copy document` runs. Passing `document` by value twice is
 rejected for the same reason.
 
-C17 does not provide this argument-order guarantee. The backend must finish
+The LLVM backend must implement this argument-order guarantee. It must finish
 initializing each argument's **parameter value** before starting the next
 argument. Saving pointers to source places and deferring their transfers
-until the final C call is insufficient. Typed parameter slots, separately
+until the final LLVM call is insufficient. Typed parameter slots, separately
 or in a call frame, preserve sequencing and exactly-once cleanup. Optimizers
 may reorder pure computation when the program still behaves the same.
 
@@ -1789,8 +1789,8 @@ Warnings do not turn HUC into a memory-safe language and may be disabled.
 
 ## 16. Backend requirements
 
-The HUC0-to-C17 transpiler must preserve these source semantics rather than
-inheriting C defaults:
+The HUC0-to-LLVM compiler must preserve these source semantics rather than
+assuming LLVM provides HUC value lifetimes:
 
 1. Basic/Advanced classification is decided by HUC semantic analysis.
 2. `clone` runs only for an evaluated `copy` that requires it.
@@ -1807,8 +1807,8 @@ inheriting C defaults:
 9. Active/inactive state belongs to a storage place and must not add a hidden
    field to nominal `T`.
 10. Automatic cleanup follows tracked root state on every normal exit and
-    replacement. Programmer-managed extraction must respect that state; C
-    scope exit alone never performs HUC cleanup.
+    replacement. Programmer-managed extraction must respect that state;
+    backend storage reclamation alone never performs HUC cleanup.
 11. Relocation accepts writable whole root sources and writable pointer
     dereferences, with distinct source-cleanup responsibilities. Possibly
     aliasing source/destination storage is checked before replacement.
@@ -1824,10 +1824,11 @@ inheriting C defaults:
     or tag. Target layout queries and category queries are compile-time constants.
 
 The middle-end makes construction, copy, relocation, activation, deactivation,
-and cleanup explicit before C emission. C assignment and byte copying are
-permitted implementations only when they preserve the complete HUC operation,
-including active state, and obey C's storage and aliasing rules. This keeps
-the semantics usable by a future C++ or native-code backend.
+and cleanup explicit before LLVM emission. Loads, stores, and memory-transfer
+operations are permitted only when they preserve the complete HUC operation,
+including active state. LLVM attributes must not assert stronger lifetime,
+alias, or initialization guarantees than HUC provides. This keeps the value
+model independent of LLVM and usable by alternative backends.
 
 ## 17. Design references
 

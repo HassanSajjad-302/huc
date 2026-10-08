@@ -1,4 +1,5 @@
-(* HUC 0.1 bootstrap grammar.
+(* HUC design-draft grammar. Implementation release 0.1 may support only a
+   documented subset; unsupported syntax must be diagnosed explicitly.
 
    HUC0 and HUC1 have separate start symbols. Productions whose names end in
    "-0" are accepted by the standalone HUC0 parser. Productions whose names
@@ -193,7 +194,7 @@ raw-storage-pattern
    identical arguments. A binder followed by a phase-argument-list in a
    pattern stands for a family. These are semantic rules. *)
 
-(* Open-ended phase packs are intentionally absent from 0.1. *)
+(* Open-ended phase packs are deferred pending a separate design. *)
 
 (* ---------- Compiler-only storage ---------- *)
 

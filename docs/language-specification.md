@@ -1,20 +1,17 @@
-# HUC 0.1 Language Specification
+# HUC Language Specification
 
 Status: design draft
 
-Revision: 0.1
+Revision: evolving design draft; separate from implementation release 0.1
 
 Target audience: compiler implementers, library authors, and language reviewers
 
-> **Design update:** this document predates several accepted syntax decisions
-> and is being updated in stages. The
-> [controlling implementation plan](implementation-plan.md) and
-> [value-semantics specification](value-semantics.md) take precedence. In
-> particular, current HUC uses name-first `let name: Type` declarations,
-> fixed-by-default storage, layer-specific `mod`, destructive value transfer,
-> `fn clone() -> T`, and
-> `fn drop() mod -> void`; it has no source-level `const`, `var`, `copy struct`,
-> or C++ reference type.
+> **Document roles:** this specification and the grammar define the current
+> language, with detailed value rules in the
+> [value-semantics specification](value-semantics.md). The
+> [implementation plan](implementation-plan.md) controls release scope,
+> backend choices, and sequencing; it is not a different set of language
+> semantics. Proposed features remain separate until their rules are adopted.
 
 ## 1. Purpose and scope
 
@@ -34,10 +31,18 @@ HUC is not a memory-safe language. In particular, HUC does not have a borrow
 checker, lifetime parameters, mandatory bounds checks, or automatic data-race
 prevention.
 
-The 0.1 draft specifies enough of the language to build a bootstrap transpiler.
-It intentionally postpones inheritance, exceptions, coroutines, a stable native
-ABI, arbitrary user-defined implicit conversions, and general operator
-overloading.
+The goal is to specify the language as completely as possible, independently
+of how much the first compiler release implements. Release 0.1 may implement
+only a documented subset. Specifying a feature does not promise its inclusion
+in that release; missing implementation support does not change its semantics.
+The [implementation plan](implementation-plan.md) records scope and sequencing.
+
+Version 0.1 names the implementation release, not a second set of language
+rules. Features still marked deferred or proposed remain unspecified until
+their designs are adopted. The completeness goal does not silently enable them.
+Inheritance, exceptions,
+coroutines, a stable native ABI, arbitrary user-defined implicit conversions,
+and general operator overloading still require separate design work.
 
 ### 1.1 How to read the rules
 
@@ -63,7 +68,7 @@ Other recurring terms:
 
 ### 1.2 Design promises
 
-HUC 0.1 makes these promises:
+The current HUC design makes these promises:
 
 - `T*` is pointer-sized and has no ownership or lifetime tracking.
 - Relocating an Advanced value transfers its representation and makes the
@@ -78,7 +83,7 @@ HUC 0.1 makes these promises:
   before backend code generation.
 - Selected HUC1 syntax is residualized structurally. Generated text is parsed
   and checked when HUC1 inserts it; printed HUC0 is checked again by the
-  independent HUC0 translator before any C is emitted.
+  independent HUC0 translator before LLVM IR is emitted.
 
 HUC does not promise:
 
@@ -123,17 +128,17 @@ the imported source keeps its own namespace and lexical name lookup. HUC keeps
   translation unit. Ordinary authored files normally need only one section.
 - `import a.b;` binds the imported module under its last component, `b`.
 - `import a.b as c;` binds the module to `c`.
-- Unqualified wildcard imports do not exist in 0.1.
+- Unqualified wildcard imports do not exist.
 - Every top-level declaration is accessible through its namespace. A full
   canonical name uses `::`, for example `app::widget::Widget`; an import alias
-  provides the shorter spelling. HUC 0.1 has no module visibility or `export`
+  provides the shorter spelling. HUC has no module visibility or `export`
   keyword. Imports load source and bind aliases; they are not access barriers.
 - Resolve source imports with the configured module-to-file search paths.
   Process each imported source once per translation unit, in depth-first import
   order. A repeated import binds its alias without repeating declarations or
   compiler-stage effects. On return, restore the importer's namespace and
   lexical context. Conflicting aliases are diagnostics.
-- Import cycles are a diagnostic in 0.1.
+- Import cycles are a diagnostic.
 
 An imported function resolves unqualified names in its own lexical context,
 not in the caller's locals. A generic may nevertheless receive any suitable
@@ -216,7 +221,7 @@ The suffix is part of the keyword: `let1` is not `let` followed by the integer
 literal `1`. Functions and types use only `fn` and `struct`. An angle-bracket
 header makes `fn`, `struct`, or `let` a deferred family, even when it is empty.
 Suffix `1` marks compiler storage, imports, or control flow, not genericity.
-HUC 0.1 supports only the listed numbered forms. A spelling such as `fn0`,
+HUC supports only the listed numbered forms. A spelling such as `fn0`,
 `fn1`, `fn2`, `struct1`, `struct2`, `let2`,
 `if2`, or `import2` in the corresponding grammatical position
 receives an “unsupported phase class” diagnostic.
@@ -474,7 +479,7 @@ struct Pair {
 }
 ```
 
-All structure members are public in 0.1. HUC has no member-visibility labels,
+All structure members are public. HUC has no member-visibility labels,
 inheritance, or virtual dispatch.
 
 Construction selects an unnumbered `fn init(...)`. A constructor expression
@@ -483,7 +488,7 @@ initializes a local, a constructor field entry, a by-value parameter, or a
 `return` result, or is the value operand of `construct_at`. No temporary `T`
 exists and no destructive relocation occurs in these contexts. This
 guaranteed destination construction lets `init` observe
-the final `this` address; it is not optional backend copy elision. The C17
+the final `this` address; it is not optional backend copy elision. The LLVM
 backend may use explicit destination pointers to preserve this guarantee.
 
 `init` has an implicit `this: mod T*` receiver. Constructor initializer entries
@@ -617,10 +622,21 @@ return, argument, or method receiver.
   width is undefined behavior.
 - Floating-point behavior follows the selected target's IEEE-754 support unless
   a compilation mode explicitly permits relaxed math. Without such a mode, each
-  operation is rounded to its own type: the backend must not fuse operations,
+  operation is rounded to its own type using round-to-nearest, ties-to-even,
+  with gradual underflow: the backend must not fuse operations,
   for example into a multiply-add, or reassociate them. Compile-time evaluation
   always uses these strict rules (section 12.1), so a relaxed mode can make
   run-time results differ from compile-time ones.
+
+The default floating-point contract assumes this fixed environment. Dynamic
+rounding modes, observable floating-point exception flags, and enabled
+floating-point traps are not supported by the current design. Foreign code
+must restore the required environment before returning to HUC arithmetic.
+Maintaining that environment across foreign calls is the programmer's
+responsibility; no runtime check is required.
+An implementation must diagnose an unsupported target/mode combination rather
+than silently use excess precision, flush subnormals to zero, or relax the
+specified operations.
 
 ### 5.3 Pointer operations
 
@@ -639,7 +655,7 @@ pointer. A method call observes its receiver rather than transferring it.
 
 ### 5.5 Casts
 
-HUC 0.1 provides explicit casts:
+HUC provides explicit casts:
 
 ```huc
 as<T>(value) // checked by static conversion rules
@@ -670,7 +686,7 @@ lifetime metadata. Writing actually fixed storage remains undefined behavior,
 even after casting to a writable pointer. Byte access does not construct a
 value, destroy a replaced resource, or cancel automatic cleanup. Numeric
 narrowing is explicit. Representation reinterpretation of values (`bit_as`)
-is deferred from 0.1.
+is deferred pending a separate design.
 
 ## 6. Value transfer, copying, and destruction
 
@@ -757,7 +773,7 @@ self-relocation. If source and destination are the same storage, the operation
 is a no-op. Otherwise it destroys the old active destination and then performs
 the representation transfer above.
 
-This algorithm cannot be overloaded. HUC 0.1 has no move constructor,
+This algorithm cannot be overloaded. HUC has no move constructor,
 relocation constructor, relocation method, or move-assignment hook. Bitwise
 relocation defines the behavior, not the machine instructions. It does not
 require a memory-copy instruction or give padding bytes a defined meaning.
@@ -836,7 +852,7 @@ undefined behavior. The programmer must instead keep the inline value in one
 directly constructed fixed read-only storage location and never relocate it,
 redesign the representation, or use storage whose address remains stable.
 A mutable address-dependent object must likewise stay at its construction
-address while those invariants are needed. HUC 0.1 has no pinning qualifier,
+address while those invariants are needed. HUC has no pinning qualifier,
 neither infers this restriction, nor provides a custom relocation hook.
 
 ### 6.5 Destruction order
@@ -855,7 +871,7 @@ by-value parameters are destroyed before the call returns to its caller.
 On return, the result is bound first, then return-expression temporaries are
 cleaned up, then the function's remaining locals and parameters.
 
-HUC 0.1 has no exception unwinding. `panic` terminates the process after
+HUC has no exception unwinding. `panic` terminates the process after
 implementation-defined diagnostic output; it need not run pending destructors.
 
 #### 6.5.1 Temporary values
@@ -1504,7 +1520,7 @@ let limit: i32 = 100;
 
 `auto` requires an initializer and deduces exactly one type. It does not retain
 a reference or expression-category qualifier. Write `: auto` explicitly where
-inference is allowed. HUC 0.1 does not also accept an omitted `: Type`, the
+inference is allowed. HUC does not also accept an omitted `: Type`, the
 old type-first declaration form, or a destructuring declaration. Runtime
 parameters, fields, and globals require explicit types.
 
@@ -1616,7 +1632,7 @@ have a built-in explicit contextual conversion to `bool`; integers do not.
 
 ### 7.5 Function overloading
 
-0.1 permits overloading by arity and parameter types. Resolution uses:
+HUC permits overloading by arity and parameter types. Resolution uses:
 
 1. exact type matches;
 2. built-in lossless numeric promotions;
@@ -1702,7 +1718,7 @@ printable flattened HUC0 source
     |
     | runtime transpilation
     v
-C17 source
+LLVM IR -> object files -> executable
 ```
 
 The first translator must finish all compiler work and write ordinary HUC0.
@@ -1733,7 +1749,8 @@ It contains no numbered declaration or control-flow keyword, `import1`, `@`,
 `#`, unresolved family binder, specialization request, compiler-only value, or
 compiler metadata handle. Both import forms are resolved away. The HUC1
 translator writes one flattened file with namespace sections before the
-HUC0-to-C17 translator begins.
+HUC0-to-LLVM translator begins. Both translators are implemented in C++20;
+HUC0 remains a printable source boundary, not a private IR handoff.
 
 Built-in casts such as `as<T>` and `ptr_as<Target>`, type queries, and
 `raw_storage<T, N>` use angle operands without being phase-family requests.
@@ -1899,13 +1916,13 @@ Pattern forms for array, function, and pack types will follow those types.
 ### 9.3 Selection and residual declarations
 
 Each generic structure, variable, or function name has one primary family in
-a scope in 0.1; ordinary runtime `fn`
+a scope; ordinary runtime `fn`
 overloading remains a separate facility. In one scope, a function name is
 either a non-generic overload set or one generic family, never both. Use a full
 specialization such as `fn convert<><i32>(value: i32) -> i32 { ... }` for a
 family's concrete case, not a competing `fn convert(value: i32)` overload.
 The primary must precede its specializations, and a specialization must be
-declared in the primary's namespace in 0.1. It need not be in the same file:
+declared in the primary's namespace. It need not be in the same file:
 another file may reopen that namespace to specialize a library family for its
 own types. A specialization must also precede every request whose result it
 would change. Declaring it afterwards is an error if, for an earlier request,
@@ -1914,7 +1931,7 @@ the choice ambiguous. A later specialization that would still lose to the
 earlier choice is accepted. C++ has the same rule for specializations that
 would be used, but does not require a diagnostic.
 
-In 0.1, generic `struct` families are module-scope declarations; generic `fn` families may
+Generic `struct` families are module-scope declarations; generic `fn` families may
 be declared at module scope or as type members; and generic `let` families may be
 declared at module, function, or nested-block scope but never as fields. Local
 generic `fn` or generic `struct` declarations and nested type families are deferred.
@@ -2000,7 +2017,7 @@ Every selected path must leave:
 
 Compiler-only setup, `let1`, and phase control are permitted in the selection
 body because they disappear. A `#` insertion remains prohibited within a
-generic `let` selection body in 0.1. Parsing generated text does not relax this
+generic `let` selection body. Parsing generated text does not relax this
 separate restriction on variable families.
 
 Different specializations of one family may choose different value types,
@@ -2430,7 +2447,7 @@ exposes compiler-only declarations; it does not create a runtime dependency.
 The compiler-supplied `compiler` namespace is bound this way without reading
 a user source file. Both import forms disappear from flattened HUC0; retained
 declarations use namespace sections and canonical references instead.
-These are the two import forms in 0.1. Import cycles are rejected with the
+These are the two import forms. Import cycles are rejected with the
 complete cycle path.
 
 Residualization removes the phase mechanism itself:
@@ -2564,7 +2581,7 @@ compiler::Expression
 compiler::Instruction
 ```
 
-These names are design directions, not a complete 0.1 API. In particular, this
+These names are design directions, not a specified API. In particular, this
 document does not yet standardize their constructors, query methods, ownership,
 or serialization.
 
@@ -2606,8 +2623,9 @@ ordinary `this` would remain the runtime `T*` receiver.
 
 This is only a reserved direction. A separate design must settle exact handle
 types, navigation, dependency tracking, identity, nested declarations, and
-behavior during code preparation. Neither bootstrap milestone
-implements `@this`, and no 0.1 program may depend on it.
+behavior during code preparation. This proposal may be specified before the
+compiler implements it, but no program may depend on it until its rules are
+adopted and its implementation support is declared.
 
 ## 11. Text generation and insertion
 
@@ -2959,7 +2977,7 @@ escape literals correctly.
 
 ### 11.5 Facilities not added by text generation
 
-HUC 0.1 does not define `quote`, structural syntax values, expression capture,
+HUC does not define `quote`, structural syntax values, expression capture,
 `compiler::fresh`, splicing, `emit`, `gen`, `gen_global`, `gen_up`,
 `gen_module`, `gen_huc0_module`, or a public `parse_huc` operation. Parsing
 inserted HUC0 is compiler behavior, not a new user-callable parsing API.
@@ -3270,14 +3288,17 @@ Copying or passing a raw pointer does not itself establish or release any
 cleanup obligation.
 
 C-layout structure attributes, opaque foreign handle declarations, and C
-variadics are deferred from 0.1. A small C shim can flatten such an interface
-to the supported scalar and pointer boundary.
+variadics are deferred pending separate designs. A small C shim can flatten
+such an interface to the supported scalar and pointer boundary.
 
-The bootstrap compiler emits ISO C17 with explicit HUC construction,
-relocation, and cleanup. Generated C is an implementation technique, not a
-stable HUC binary ABI. C++ interoperability may be added later through C ABI
-adapters or a separate binding/backend design; arbitrary C++ headers are not
-directly consumable in 0.1. The compiler itself is implemented in C++20.
+The planned HUC0 compiler lowers directly to LLVM IR, with explicit HUC
+construction, relocation, and cleanup. This does not define a stable HUC binary
+ABI or automatically supply C source compatibility. The backend must lower
+each supported foreign signature according to the selected target's C ABI;
+LLVM IR types alone are not that contract. Broader Clang/header integration
+requires its own adopted design. C++ interoperability may be added through
+C ABI adapters or a separate binding design. Both translators are implemented
+in C++20; neither emits C or C++ as its initial backend language.
 
 ## 14. Undefined behavior summary
 
@@ -3303,9 +3324,10 @@ The following list is representative rather than exhaustive:
 Because undefined behavior is part of HUC's low-level contract, a compiler may
 optimize on the assumption that it does not occur.
 
-## 15. Deliberate omissions from 0.1
+## 15. Current design boundaries
 
-The following require separate proposals:
+The following require separate proposals. This list describes the current
+design, not the complete set of features that release 0.1 might leave unimplemented:
 
 - checked references or lifetime analysis;
 - primitive fixed arrays;
@@ -3328,7 +3350,7 @@ relocation; copying them explicitly exposes reference-count changes.
 
 ## 16. C++ comparison
 
-The closest C++ equivalents are conceptual, not emitted C17 declarations:
+The closest C++ equivalents are conceptual, not the backend representation:
 
 | HUC | Approximate C++ |
 |---|---|
@@ -3361,20 +3383,28 @@ substitution rules, or unspecified operand order.
 The bootstrap driver exposes:
 
 ```text
-huc lower <root.huc0> --out-dir <c-directory>
+huc lower <root.huc0> --out-dir <llvm-directory>
 huc stage <root.huc1> --out-dir <huc0-directory>
 huc build <root.huc1> --out-dir <build-directory>
 ```
 
-Every implementation must report its language revision and target triple.
-Feature experiments must be opt-in and must not silently change 0.1 semantics.
+Every implementation must report its language revision, supported feature
+subset, and target triple. Release 0.1 need not implement the entire draft.
+Within its declared subset, it must preserve the specified rules and diagnose
+unsupported constructs or operations when the language rules require them to
+be processed; unselected deferred bodies retain their usual exemption.
+Rejection because a feature is not yet implemented must be distinguished from
+invalid HUC. Feature experiments must
+be opt-in and must not silently change the specified semantics.
 
-The language specification, not emitted C behavior, is authoritative. If the
-backend language has a different evaluation order, destruction rule, or name
-lookup rule, the transpiler must generate code that preserves HUC semantics.
-The planned bootstrap transpilers and command-line driver will be implemented
-in C++20; the first HUC0 backend emits C17 source. Ownership and cleanup are
-lowered explicitly before emission rather than supplied by backend RAII.
+The language specification, not LLVM behavior, is authoritative. HUC semantic
+analysis and lifetime lowering precede LLVM IR generation. LLVM optimizations
+must preserve every defined HUC behavior; LLVM does not infer HUC ownership.
+Both translators and the driver are C++20 programs. The initial backend is
+LLVM IR, not generated C or C++. The implementation plan recommends a thin
+end-to-end start while retaining staging first as an alternative. Both routes
+share frontend analysis and HIR/MIR for ordinary-function evaluation; staging
+first postpones native emission, not those dependencies.
 
 ## Appendix A: Consolidated example
 

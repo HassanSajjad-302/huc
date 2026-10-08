@@ -6,14 +6,14 @@ Language name: HUC, “Hassan’s Update on C”
 
 Implementation language: C++20
 
-First output language: C17
+First backend target: LLVM IR
 
 License: MIT
 
-This document records the decisions for updating the specification and building
-the first two compiler milestones. If the older specification, grammar,
-examples, or architecture disagree with this plan, follow this plan until
-those documents are updated.
+This document controls implementation scope and sequencing. The language
+specification defines semantics; this plan records how much of that design
+the compiler implements and how it is built. The current direction replaces
+the earlier C17 backend and mandatory HUC0-first milestone order.
 
 Some terms used below:
 
@@ -41,23 +41,61 @@ printable flattened HUC0 source
     |
     | huc0_transpile
     v
-C17 headers + one root translation unit
+LLVM IR (.ll / .bc)
+    |
+    | LLVM optimization and target code generation
+    v
+object files -> linker -> executable
 ```
 
-The implementation order is:
+### 1.1 Specification and release scope
 
-1. **Milestone 1: HUC0 to C17.**
-2. **Milestone 2: HUC1 to HUC0.**
+Make the specification as complete as possible rather than limiting design
+work to what the first compiler can implement. Release 0.1 may support only
+parts of that specification. No complete release feature list is fixed yet.
+Keep an implementation-support list for each translator and target, identifying
+what is specified, implemented, and tested. Unsupported features need explicit
+diagnostics; implementing only part of the language does not permit changing
+the semantics of supported features.
 
-This order is intentional. HUC0 gives HUC1 a concrete, executable target and
-requires the runtime rules to be settled before staging is added.
+Existing deferred/proposed features still need their designs completed and
+adopted. They may be specified before implementation reaches them. Neither
+the full reflection design nor any other unfinished proposal is automatically
+enabled by this planning change.
 
-C17 is the first output language because HUC already needs to lower lifetime
-operations and evaluation order explicitly. Plain C structures, pointers, and
-generated functions express those decisions without implicit special members.
-The compiler itself remains C++20. C++ interoperability and other output
-backends are later work, not requirements of the first emitter. The initial
-output uses ISO C17 rather than requiring compiler-specific extensions.
+### 1.2 Implementation routes
+
+The recommended first milestone is a thin end-to-end slice. Two routes remain
+available; neither requires implementing the entire specification at once:
+
+- **End to end (recommended):** implement both translators and the LLVM backend
+  for a small, coherent feature slice. Start with scalar types, functions,
+  arithmetic, branches, one fixed-signature C call, and an ordinary function
+  tested both through `@` and as compiled code. This exercises shared MIR, the
+  entry point, foreign ABI, and linking early.
+- **Staging first:** implement a selected HUC1-to-HUC0 subset, with readable
+  output and golden tests. Evaluating ordinary functions still requires shared
+  HUC0 parsing, semantic analysis, HIR, and sequenced MIR for those features.
+  This route postpones LLVM emission and native execution, not the shared
+  semantic work. A pass-through-only demonstration can start with less, but
+  does not demonstrate ordinary-function evaluation.
+
+Sections 10 and 11 describe workstreams with shared dependencies, not independent
+implementations or an enforced order. The interpreter in section 11.3 depends
+on the frontend and HIR/MIR in sections 10.2 through 10.5 for its supported
+subset; it does not depend on LLVM emission in section 10.6. Both routes retain
+independently usable HUC0 and HUC1 translators and the written HUC0 boundary.
+Choose the exact release subset when implementation begins. Matching `@` and
+native results is useful differential testing, not an independent correctness
+oracle: both paths can share a MIR bug. Keep separately specified expected
+results and independently compiled C ABI fixtures too.
+
+Both translators and the driver remain C++20 programs. HUC0 lowers directly
+to LLVM IR; no C or C++ source emitter is required. HUC still implements
+construction, relocation, evaluation order, and cleanup explicitly before
+LLVM optimization. LLVM supplies optimization and target code generation,
+not HUC semantics. Foreign ABI lowering, target layout, debug information,
+runtime support, and linking remain explicit compiler responsibilities.
 
 ## 2. Product position
 
@@ -76,7 +114,8 @@ HUC is not a memory-safe Rust alternative. It deliberately permits:
 The language provides deterministic cleanup for active values, but it
 does not infer or prove the safety of raw observers.
 
-The initial release does not include:
+The following remain outside the adopted core design or need separate designs;
+none is made a release requirement by the completeness goal:
 
 - a borrow checker or lifetime annotations;
 - inheritance or virtual dispatch;
@@ -144,9 +183,9 @@ count in HUC0. These are the only angle forms accepted by HUC0.
 All HUC intrinsics have unqualified names, not `std::` names; they are not
 ordinary standard-library functions.
 
-Primitive fixed arrays and `bit_as` are deferred from 0.1. Containers and
-swapping can initially be supplied by libraries. Raw storage supplies their
-inline backing slots without becoming a general array or sum type.
+Primitive fixed arrays and `bit_as` are deferred pending separate designs.
+Containers and swapping can initially be supplied by libraries. Raw storage
+supplies their inline backing slots without becoming a general array or sum type.
 
 ### 4.2 HUC1
 
@@ -505,7 +544,7 @@ Rules:
 - fixed locals and globals require an initializer;
 - every constructor must initialize any fixed field that has no declaration
   initializer;
-- constructors cannot return recoverable errors in 0.1; creation that can
+- constructors cannot return recoverable errors; creation that can
   report an error will use named factory functions and library result types
   later.
 
@@ -553,7 +592,7 @@ relocation assignment.
 The complete rules, diagnostics, and side-by-side C++20 examples are in
 [Value Semantics and Special Operations](value-semantics.md).
 
-HUC 0.1 has no exception unwinding. Process termination through panic need not
+HUC has no exception unwinding. Process termination through panic need not
 run pending cleanup.
 
 Unconsumed temporaries remain alive until their full expression finishes,
@@ -596,9 +635,9 @@ destroyed at the enclosing full-expression boundary. Selecting pointers with
 
 The backend must initialize each typed by-value parameter before evaluating
 the next argument. Keeping only a pointer to the source expression is not
-enough, and C's unspecified argument order cannot decide the order for HUC.
+enough; parameter binding must already be sequenced in MIR.
 Generated typed storage or a call frame may pass these already-initialized
-values to the C call. Optimizers may still reorder pure computation when the
+values to the LLVM call. Optimizers may still reorder pure computation when the
 program behaves the same.
 
 ### 5.8 Runtime overloading
@@ -636,8 +675,8 @@ The source syntax follows the same small rules at both source levels:
 - The [formatting guide](formatting.md) defines the default style, not compiler
   acceptance. Operator spacing, indentation, and line width are not grammar.
 
-A canonical formatter is future tooling, not a new prerequisite for either
-bootstrap milestone.
+A canonical formatter is future tooling, not a prerequisite for either
+implementation route.
 
 ## 6. HUC1 phase semantics
 
@@ -740,17 +779,17 @@ runtime argument types. Non-deducible parameters must be supplied explicitly.
 ### 6.4 Specialization selection
 
 Each generic `struct` and generic `let` name has one primary family per scope. Each generic `fn`
-name also has one primary family per scope in 0.1; normal runtime `fn`
+name also has one primary family per scope; normal runtime `fn`
 overloading remains available. A name in one scope is either a non-generic
 overload set or one generic family, never both; concrete family cases use full
 specializations rather than ordinary overload declarations.
 
-Generic structures are module-scope in 0.1. Generic functions are allowed at
+Generic structures are module-scope. Generic functions are allowed at
 module or type-member scope. Variable families are allowed at module, function,
 or nested-block scope and never as fields. Local generic functions/structures
 and nested type families are deferred.
 
-The primary must precede its specializations. In 0.1, every specialization
+The primary must precede its specializations. Every specialization
 must be declared in the primary's namespace, not necessarily the same file:
 another file may reopen that namespace. A specialization must also precede every
 request whose selection it would change, by being chosen or by making the
@@ -761,7 +800,7 @@ type; no reverse import is required. A concrete definition keeps its family's
 namespace, lexical lookup, and declaration position, not separate compilation
 ownership. Flattened HUC0 uses canonical references and namespace sections.
 Module-level generated output has a separate requesting-site anchor (section
-6.11). HUC 0.1 has no module visibility.
+6.11). HUC has no module visibility.
 
 Selection:
 
@@ -1000,7 +1039,7 @@ root. Original and imported sources retain their own buffers and locations.
 The same namespace-section grammar is accepted by the standalone HUC0 parser;
 no `#include`, general `namespace` keyword, or private bundle format is added.
 
-These are the two import forms in 0.1. Import cycles are rejected with the
+These are the two import forms. Import cycles are rejected with the
 complete cycle path.
 
 ### 6.11 Text generation and generation modes
@@ -1077,8 +1116,8 @@ building call chain. Preparations never depend on ordinary argument values.
 Every compiler call gets a fresh evaluation-mode body, using currently
 published, checked declarations; it cannot publish pending output early.
 That state never enters name mangling. No caching or cache-eligibility analysis
-is part of 0.1. Definition identity, recursion tracking, and once-only program
-publication remain required.
+is part of the current design. Definition identity, recursion tracking, and
+once-only program publication remain required.
 
 `compiler::error(message)` is also part of the bootstrap module. It accepts
 one compile-time text argument and has result type `never`: it fails
@@ -1124,7 +1163,7 @@ language-level equivalent of an always-included header. `import1 compiler`
 binds that already loaded interface under the `compiler` name. The bootstrap
 interface declares `compiler::Code`, its three constructors,
 `compiler::emitting()`, and `compiler::error(message)`; later versions add the
-public handle types above without exposing internal C compiler objects.
+public handle types above without exposing internal compiler objects.
 
 The future API should provide read-only snapshots of checked code and stable
 IDs, not direct access to the compiler's internal AST objects. Structured edits
@@ -1141,8 +1180,17 @@ diagnose `@this`; exact APIs and dependency semantics are a separate design.
 
 ## 8. Compiler organization
 
-All compiler and command-line driver code is ISO C++20. The first generated
-output is ISO C17; implementation and output languages are separate choices.
+Both translators and the command-line driver are C++20 programs. HUC1 emits
+HUC0 source; HUC0 emits LLVM IR through LLVM's C++ APIs. Pin a supported LLVM
+version and keep LLVM-specific ownership and APIs behind the backend boundary.
+Implementation and output languages remain separate choices.
+
+Writing textual `.ll` and invoking a pinned LLVM tool such as `llc` is an
+optional bootstrap alternative if linking LLVM becomes an initial obstacle.
+It is still direct LLVM lowering, not a C-source backend, and does not remove
+HUC's ABI or semantic responsibilities. The planned path remains in-process
+LLVM through its C++ APIs, which can also print `.ll` for inspection and golden
+tests. Keep either transport behind the same backend boundary.
 
 The repository will contain:
 
@@ -1158,7 +1206,7 @@ src/
   huc1/
   driver/
 runtime/
-  huc_runtime.h
+  support/
 tests/
   unit/
   golden/
@@ -1171,7 +1219,7 @@ Logical libraries:
 - `huc_common`: sources, diagnostics, tokens, module graph, canonical IDs,
   target information, arenas, and common parser facilities;
 - `huc0`: standalone HUC0 frontend, semantic analysis, HIR, MIR, ownership
-  lowering, and C17 emission;
+  lowering, and LLVM IR generation, verification, and object emission;
 - `huc1`: HUC1 indexing, deferred-body spans, phase checking, interpreter,
   specialization, and HUC0 residualization;
 - `huc`: thin command-line driver.
@@ -1235,15 +1283,17 @@ diagnostics rather than thrown as exceptions.
 The driver commands are:
 
 ```text
-huc lower <root.huc0> --out-dir <c-dir>
+huc lower <root.huc0> --out-dir <llvm-dir>
 huc stage <root.huc1> --out-dir <huc0-dir>
 huc build <root.huc1> --out-dir <build-dir>
 ```
 
-`lower` is implemented first. `stage` is implemented in Milestone 2. `build`
-chains `stage` and `lower` through files, not an undocumented AST shortcut.
+`stage` may be implemented before native lowering, or both commands may grow
+together. `build` chains them through files, then emits and links object code;
+it does not use an undocumented AST shortcut. A command not yet implemented
+for the selected release subset reports that limitation explicitly.
 
-## 10. Milestone 1: HUC0 to C17
+## 10. HUC0-to-LLVM workstream
 
 ### 10.1 Exit result
 
@@ -1251,18 +1301,17 @@ Given a `.huc0` translation unit with acyclic source imports, or a flattened
 file with namespace sections, the translator emits:
 
 ```text
-build/c/
-  huc_runtime.h
-  app/main.huc.h
-  app/main.huc.c
+build/llvm/
+  app/main.ll
+  app/main.bc       # optional bitcode serialization
   app/main.huc.map
 ```
 
-The root guarded header contains the translation unit's declarations. The root
-`.c` includes that header and is the only compiled C17 translation unit.
-Module names and HUC overloads become deterministic, collision-free C
-identifiers. Imports do not create object-file boundaries or require per-module
-generated headers.
+One HUC translation unit produces an LLVM module with deterministic symbols
+for namespace-qualified declarations and overloads. Source imports do not
+create object-file boundaries. The target triple and data layout are explicit.
+Object emission uses LLVM; linking is a separate driver step. Neither generated
+C headers nor an external C compiler is part of HUC lowering.
 
 ### 10.2 Increment A: project and source infrastructure
 
@@ -1388,7 +1437,8 @@ MIR records:
 - whole-source deactivation without clearing source bytes;
 - tracked-root versus programmer-managed indirect source cleanup.
 
-No semantic decision is deferred to the C compiler or its ABI lowering.
+No HUC semantic decision is deferred to LLVM. Foreign ABI lowering is an
+explicit part of the backend, separate from HUC lifetime decisions.
 
 Acceptance:
 
@@ -1397,35 +1447,67 @@ Acceptance:
 - tracked-root cleanup is exactly once on every normal exit when user code
   respects indirect extraction and other unchecked lifetime contracts.
 
-### 10.6 Increment E: scalar C17 backend
+### 10.6 Increment E: scalar LLVM backend
 
 Emit:
 
-- deterministic generated identifiers;
-- mangled identifier prefixes for modules and overloads;
-- guarded headers;
-- the root source file;
-- a C `int main(void)` adapter for the configured root module's sole HUC
-  `fn main() -> i32`;
-- scalar and raw-pointer declarations;
-- fixed-signature C-linkage declarations;
-- structures, functions, and runtime control flow;
-- explicit temporaries preserving left-to-right evaluation;
-- `#pragma STDC FP_CONTRACT OFF` and no fast-math options unless the program
-  selects relaxed math, so floating point matches compile-time evaluation;
-- generated free functions for methods and constructor initialization, using
-  explicit receivers and final-destination pointers where needed;
-- `#line` or sidecar source-map information where practical.
+- an LLVM module with deterministic symbols, target triple, and data layout;
+- concrete scalar, pointer, aggregate, function, and control-flow IR;
+- a platform entry-point adapter for the root module's HUC `fn main() -> i32`;
+- target-correct declarations and calls for the supported C ABI subset;
+- explicit instruction and parameter-binding order from MIR;
+- strict floating-point lowering by default, without contraction or
+  reassociation, using ordinary LLVM operations for the fixed default
+  environment; relaxed flags require an explicit HUC mode;
+- initialization, clone, and drop functions with explicit receivers and final
+  destinations where needed;
+- source-origin sidecars and LLVM debug information as support is added.
 
-Generated C is an implementation artifact, not HUC's semantic authority. HUC
-fixedness is checked before emission; physical C storage must remain writable
-where compiler-generated relocation or reinitialization requires it. Lowering
-must respect C alignment, effective-type, aliasing, and arithmetic rules.
+HUC permissions, ownership, and lifetime checks happen before LLVM emission.
+Do not attach LLVM alias, overflow, lifetime, or pointer attributes merely
+because a source binding is fixed or Advanced. Each assertion must follow
+from HUC semantics. Verify generated IR before optimization and verify
+optimized IR in tests. A verifier pass is necessary but does not prove that
+the lowering preserves HUC behavior.
+
+Document justified optimization information as well as prohibitions:
+
+- use `nsw` for signed addition, subtraction, and multiplication whose overflow
+  is undefined in HUC, at the width of the source operation;
+- preserve unsigned wrapping without `nuw`, unless a separate proof rules out
+  overflow; do not apply signed-overflow promises to unrelated lowering steps;
+- use `inbounds` on address calculations only when HUC's object bounds and
+  offset rules establish LLVM's full requirements, including intermediate
+  offsets; a pointer cast alone establishes no such guarantee;
+- consider type-based alias metadata later, after spelling out compatible
+  accesses and the `u8`/`c8` byte-access exceptions. Resource ownership alone
+  never justifies `noalias`.
+
+Use ordinary `fadd`, `fmul`, and related operations without fast-math flags in
+the default mode. Explicitly configure the backend against contraction and
+reassociation rather than relying on tool defaults. Constrained intrinsics
+are not required for this fixed environment; reconsider them only if dynamic
+rounding or observable floating-point exceptions are added. Initially support
+targets that can meet the contract. In particular, require SSE2 for an initial
+32-bit x86 floating-point implementation, or diagnose that target as unsupported;
+do not silently fall back to excess-precision x87 arithmetic or relaxed math.
+
+The C boundary needs target-correct lowering even for scalars: small integers
+and booleans can need sign/zero extension and parameter/result attributes.
+Test calls and returns in both directions against independently compiled C
+fixtures. Clang's `CodeGenABITypes` is a possible later reuse path, not a
+standalone replacement for this work: it requires Clang AST types and a
+code-generation context. Broader Clang integration remains a separate design.
 
 Acceptance:
 
-- scalar examples compile with a selected C compiler in ISO C17 mode;
+- scalar examples pass LLVM verification and compile to objects for the
+  selected target;
 - execute tests match expected output and side-effect order;
+- C ABI tests cover booleans, narrow signed/unsigned integers, pointers, and
+  floating-point arguments and results at unoptimized and optimized settings;
+- strict floating-point tests include a case that would change under fused
+  multiply-add and a case that would change under reassociation;
 - generated output is stable across repeated builds.
 
 ### 10.7 Increment F: value transfer and lifecycle
@@ -1435,7 +1517,7 @@ drop flags for compiler-managed roots. Emit cleanup on normal exits, early
 returns, loop exits, and replacement of active destinations. A directly
 relocated root receives no cleanup and need not be cleared. Pointer extraction
 does not update automatic cleanup through aliases; programmers prevent
-cleanup of the old slot. C scope exit does not perform HUC cleanup.
+cleanup of the old slot. LLVM supplies no automatic HUC destruction.
 
 Implement:
 
@@ -1454,7 +1536,7 @@ Acceptance:
 - straight-line relocations require no hidden state;
 - conditional relocations use flags only when necessary;
 - unconsumed temporaries survive until their full-expression boundary,
-  then clean up in reverse order, independently of generated C statement layout;
+  then clean up in reverse order, independently of backend storage placement;
 - consumed temporaries and directly constructed destinations receive no
   duplicate cleanup at expression boundaries;
 - every named use of an `Inactive` or `MaybeActive` root is rejected, including
@@ -1473,21 +1555,23 @@ Acceptance:
 - manual destruction performs full drop/field cleanup without deallocation;
 - neither intrinsic updates automatic cleanup state through aliases;
 - ordinary binding never invokes `clone`;
-- sanitizers find no backend double destruction;
+- cleanup counters and, where enabled, instrumented runtime tests find no
+  backend double destruction;
 - optimized operation counts match equivalent explicit C resource-management code.
 
-### 10.8 Milestone 1 completion gate
+### 10.8 HUC0 subset completion gate
 
-Milestone 1 is complete when:
+The chosen HUC0 implementation subset is complete when:
 
-- standalone `.huc0` programs compile and run through generated C17;
-- value transfer, constructors, `drop`, `clone`, and left-to-right semantics have
+- standalone `.huc0` programs in that subset compile and run through LLVM;
+- each included value/lifecycle feature and left-to-right semantics have
   executable tests;
-- the HUC0 grammar/specification match the implementation;
+- the supported subset matches the specification, and unsupported features
+  produce clear diagnostics;
 - diagnostics and output are deterministic;
 - no HUC1 facility is required by the HUC0 compiler.
 
-## 11. Milestone 2: HUC1 to HUC0
+## 11. HUC1-to-HUC0 workstream
 
 ### 11.1 Exit result
 
@@ -1495,8 +1579,12 @@ Given a `.huc1` root and its imports, the stage translator writes one flattened
 `.huc0` file with namespace sections. Both import forms and every phase
 declaration disappear; imported aliases become canonical qualified references.
 
-The generated HUC0 is then accepted by the already completed Milestone 1
-translator without a private compatibility mode.
+The generated HUC0 is checked using the shared HUC0 frontend for the supported
+subset. Ordinary-function evaluation also requires that frontend's HIR and MIR;
+section 11.3 depends on sections 10.2 through 10.5, not on LLVM emission. This
+workstream can precede native code generation. Once the backend is available,
+the same output must compile through the public HUC0-to-LLVM translator without
+a private compatibility mode.
 
 ### 11.2 Increment A: staged indexing and pass-through
 
@@ -1525,7 +1613,7 @@ Acceptance:
 
 Interpret typed IR in process. Lower ordinary bodies to the sequenced MIR of
 section 10.5, extended with compiler-only values, so evaluation order,
-relocation, and cleanup match the C backend.
+relocation, and cleanup match the LLVM backend.
 
 Values include:
 
@@ -1732,24 +1820,27 @@ Acceptance:
 - repeated identical compiler calls, including code builders, run again;
   explicitly stored results and once-only program definitions remain distinct.
 
-### 11.7 Milestone 2 completion gate
+### 11.7 HUC1 subset and end-to-end completion gates
 
-Milestone 2 is complete when:
+The chosen staging subset is complete when:
 
 - every numbered construct is removed from generated HUC0;
 - flattened generated source is deterministic and independently readable;
-- the public HUC0 translator accepts all successful HUC1 output;
-- global/type/local phase control, specialization, and text generation have
-  golden and negative tests;
-- the full two-stage driver compiles representative HUC1 programs to runnable
-  programs through generated C17.
+- the shared HUC0 frontend accepts all successful HUC1 output within the
+  declared subset, with no private extensions;
+- each included staging feature has golden and negative tests.
+
+End-to-end completion additionally requires the full driver to compile and run
+representative HUC1 programs through HUC0 and LLVM. A staging-first milestone
+may finish before that integration gate; it must not claim native execution
+coverage that has not yet been tested.
 
 ## 12. Source maps and diagnostics
 
 Every node or emitted range carries an origin chain:
 
 ```text
-C range
+LLVM instruction/debug location
   -> HUC0 range
   -> HUC1 selected source or generated text
   -> compile-time call site
@@ -1793,7 +1884,7 @@ Check exact:
 
 - AST, HIR, and MIR dumps;
 - HUC1-to-HUC0 flattened translation units;
-- HUC0-to-C17 translation-unit headers and root source;
+- HUC0-to-LLVM unoptimized textual IR and selected optimized IR;
 - diagnostic text and source spans;
 - stable generated names.
 
@@ -1857,7 +1948,7 @@ Include:
 
 ### 13.4 Execute tests
 
-Compile generated C17 and test:
+Verify LLVM IR, compile to objects, link, and test the implemented subset:
 
 - typed address-taking and explicit integer-address casts with side-effecting
   operands evaluated once;
@@ -1880,7 +1971,7 @@ Compile generated C17 and test:
   Advanced pop, Basic copy-and-retire, clear, and container relocation;
 - one-slot optional storage without any default construction of its payload;
 - generic `if1 (is_basic<T>())` selecting Basic source destruction only;
-- target query results matching emitted C layout, including cross targets;
+- target query results matching LLVM data layout, including cross targets;
 - slot addresses for inline, pointer, and fixed storage;
 - slot-address round trips and byte access without extra ownership operations;
 - conditional relocations;
@@ -1912,8 +2003,18 @@ Compile generated C17 and test:
   translation;
 - full HUC1-to-program examples.
 
-Use ASan and UBSan to find compiler/backend mistakes. Tests must not treat
-intentional HUC undefined behavior as a required result.
+Build the C++20 compiler itself with ASan and UBSan in development and CI to
+detect bugs in the compiler implementation, including its backend code.
+
+Instrumenting generated HUC programs is separate work. ASan needs LLVM's
+instrumentation pass, the appropriate IR annotations, and its target runtime.
+UBSan-style checks need explicit HUC lowering before optimization can exploit
+the unchecked operation: feeding HUC-generated IR to Clang with
+`-fsanitize=undefined` does not recreate Clang's source-level checks. Track this
+support separately rather than treating sanitizer flags as complete coverage.
+Keep explicit cleanup counters and expected-result tests even when sanitizers
+are enabled. Tests must not treat intentional HUC undefined behavior as a
+required result.
 
 ### 13.5 Fuzz and determinism tests
 
@@ -1927,7 +2028,8 @@ Fuzz:
 - specialization pattern matcher.
 
 Compile the same input repeatedly with different allocator and hash seeds and
-require byte-identical HUC0/C artifacts.
+require byte-identical HUC0 and normalized LLVM IR artifacts for the same
+target, options, and pinned LLVM version.
 
 ## 14. Documentation work
 
@@ -1938,7 +2040,7 @@ Before a compiler feature is considered complete:
 - replace `docs/huc.ebnf` with shared productions and separate HUC0/HUC1 start
   symbols;
 - rewrite `docs/transpiler-architecture.md` around the two public libraries and
-  corrected milestone order;
+  LLVM backend and the selected implementation route;
 - update README examples;
 - maintain `docs/use-cases-and-examples.md` as executable examples become
   supported;
@@ -1958,18 +2060,17 @@ The design commits record:
 - the MIT license;
 - project ignore rules.
 
-Implementation commits should be small and milestone-oriented:
+Implementation commits should be small and feature-oriented. Start with common
+C++20 source, diagnostic, and frontend infrastructure, then preferably the thin
+end-to-end slice from section 1.2. Staging first remains an alternative, but
+ordinary-function evaluation still depends on shared semantic analysis and
+HIR/MIR. Grow those layers for the chosen features alongside staging; LLVM
+emission can follow later on that route. The order of these sections is not a
+release schedule.
 
-1. common C++20 project skeleton;
-2. HUC0 lexer/parser;
-3. HUC0 semantic core;
-4. HIR/MIR and scalar C17 output;
-5. value transfer and lifecycle;
-6. HUC0 hardening;
-7. HUC1 staging skeleton;
-8. interpreter and phase control;
-9. specialization;
-10. text generation and full pipeline.
+Each completed feature should update the implementation-support list with its
+tests and supported targets. Do not label the whole specification implemented
+because one pipeline example works.
 
 Each commit must leave existing tests passing. Generated artifacts and IDE
 state are not committed.

@@ -243,16 +243,17 @@ The planned reflection API starts with the code's immediate context.
 Reserved future syntax such as `@this` may expose the narrowest enclosing
 compiler object—a function inside a function, a class inside a class body, or
 a module at module scope. The API would let code ask for broader context when
-needed. This reflection model is not part of the first two compiler milestones.
+needed. Its specification can be developed before the compiler implements it;
+it is not a prerequisite for the first implementation slice.
 
 ## Documents
 
 - [Controlling implementation plan](docs/implementation-plan.md)
 - [Value semantics and special operations](docs/value-semantics.md)
 - [Detailed use cases and examples](docs/use-cases-and-examples.md)
-- [HUC 0.1 language specification](docs/language-specification.md)
-- [Bootstrap transpiler architecture](docs/transpiler-architecture.md)
-- [Bootstrap grammar](docs/huc.ebnf)
+- [HUC language specification](docs/language-specification.md)
+- [Compiler architecture](docs/transpiler-architecture.md)
+- [Language grammar](docs/huc.ebnf)
 - [Default formatting guide](docs/formatting.md)
 - [Resource-transfer example](examples/ownership.huc0)
 - [Value-semantics example](examples/value-semantics.huc0)
@@ -261,20 +262,28 @@ needed. This reflection model is not part of the first two compiler milestones.
 ## Status
 
 HUC is at the design stage. There is not yet a compiler and the syntax is not
-stable. The implementation plan controls milestone scope and sequencing; the
-language, value-semantics, grammar, and architecture documents define the
-corresponding current design in detail.
+stable. The goal is to make the language specification as complete as possible,
+then choose a practical implementation subset for release 0.1. A specified
+feature is not a claim that 0.1 will implement it. The implementation plan will
+track supported features and targets separately; unsupported features must
+receive clear diagnostics, not silently different semantics.
 
-The implementation order is:
+Both translators and the command-line driver will be written in C++20:
 
-1. HUC0 to C17.
-2. HUC1 to HUC0.
+```text
+HUC1 -> printable HUC0 -> LLVM IR -> object files -> executable
+```
 
-Both transpilers and the command-line driver will be written in C++20. The
-first output language is C17. Generated C uses plain storage representations
-and explicit construction, relocation, and cleanup from HUC's intermediate
-representation (IR). The HUC compiler implements value lifetimes; it does not rely on
-the output language to provide it.
+LLVM IR is the first backend target, replacing the earlier C17-output plan.
+HUC implements construction, relocation, cleanup, and evaluation order before
+LLVM optimization and machine-code generation. The readable HUC0 boundary stays.
+
+The recommended first milestone is a **thin end-to-end slice** through both
+translators and LLVM, testing compiled execution and compile-time evaluation
+early. **HUC1 to HUC0 first** remains an alternative, but evaluating ordinary
+functions still needs the shared frontend, HIR, and MIR for the selected subset;
+it postpones native code generation, not semantic analysis. The exact release
+subset is still open. HUC0 remains independently usable for handwritten code.
 
 ## Short positioning statement
 

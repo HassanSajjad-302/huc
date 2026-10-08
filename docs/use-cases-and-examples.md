@@ -2,7 +2,7 @@
 
 Status: design guide
 
-Applies to: planned HUC 0.1 semantics
+Applies to: the current HUC design; release 0.1 may implement only a subset
 
 Related: [Implementation plan](implementation-plan.md)
 
@@ -145,7 +145,7 @@ The examples below cover these use cases:
 | HUC1 | Generated code as values, inserted forward with `#` in program and evaluation modes |
 | Pipeline | One flattened HUC1-to-HUC0 translation unit, with module namespaces |
 | Pipeline | Standalone hand-written HUC0 |
-| Pipeline | Generated C17 with explicit evaluation sequencing and cleanup |
+| Pipeline | LLVM IR with explicit evaluation sequencing and cleanup |
 | Systems | Target-specific layouts without preprocessor directives |
 | Systems | Small-buffer and pointer-shape specialization |
 | Systems | Embedded register-map generation |
@@ -860,17 +860,16 @@ fn run() -> i32 {
 }
 ```
 
-HUC requires both `trace` and `result` to become `123`. The C17 backend must
-introduce ordered temporaries if a direct C call would not preserve this
-contract.
+HUC requires both `trace` and `result` to become `123`. LLVM lowering must
+emit the three calls in order before calling `combine`.
 
-Conceptual generated C (module-qualified names shortened):
+Illustrative LLVM IR inside the caller (symbol names shortened):
 
-```c
-int32_t huc_arg0 = next(1);
-int32_t huc_arg1 = next(2);
-int32_t huc_arg2 = next(3);
-int32_t result = combine(huc_arg0, huc_arg1, huc_arg2);
+```llvm
+%arg0 = call i32 @next(i32 1)
+%arg1 = call i32 @next(i32 2)
+%arg2 = call i32 @next(i32 3)
+%result = call i32 @combine(i32 %arg0, i32 %arg1, i32 %arg2)
 ```
 
 ### 3.11 Copy before transfer in one call
@@ -1274,7 +1273,7 @@ such as `index += 1` while producing runtime module declarations.
 
 ### 4.5 Future: `for1` over a compile-time pack
 
-Open-ended phase packs are not in HUC 0.1. This example shows possible future
+Open-ended phase packs are not specified. This example shows possible future
 syntax and its expected runtime output. The initial HUC1 grammar does not
 accept it.
 
@@ -1377,7 +1376,7 @@ wins for every raw-pointer type.
 ### 5.2 Structural selection and body-level conditions
 
 This example assumes a probable library `InlineArray<T, N>` family; primitive
-`[N]T` arrays are deferred from HUC 0.1.
+`[N]T` arrays are deferred pending a separate design.
 
 ```huc
 struct Buffer<T: auto, N: usize> {
@@ -1609,7 +1608,7 @@ calls them. Function families that are never requested remain deferred.
 ### 6.2 Deferred helper and evaluation island
 
 `InlineArray` below is a probable later library family; it is used to show
-phase-value materialization, not as a HUC 0.1 primitive.
+phase-value materialization, not as a specified HUC primitive.
 
 ```huc
 module examples.phase_helper;
@@ -1778,7 +1777,7 @@ fn diagonal(side: f64) -> f64 {
 
 `newton_sqrt` is ordinary code. In the compiler it uses IEEE binary64
 arithmetic, rounding each operation to nearest and fusing nothing. The
-generated C forbids contraction too (specification section 5.2), so calling
+LLVM lowering preserves the same strict operations (specification section 5.2), so calling
 `newton_sqrt(2.0)` at run time returns the same bits. The literal is what this
 function computes, one unit in the last place below the correctly rounded
 square root of 2; the compiler never substitutes a host `sqrt`.
