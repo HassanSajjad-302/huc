@@ -40,6 +40,10 @@ struct Cell<><bool> {
 }
 
 struct CountedCell<T: auto, Count: usize> {
+    // Validate the selected body; a failed check does not try another definition.
+    if1 (Count == 0) {
+        @compiler::error("CountedCell requires a nonzero Count");
+    }
     let mod value: T;
     let count: usize = Count;
 

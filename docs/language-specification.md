@@ -60,8 +60,6 @@ Other recurring terms:
 - **Residual** code is the runtime code left after compile-time work.
   **Residualization** produces that code; **materialization** writes a
   compiler-known value as valid HUC0 runtime syntax.
-- A **predicate** is a compile-time boolean condition used to filter
-  specialization candidates.
 
 ### 1.2 Design promises
 
@@ -1518,8 +1516,8 @@ plain `let`; the call already supplies their compiler execution context (section
 9.8). A generic `let` instead names a specialization family whose
 selected body must residualize one ordinary runtime `let`. The
 `compiler::Type` example illustrates the separately designed future reflection
-library; the bootstrap compiler module initially exposes only generated-code
-values and the mode query.
+library; the bootstrap compiler module initially exposes generated-code
+values, the mode query, and explicit compile-time diagnostics.
 
 ### 7.3 Conditions and loops
 
@@ -1701,8 +1699,7 @@ let value<T: auto> {
 }
 ```
 
-Partial specializations add an angle pattern and may add a pure compiler
-predicate:
+Partial specializations add an angle pattern:
 
 ```huc
 struct Cell<T: auto><T*> {
@@ -1718,17 +1715,9 @@ let value<T: auto><T*> {
 }
 ```
 
-A specialization may append `if1 (predicate)` immediately before its body. For
-a function it follows the return type; for a structure or variable family it
-follows the angle pattern. An omitted predicate means `true`; no `(true)`
-placeholder is needed. Predicates are allowed only on specializations, not
-primary declarations. For example:
-
-```huc
-fn convert<T: auto><T*>(value: T*) -> T* if1 (is_basic<T>()) {
-    return value;
-}
-```
+Declaration headers have no `if1` condition. Use `if1` inside the selected body
+to choose code, members, or a resulting variable declaration. A body-level
+condition does not participate in specialization selection.
 
 Full specializations have an empty first list and a concrete second list:
 
@@ -1812,19 +1801,20 @@ For a concrete request, selection proceeds as follows:
 
 1. match phase argument count and the structural angle pattern;
 2. bind pattern variables;
-3. evaluate the optional predicate as a pure compiler `bool`;
-4. discard candidates whose predicate is false;
-5. choose the unique structurally most-specific viable candidate.
+3. choose the unique structurally most-specific matching candidate.
 
 An exact full pattern outranks a partial pattern. A partial pattern that accepts
 a strict subset of another candidate's structural matches outranks that
-candidate. The primary is the fallback. Predicates filter candidates but never
-rank them, and declaration order never resolves a tie. Equally specific or
-incomparable viable candidates are an ambiguity diagnostic. A false predicate
-is not an error in the candidate body. A predicate may inspect its bound
-arguments and immutable compiler metadata, but it must not mutate ambient
-compiler state, insert code, query the generation mode (section 11.1), or
-access untracked external state.
+candidate. The primary is the fallback. Declaration order never resolves a tie.
+Equally specific or incomparable matching candidates are an ambiguity
+diagnostic. Candidate filtering and ordering use no user-written conditions
+and do not inspect candidate bodies.
+
+An `if1` inside the chosen body can select an implementation or report an
+invalid request with `compiler::error` (section 11.6). A false condition or an
+error in that body never causes selection to retry another candidate. Shared
+helpers can provide a general implementation where a selected specialization
+needs its own fallback.
 
 Only after selection does the translator parse and prepare the chosen body:
 
@@ -1905,7 +1895,7 @@ reaches that site; preparation does not add a lazy runtime initialization flag.
 ### 9.5 Deferred bodies
 
 Family bodies and phase-control bodies are deferred source
-spans. Registration parses their headers, signatures, patterns, and predicates,
+spans. Registration parses their headers, signatures, and patterns,
 but does not lex or parse the associated braced body merely to discover its
 end. Registering a deferred `fn` or `struct` is not a request to prepare or execute it.
 
@@ -1931,16 +1921,16 @@ valid HUC. The delimiter scanner may report only that it cannot locate the
 outer closing delimiter. Once a body is selected, the translator lexes, parses,
 resolves, and checks it normally in its inherited context.
 
-A phase loop whose body executes at least once may parse that body once and
-reuse the parsed form for later iterations. This implementation choice does not
-change insertion order or observable compiler effects.
+Each executed phase-loop iteration prepares its selected body and performs
+the iteration's compiler calls and insertions in order. No iteration is skipped
+because an earlier iteration produced the same values or text.
 
 On a runtime `fn` request, prepare the selected specialization in program mode:
 run its compile-time operations and insertions once, where they appear, and
 retain its ordinary statements. A compiler call prepares the selected body the
 same way in evaluation mode, then executes it with the call's arguments
-(section 9.7). Reusing parsed syntax or a valid cached preparation does not
-change either result.
+(section 9.7). Each compiler call gets a fresh evaluation-mode preparation;
+section 12.2 distinguishes these calls from once-only program definitions.
 
 An ordinary, non-generic `fn` is different: parse and prepare its body in program mode
 when its declaration is encountered in the active source stream, even if it
@@ -2023,7 +2013,7 @@ The index and loop control disappear during preparation. The output contains
 three calls with the arguments `0`, `1`, and `2`, not a runtime loop.
 
 There are no `if2`, `for2`, or `while2` keywords. In a function executing in
-the compiler, a predicate, or an `@` or `#` operand, ordinary `if`, `for`, and
+the compiler, or an `@` or `#` operand, ordinary `if`, `for`, and
 `while` already execute in the compiler environment.
 
 ### 9.7 Generic functions: residual and forced call modes
@@ -2076,10 +2066,10 @@ evaluations, and `#` insertions in a body run while that body is prepared,
 once per occurrence, and may use only compiler-known values: phase binders,
 `let1` storage, constants, and compiler queries. Ordinary parameters and `let`
 locals exist only when the body executes: as symbolic runtime inputs after a
-runtime request, and as concrete evaluator values during a compiler call. A
-runtime request and a compiler call therefore prepare the same body, differing
-only in generation mode, and a cached preparation never depends on argument
-values.
+runtime request, and as concrete evaluator values during a compiler call.
+Runtime requests and compiler calls follow the same preparation rules, with
+their respective generation modes and currently visible compiler inputs.
+Preparation does not depend on ordinary argument values.
 
 Code that executes in the evaluator may use compiler-only values and call the
 compiler library directly, without further `@` (section 9.9). Such code makes
@@ -2101,8 +2091,8 @@ Preparing a body and emitting HUC0 are separate:
   body needs. Module code inserted with `#` in its body instead follows the
   original requesting top-level declaration, in the body's own namespace.
 - A later runtime request requires preparation in program mode and emission of
-  that definition and its module output. A completed evaluation-mode body or
-  cached result does not satisfy this requirement or mark module output as
+  that definition and its module output. A completed evaluation-mode call
+  does not satisfy this requirement or mark module output as
   already emitted.
 - A never-requested family body remains deferred. Ordinary unnumbered `if`
   branches in retained runtime code still count as runtime code; only removed
@@ -2165,7 +2155,7 @@ is rejected, because its runtime signature would be compiler-only. Ordinary
 methods and constructors inside a deferred type are processed in that type's
 requested context.
 
-Compiler-only values may be used by phase control, predicates, selection,
+Compiler-only values may be used by phase control, family arguments,
 evaluation, reflection, and generation. None may leak into HUC0. A scalar-only
 deferred function is allowed at runtime if its resulting definition is valid;
 there is no replacement `consteval` marker. Compiler calls may reuse ordinary
@@ -2192,8 +2182,8 @@ The declared type above is `compiler::Function`, not `@Function` and not
 
 The whole operand of `@` is compiler code: calls, operators, constructors, and
 method calls inside it need no further `@`. The same holds in other places that
-only hold compiler code: `if1`, `for1`, and `while1` clauses, specialization
-predicates, `let1` initializers, and the operand of `#`. A redundant `@` there
+only hold compiler code: `if1`, `for1`, and `while1` clauses,
+`let1` initializers, and the operand of `#`. A redundant `@` there
 has no effect.
 
 Code that executes in a compiler call is compiler code too, so a function used
@@ -2299,35 +2289,35 @@ requests from importing sources. A caller-defined type is a valid phase
 argument; the family need not import the caller. Substitution carries canonical
 type identity, while unqualified names still use the family's lexical context.
 
-Preparation caches distinguish program mode from evaluation mode. They retain
-the checked body, generation origins, and, in program mode, ordered module
-output. Each ordinary function definition or concrete generic `fn` specialization in
-a translation unit publishes its program-mode output once. Repeated runtime
-uses reference that definition; they do not replay generation. Different
-specializations and distinct `#` insertions within one preparation remain
+The translation unit records each program definition, its checked body,
+generation origins, and ordered module output. Each ordinary function definition
+or concrete generic `fn` specialization is prepared and publishes its
+program-mode output once. Repeated runtime uses reference that definition;
+they do not replay generation. This is definition identity, not reuse of a
+compiler call's result. Different specializations and distinct `#` insertions
+within one preparation remain
 distinct requests; only identical resulting module declarations are shared
 (section 11.3).
 
 Each `#` statement runs while its containing body is prepared and inserts the
-code its operand produces at that point. A function that only builds code is an
-ordinary compiler call: its result can be cached by its arguments and
-dependencies, because insertion is the `#` statement's effect, not the
-function's. In evaluation mode, inserted module code publishes nothing,
+code its operand produces at that point. A function that builds code runs on
+every compiler call, even with identical arguments. A caller may explicitly
+store its result in `let1` and use that value again; every `#` still performs
+its own insertion. In evaluation mode, inserted module code publishes nothing,
 introduces no names, and does not consume the later program-mode emission
 opportunity. Runtime calls execute prepared bodies; they do not rerun their
-compile-time operations. Dependency fingerprints and generation mode are cache
-data, not ambient-state inputs to name mangling.
+compile-time operations. Generation mode, compiler-state values, and dependency
+fingerprints do not add inputs to name mangling.
 
 An identical runtime function specialization requested while it is already being
 constructed denotes a recursive reference to the in-progress function. Compiler
 calls instead execute with the normal recursion/resource limits: an in-progress
 evaluation is not a computed result. An
-infinitely recursive concrete type layout is a diagnostic. A failed
-specialization remains failed for the same key and lookup environment. Cached
-preparation and failures must account for the declarations available at the
-request; a cache hit must not reveal pending output or hide output published
-since an earlier evaluation. This availability state is not part of name
-mangling.
+infinitely recursive concrete type layout is a diagnostic. A failed program
+definition is recorded as failed while reporting that translation's errors;
+it is not a reusable evaluation result. Each compiler call resolves its private
+body against the declarations currently published and checked. It cannot see
+pending output. Declaration availability is not part of name mangling.
 
 The core compiler environment is deterministic. It has no implicit access to
 wall-clock time, randomness, process environment, network, or arbitrary
@@ -2347,8 +2337,9 @@ candidate ordering, serialization, and generated naming are required.
 The bootstrap HUC1 language does not standardize the full reflection and
 structured-editing library. It supplies the phase evaluator, internal canonical
 type and declaration identities needed for specialization, and the
-generated-code values, `#` insertion, and generation-mode query in section 11. This
-deliberately keeps the first HUC1-to-HUC0 milestone independent of an
+generated-code values, `#` insertion, generation-mode query, and explicit
+compile-time diagnostics in section 11. This deliberately keeps the first
+HUC1-to-HUC0 milestone independent of an
 unfinished public compiler object model.
 
 The implementation supplies a compiler-only module:
@@ -2365,8 +2356,8 @@ The module's declarations come from a versioned, inspectable generated
 interface unit loaded before user HUC1 modules, analogous to an always-included
 header. The explicit `import1 compiler` still binds its namespace and makes the
 phase dependency visible. The bootstrap interface declares only
-`compiler::Code`, its three constructors, and `compiler::emitting()`; the
-object-model design remains separate.
+`compiler::Code`, its three constructors, `compiler::emitting()`, and
+`compiler::error(message)`; the object-model design remains separate.
 
 ### 10.2 Future reflection model
 
@@ -2397,7 +2388,7 @@ use the results to generate code. The model must obey these constraints:
 - handles identify immutable snapshots rather than exposing mutable compiler
   AST nodes;
 - IDs and metadata iteration order are stable for one translation;
-- queries register dependencies so cache invalidation remains correct;
+- queries record their inputs for reproducibility and dependency reporting;
 - structured changes, validation, and commits are explicit operations;
 - there are no ambient mutable arrays named `types`, `functions`, or
   `variables`;
@@ -2464,8 +2455,8 @@ layout across its compiler and runtime uses.
 The `compiler` module provides one query, `compiler::emitting()`. It returns a
 compiler `bool`: `true` while the current body is being prepared in program
 mode, and `false` in evaluation mode, including in code executing in a compiler
-call. The value is fixed for one preparation. Specialization predicates must
-not call the query (section 9.3), so selection never depends on the mode.
+call. The value is fixed for one preparation. Structural specialization
+selection never depends on the mode (section 9.3).
 
 Phase control resolves the query before either branch is parsed, so one
 definition can take a different path in each mode:
@@ -2779,6 +2770,40 @@ take compile-time text; accepting ordinary string values there is a planned
 relaxation. Typed container dispatch, operator overloading, and extended `for`
 headers remain separate features.
 
+### 11.6 Explicit compile-time errors
+
+`compiler::error(message)` reports a user-written diagnostic and fails the
+current translation when execution reaches it. It accepts exactly one
+compile-time text argument, using the same text forms as the code constructors
+in section 11.2. Its static result type is `void`, but it never returns
+successfully. It is a compiler operation, not a runtime function or a code value.
+
+Use it inside `if1` to reject an invalid generic request without a condition
+on the declaration header:
+
+```huc
+import1 compiler;
+
+fn bounded_count<Count: usize>() -> usize {
+    if1 (Count > 64) {
+        @compiler::error("bounded_count requires Count <= 64");
+    }
+    return Count;
+}
+```
+
+This check runs when the selected body is prepared, in either generation mode.
+An unselected phase branch or an unrequested deferred body does not execute
+the operation. Code already executing in the compiler can call
+`compiler::error(message)` directly, including with a message computed from
+its ordinary parameters. An untaken ordinary branch in such execution does
+not report the error. It does not provide a runtime failure operation.
+
+Report the supplied message at the operation's source location, with the
+request site and compiler call/specialization chain. Failing a selected
+specialization does not try another candidate. No HUC0 program is successfully
+produced for a translation that reaches this operation.
+
 ## 12. Compile-time execution model
 
 The language specifies observable results, not a particular evaluator. A
@@ -2786,7 +2811,8 @@ conforming implementation may interpret typed HUC IR, compile it to a sandboxed
 VM, or use another equivalent technique.
 
 Compile-time values have HUC value semantics. Raw addresses into the compiler
-process are not materializable and must not be used as persistent cache keys.
+process are not materializable and must not be used as stable declaration or
+type identities.
 
 Deferred `fn` definitions can compute values, including `compiler::Code`
 values, under the call rules in sections 9.7 and 9.9. Code executing in a
@@ -2878,23 +2904,50 @@ use compiler text and other compiler-only facilities. Inserted module code is
 suppressed in evaluation mode (section 11.2); a declaration that only it would
 provide cannot be used during evaluation.
 
-### 12.2 Dependencies and runtime emission
+### 12.2 Execution without caching
 
-A cached ordinary-function evaluation depends on its arguments, the prepared
-function definition and its preparation dependencies, transitively evaluated
-callees, immutable constants read, and relevant target settings. These are
-cache dependencies, not additional name-mangling inputs. The preparation cache
-also distinguishes program mode from evaluation mode. Coarse invalidation
-of the relevant modules and their dependencies is allowed; stale results are
-not. Instruction and call-depth limits apply across the complete nested call
-chain, including recursive ordinary-function calls.
+HUC 0.1 does not cache compiler-call results or evaluation-mode preparations,
+and does not analyze functions to decide whether they can be cached. Each
+compiler call prepares a fresh private body, then executes it with that call's
+arguments. Repeated calls with identical arguments still run, including their
+preparation-time operations and permitted changes to compiler state. This
+applies to ordinary functions, deferred helpers, and code builders. Compiler
+intrinsics execute their specified operation directly in the active context.
+
+Preparation still cannot read ordinary arguments (section 9.7). The current
+compiler storage and published declarations supply the inputs visible to each
+new preparation. Explicit `let1` storage can retain a computed value; that is a
+programmer-written variable, not automatic result reuse. Instruction and
+call-depth limits apply across preparation and execution of the complete nested
+call chain, including recursive calls.
+
+For example, these identical calls both execute:
+
+```huc
+let1 mod next: usize = 0;
+
+fn next_id<>() -> usize {
+    next += 1;
+    return next;
+}
+
+let1 first: usize = @next_id();  // 1
+let1 second: usize = @next_id(); // 2
+let1 saved: usize = first;      // 1; reads stored data without calling next_id
+```
+
+The compiler still records declarations, canonical types, in-progress requests,
+and completed program definitions. Those records establish identity, detect
+recursion, and ensure once-only program preparation and publication. They do
+not allow it to skip compiler calls or their effects. Each compilation starts
+fresh; frontend, staging, and build-artifact caches are outside 0.1.
 
 Evaluating an ordinary function does not suppress its HUC0 definition. A
 generic `fn` specialization used only at compile time need not emit a runtime
 definition; a retained runtime reference requires program-mode preparation and
 its module output even if evaluation mode has already completed the same
 specialization. Section 9.7 defines these emission rules independently of
-evaluator caching.
+compiler-call execution.
 
 ## 13. Foreign interfaces
 

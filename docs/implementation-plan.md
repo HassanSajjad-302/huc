@@ -667,15 +667,14 @@ let value<T: auto> {
 ```
 
 Partial specialization adds a second angle-bracket list for the pattern.
-An optional `if1 (predicate)` follows the completed declaration header,
-immediately before the body. Primaries cannot have predicates:
+The body follows the completed header, with no declaration-level condition:
 
 ```huc
-struct Stack<T: auto><T*> if1 (predicate) { ... }
+struct Stack<T: auto><T*> { ... }
 
-fn convert<T: auto><T*>(value: T*) -> T* if1 (predicate) { ... }
+fn convert<T: auto><T*>(value: T*) -> T* { ... }
 
-let value<T: auto><T*> if1 (predicate) {
+let value<T: auto><T*> {
     let mod value: T* = null;
 }
 ```
@@ -755,14 +754,15 @@ Selection:
 
 1. Match argument count and structural angle pattern.
 2. Bind pattern variables.
-3. Evaluate the optional predicate as a pure compiler boolean.
-4. Remove false candidates.
-5. Choose the unique structurally most-specific viable candidate.
+3. Choose the unique structurally most-specific matching candidate.
 
 An exact/full pattern outranks a partial pattern. A more constrained structural
 pattern outranks a pattern that accepts all of its matches. The primary is the
-fallback. Predicates filter but never rank. Declaration order never breaks a
-tie. Equally specific or incomparable viable candidates are ambiguous.
+fallback. Declaration order never breaks a tie. Equally specific or
+incomparable matching candidates are ambiguous. Selection executes no user
+conditions. After selection, `if1` inside the body may choose an implementation
+or report an invalid request with `compiler::error`. It cannot ask selection
+to try another candidate; an error in the chosen body remains an error.
 
 HUC intentionally applies partial specialization uniformly to structures,
 functions, and variable families. This is inspired by C++ partial
@@ -853,8 +853,9 @@ A scalar-only deferred function/type is runtime-capable if its prepared
 definition is valid. No separate compiler-only declaration marker is inferred.
 
 Register angle-header signatures without parsing or preparing their bodies.
-Parse the selected body on request; an unused body remains opaque. Share parsed
-syntax without skipping `#` insertions or their observable effects.
+Parse the selected body on request; an unused body remains opaque. Each
+compiler call prepares a fresh private body and performs its `#` insertions
+and other compiler operations again.
 Ordinary `fn` bodies are instead parsed and prepared in program mode as they
 are encountered, even if never called. Runtime forward-name checks can wait
 for declaration collection; compiler-stage work is not postponed until a call.
@@ -888,7 +889,7 @@ let1 function: compiler::Function =
 The type is `compiler::Function`, not `@Function`.
 
 The whole operand of `@` is compiler code, so nested calls need no further `@`.
-The same holds in phase-control clauses, predicates, `let1` initializers, `#`
+The same holds in phase-control clauses, `let1` initializers, `#`
 operands, and code executing in a compiler call. Inside a function body, `@`
 marks a value computed once while the body is prepared; it cannot read the
 body's parameters or `let` locals. Ordinary runtime-capable calls inside an
@@ -916,9 +917,11 @@ at compile time or never called; unused-function removal is a later optimization
 
 The same scalar ordinary-function evaluator is available through explicit `@`
 entry. Prepare and evaluate the callee privately in evaluation mode. Deferred
-compiler calls can use their concrete ordinary inputs in compiler work; these
-are evaluator inputs, not family binders. Include them in private cache records,
-never runtime mangling. Runtime preparation still has symbolic parameters and
+compiler calls can use their concrete ordinary inputs during execution, but
+not during preparation. These are evaluator inputs, not family binders, and
+never affect runtime mangling. Each compiler call gets a fresh private
+preparation and executes again; no results or evaluation preparations are
+cached. Runtime preparation still has symbolic parameters and
 rejects phase work requiring their unknown values. Local generated code is
 parsed into the private body. Module
 emission evaluates its arguments but introduces no declarations in evaluation
@@ -975,10 +978,10 @@ Program mode prepares HUC0 program code; evaluation mode prepares a private
 body for compiler execution. Both run during compilation. A `#` always inserts
 into the body that contains it, in that body's mode; a compiler call prepares
 its callee separately and never inserts into its caller. The two modes are not
-different mangled function names. The module's only other bootstrap member,
-`compiler::emitting()`, returns `true` in program mode and `false` in
-evaluation mode, so `if1` can choose a mode-specific branch. Specialization
-predicates cannot call it.
+different mangled function names. The bootstrap query
+`compiler::emitting()` returns `true` in program mode and `false` in
+evaluation mode, so `if1` can choose a mode-specific branch. Structural
+specialization selection does not evaluate conditions.
 
 A `#` runs while its body is prepared, once per occurrence; inside a runtime
 loop it inserts once, into the loop body. Local code takes the place of the
@@ -1022,11 +1025,23 @@ within that preparation all remain. A generated module declaration with the
 same tokens and lexical naming context as one already inserted in that
 namespace is inserted once and records both origins; other duplicates
 diagnose. Evaluation-mode completion never marks program output published.
-Keep mode-sensitive preparation caches, immutable source buffers, and origin
+Keep program definition/publication records, immutable source buffers, and origin
 chains linking generated spans to their `#` site, anchor, import chain, and
 building call chain. Preparations never depend on ordinary argument values.
-Dependencies include declaration availability; a cache hit cannot publish
-pending output early. That state never enters name mangling.
+Every compiler call gets a fresh evaluation-mode body, using currently
+published, checked declarations; it cannot publish pending output early.
+That state never enters name mangling. No caching or cache-eligibility analysis
+is part of 0.1. Definition identity, recursion tracking, and once-only program
+publication remain required.
+
+`compiler::error(message)` is also part of the bootstrap module. It accepts
+one compile-time text argument and has static result type `void`, but fails
+translation rather than returning. Run it whenever compiler execution reaches
+it, in either generation mode. Report the message, operation location, request
+site, and compiler call/specialization chain. An unselected phase body or an
+untaken ordinary compiler branch does not execute it. Use `if1` with an
+`@compiler::error(...)` statement to validate a selected body's phase arguments;
+do not treat the error as permission to select another definition.
 
 Bootstrap HUC does not include:
 
@@ -1061,9 +1076,9 @@ The eventual compiler library is exposed through a versioned, inspectable
 generated interface unit that the HUC1 frontend loads before user modules—the
 language-level equivalent of an always-included header. `import1 compiler`
 binds that already loaded interface under the `compiler` name. The bootstrap
-interface declares only `compiler::Code`, its three constructors, and
-`compiler::emitting()`; later versions add the public handle types above
-without exposing internal C compiler objects.
+interface declares `compiler::Code`, its three constructors,
+`compiler::emitting()`, and `compiler::error(message)`; later versions add the
+public handle types above without exposing internal C compiler objects.
 
 The future API should provide read-only snapshots of checked code and stable
 IDs, not direct access to the compiler's internal AST objects. Structured edits
@@ -1254,8 +1269,8 @@ Acceptance:
 
 - every normative HUC0 example parses;
 - AST dumps are deterministic;
-- generic declarations use angle binders, partial/full patterns, and optional
-  specialization-only `if1` predicates immediately before the body;
+- generic declarations use angle binders and partial/full patterns, with the
+  body immediately after the header; declaration-level `if1` conditions are rejected;
 - a zero-binder primary `fn f<>()` stays deferred; non-generic `fn f()` does not;
 - old parenthesized generic binders, removed `fn1`/`struct1`, and suffix-2 keywords
   are rejected; a full specialization without its empty first list is diagnosed;
@@ -1492,8 +1507,8 @@ Acceptance:
 - mutable globals, runtime memory, and arbitrary foreign calls cannot be
   evaluated through an ordinary function;
 - local generated scalar code is parsed and can run in evaluation mode;
-- cached evaluations are invalidated by relevant constant, body, callee, or
-  target changes; conservative dependency invalidation is sufficient initially;
+- repeated identical compiler calls prepare and execute again, preserving all
+  permitted compiler-state effects; there is no caching analysis;
 - failure includes the phase call stack;
 - no host pointer is observable or used as a persistent key.
 
@@ -1526,7 +1541,6 @@ Implement:
 - `auto` and typed binders;
 - type/value deduction;
 - primary, partial, and full patterns;
-- pure predicates;
 - structural partial ordering;
 - ambiguity diagnostics;
 - recursion state: absent, in-progress, complete, failed;
@@ -1567,13 +1581,12 @@ Implement:
 - the compiler-supplied `import1 compiler` module;
 - `compiler::Code` with `local`, `module`, and `around` constructors and `+`;
 - `#` insertion statements, including holes filled by the next block;
-- `compiler::emitting()`;
+- `compiler::emitting()` and `compiler::error(message)`;
 - generation modes and forward insertion points;
 - immutable generated buffers parsed before following source;
 - ordered module output after the original request's top-level anchor;
-- separate program/evaluation preparation caches, once-per-owner publication,
-  and shared identical generated declarations;
-- pure/effectful phase-call classification.
+- fresh private preparation for each compiler call, program definition records,
+  once-per-owner publication, and shared identical generated declarations.
 
 HUC1 parses and checks inserted HUC0 together with original source. Reuse the
 runtime frontend rules while retaining a printable, independently checked HUC0
@@ -1584,12 +1597,14 @@ Do not add new `for` header expressions or any range-based loop syntax in this
 increment.
 
 Program-mode preparation retains a checked body and ordered module output;
-evaluation-mode preparation retains a private checked body and suppresses module
-output without consuming publication state. A later runtime request must obtain
-the program-mode record even if evaluation has already succeeded. Repeated
-runtime uses do not rerun a definition's `#` insertions. A function that only
-builds code is cached like any compiler call; insertion is the effect of a `#`
-statement.
+each compiler call prepares a fresh private evaluation-mode body and suppresses
+module output without consuming publication state. A later runtime request must
+obtain the program definition even if evaluation has already succeeded.
+Repeated runtime uses do not rerun a definition's `#` insertions. Code builders
+execute on every compiler call, like other functions; insertion is the effect
+of a `#` statement. An explicit `let1` may store the returned code for later
+use, and each `#` still inserts it. Do not implement result/preparation caches,
+frontend/build-artifact caches, or function classification for caching.
 
 Acceptance:
 
@@ -1615,8 +1630,8 @@ Acceptance:
 - `main -> A -> B` keeps all pending module output unavailable until after
   `main`, even to a compiler evaluation through a different function;
 - module suppression evaluates arguments but registers no names or publication;
-- `compiler::emitting()` selects mode-specific `if1` branches and is rejected in
-  predicates; evaluation after publication can use generated declarations,
+- `compiler::emitting()` selects mode-specific `if1` branches;
+  evaluation after publication can use generated declarations,
   including those generated by the evaluated function itself;
 - repeated runtime uses publish once while distinct emissions and iterations
   remain distinct; identical generated declarations are inserted once, and other
@@ -1627,7 +1642,13 @@ Acceptance:
 - generated HUC1 syntax is rejected by HUC1, and standalone HUC0 still rejects it;
 - forward module references resolve after collection; missing/cyclic compile-time
   dependencies and retroactive changes diagnose;
-- diagnostics preserve mixed original/generated spans without renumbering input.
+- diagnostics preserve mixed original/generated spans without renumbering input;
+- `compiler::error` reports user text and call/request origins in both modes;
+  untaken compiler branches do not report it, and selected-body errors never
+  cause specialization fallback;
+- malformed error calls (wrong arity or non-text/runtime arguments) are rejected;
+- repeated identical compiler calls, including code builders, run again;
+  explicitly stored results and once-only program definitions remain distinct.
 
 ### 11.7 Milestone 2 completion gate
 
@@ -1733,7 +1754,9 @@ Include:
 - attempted custom move or relocation hooks;
 - constructor obligation failures;
 - ambiguous partial specialization;
-- false predicates leaving no candidate;
+- declaration-level specialization conditions;
+- a reached `compiler::error`, including in a selected specialization with an
+  otherwise valid primary fallback;
 - multiple residual declarations from generic `let`;
 - resource-limit exhaustion;
 - numbered syntax emitted into HUC0.

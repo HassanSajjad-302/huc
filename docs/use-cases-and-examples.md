@@ -36,7 +36,8 @@ The following syntax and behavior describe language rules, not library proposals
 - `import` and `import1`;
 - constructors named `init`;
 - `clone`, `copy`, and `drop`;
-- family specialization with angle patterns and predicates.
+- family specialization with structural angle patterns;
+- `compiler::error(message)` for explicit compile-time diagnostics.
 
 Names under modules such as these are probable standard-library APIs:
 
@@ -131,7 +132,7 @@ The examples below cover these use cases:
 | HUC1 | Structure primary, partial, and full specialization |
 | HUC1 | Function partial specialization |
 | HUC1 | Variable specialization with different resulting types |
-| HUC1 | Compile-time predicates |
+| HUC1 | Body-level compile-time checks and explicit diagnostics |
 | HUC1 | Family argument deduction |
 | HUC1 | Runtime residualization versus forced execution |
 | HUC1 | Restricted ordinary-function calls from compiler execution |
@@ -1369,7 +1370,7 @@ let byte: Storage<u8> = Storage<u8>(15); // full
 The full specialization wins over the primary for `u8`; the pointer pattern
 wins for every raw-pointer type.
 
-### 5.2 Structural pattern plus predicate
+### 5.2 Structural selection and body-level conditions
 
 This example assumes a probable library `InlineArray<T, N>` family; primitive
 `[N]T` arrays are deferred from HUC 0.1.
@@ -1377,22 +1378,47 @@ This example assumes a probable library `InlineArray<T, N>` family; primitive
 ```huc
 struct Buffer<T: auto, N: usize> {
     let mod values: InlineArray<T, N>;
+    let mod used: usize;
 
     fn init() {
     }
 }
 
-struct Buffer<T: auto, N: usize><T*, N> if1 (N <= 16) {
+struct Buffer<T: auto, N: usize><T*, N> {
     let mod values: InlineArray<T*, N>;
+    if1 (N <= 16) {
+        let mod used: u8;
+    } else {
+        let mod used: usize;
+    }
 
     fn init() {
     }
 }
 ```
 
-This partial specialization can be selected only for pointer elements and
-small capacities. Its predicate filters candidates; it does not make this
-pattern outrank another pattern that is structurally more specific.
+The pointer pattern selects this partial specialization for every capacity.
+Inside it, `if1` chooses a smaller counter for small capacities. For larger
+capacities, the specialization uses its own `else` branch; it does not fall
+back to the primary. Selection never depends on a body's conditions.
+
+To reject a request instead, use an explicit compile-time diagnostic:
+
+```huc
+import1 compiler;
+
+fn bounded_count<Count: usize>() -> usize {
+    if1 (Count > 64) {
+        @compiler::error("bounded_count requires Count <= 64");
+    }
+    return Count;
+}
+```
+
+`bounded_count<8>()` is valid. Requesting `bounded_count<100>()`, at runtime
+or through `@`, reports that message with the request and specialization
+chain. The failure does not cause another specialization to be tried. The
+same operation works in selected structure and variable-family bodies.
 
 ### 5.3 Function partial specialization
 
@@ -2212,8 +2238,8 @@ struct SmallVector<T: auto, Inline: usize> {
     }
 }
 
-struct SmallVector<T: auto, Inline: usize><T*, Inline> if1 (Inline <= 4) {
-    let mod values: raw_storage<T*, Inline>;
+struct SmallVector<T: auto><T*, 4> {
+    let mod values: raw_storage<T*, 4>;
     let mod size: usize;
 
     fn init() {
@@ -2221,7 +2247,7 @@ struct SmallVector<T: auto, Inline: usize><T*, Inline> if1 (Inline <= 4) {
 
     fn push(value: T*) mod -> void {
         // This compact specialization deliberately has no spill path.
-        // Writing past Inline is undefined in the unchecked profile.
+        // Writing past four slots is undefined in the unchecked profile.
         construct_at(storage_ptr(&this->values) + this->size, value);
         this->size += 1;
     }
@@ -2259,8 +2285,8 @@ fn run() -> i32 {
 
 This illustrates the design; it is not a finished, safety-checked container:
 
-- The pointer specialization is chosen structurally.
-- The predicate limits the compact form to capacities up to four.
+- The compact pointer specialization matches capacity four structurally.
+  Other capacities use the primary; there is no property-based candidate filter.
 - The general form contains an inline resource-managing spill buffer.
 - Growth transfers live elements into inactive destination slots; Basic source
   lifetimes are ended explicitly, and Advanced source cleanup is skipped.
@@ -2541,7 +2567,7 @@ Entity-component systems often need type-directed storage. The following
 illustrates a family that selects value-parameter handling for Basic and
 Advanced components, while storing both inline.
 
-The predicate helpers are probable future compiler type queries.
+The reflection call below is a probable future compiler type query.
 
 ```huc
 module case_studies.ecs;
@@ -2605,7 +2631,7 @@ struct World {
 }
 ```
 
-This exact predicate needs the future reflection API, so it is outside the
+This exact query needs the future reflection API, so it is outside the
 first implementation. It shows why HUC plans to provide stable type metadata:
 
 - Basic components can be stored inline.

@@ -85,11 +85,11 @@ fn build_limit<>() -> usize {
 }
 ```
 
-For a partial specialization, attach the pattern after the binders. Put any
-`if1 (predicate)` after the completed header, immediately before its body:
+For a partial specialization, attach the pattern after the binders. The body
+follows the completed header; any `if1` belongs inside the body:
 
 ```huc
-fn identity<T: auto><T*>(value: T*) -> T* if1 (is_basic<T>()) {
+fn identity<T: auto><T*>(value: T*) -> T* {
     return value;
 }
 ```

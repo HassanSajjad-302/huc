@@ -146,14 +146,14 @@ generic-family-decl
 generic-function-decl
                   = "fn", identifier, generic-header,
                     parameter-list-1, [ "mod" ], "->", type-1,
-                    [ phase-predicate ], deferred-body ;
+                    deferred-body ;
 
 generic-struct-decl
                   = "struct", identifier, generic-header,
-                    [ phase-predicate ], deferred-body ;
+                    deferred-body ;
 
 generic-let-decl  = "let", identifier, generic-header,
-                    [ phase-predicate ], deferred-body ;
+                    deferred-body ;
 
 generic-header   = phase-binder-list, [ phase-pattern-list ] ;
 
@@ -165,14 +165,13 @@ phase-binder      = identifier, ":", ( "auto" | type-1 ),
 phase-pattern-list
                   = "<", phase-argument,
                     { ",", phase-argument }, [ "," ], ">" ;
-phase-predicate   = "if1", "(", expression-1, ")" ;
 
 (* After a declaration name, '<' starts a deferred declaration. The first
    angle list always declares binders; the optional second supplies the
    specialization pattern. '<>' alone is a zero-binder primary; '<><i32>'
    is a full specialization, and '<T: auto><T*>' is a partial specialization.
-   Diagnose '<T>' in a declaration with a hint for '<T: auto>' or '<><T>'. Predicates
-   are allowed only on specializations, never on a primary. Parenthesize
+   Diagnose '<T>' in a declaration with a hint for '<T: auto>' or '<><T>'.
+   Declaration headers have no 'if1' condition; use 'if1' inside a body. Parenthesize
    '<' and '>' comparisons in angle-list value expressions and defaults.
    Runtime overload sets and generic families cannot share a name in one scope. *)
 

@@ -33,6 +33,11 @@ and `while1` decide which code is prepared. Fields and working locals use `let`.
 Compiler-only types and operations are accepted for compiler use, but cannot
 survive in runtime storage, signatures, or executable code.
 
+Specializations are selected by structural patterns, without declaration-level
+conditions. Use `if1` inside a selected body to choose code or report an invalid
+request with [`compiler::error(message)`](docs/language-specification.md#116-explicit-compile-time-errors).
+A failed body does not cause another specialization to be tried.
+
 `module` provides a namespace. `import` processes source once as part of the
 same translation unit, preserving the imported code's lexical scope. Generics
 can accept caller-defined types without reverse imports. Staging writes one
@@ -55,6 +60,11 @@ that opportunity. Nested specialization requests share the original requesting
 top-level declaration as their module insertion anchor: a request inside `main`
 publishes module output after `main`. Compiler evaluation cannot use that output
 while it is pending, but later evaluations can use it once published.
+
+There is [no compiler caching or caching analysis in 0.1](docs/language-specification.md#122-execution-without-caching).
+Each compile-time call prepares and executes again. The compiler still tracks
+definition identity and publishes each program definition once; repeated runtime
+references do not repeat generation.
 
 HUC has no general reference type. `T*`, `T**`, and longer pointer chains are
 non-owning raw-pointer types. Use unary `&value` to get a non-owning pointer
@@ -218,7 +228,7 @@ an Advanced value means one thing: destructive relocation. Expensive duplication
 says `copy`.
 
 The staging pipeline produces readable HUC0 that can be inspected,
-tested, cached, and passed through the same public runtime translator as
+tested and passed through the same public runtime translator as
 handwritten code. The goal is metaprogramming power without making generated
 runtime code a private compiler secret.
 

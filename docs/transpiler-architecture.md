@@ -453,7 +453,6 @@ typedef struct HucFunctionDecl {
     HucParamDeclId *runtime_params;
     size_t runtime_param_count;
     HucTypeSyntaxId return_type;
-    HucExprId specialization_predicate; /* zero means absent */
     HucBodySyntax body;
     HucSourceSpan span;
 } HucFunctionDecl;
@@ -468,7 +467,7 @@ These internal AST categories are not keyword suffix numbers. Record generic-hea
 so a zero-binder `fn f<>()` remains distinguishable from ordinary `fn f()`.
 
 Use stable arena-allocated IDs rather than pointers as persistent cross-pass
-identities. C pointers may be used temporarily within a pass, but caches and
+identities. C pointers may be used temporarily within a pass, but definition records and
 diagnostics should refer to IDs.
 
 ### 5.5 HUC1 indexing and deferred bodies
@@ -489,7 +488,7 @@ Ordinary HUC0 code selected for output is kept by the translation-unit residuali
 The HUC0 translator checks it again after it has been written to a file.
 
 Generic structures, functions, and variables use distinct indexed declaration nodes even
-though they share binder, pattern, predicate, and deferred-body components.
+though they share binder, pattern, and deferred-body components.
 The syntax tree also has a phase-expression item node for standalone
 `@expression;` and an insertion item node for `#expression;`, both at module,
 type-body, function, or block scope. A phase-expression item must evaluate to
@@ -540,7 +539,7 @@ Do not silently revise a finalized lookup or compiler
 decision after an insertion; diagnose conflicting insertion.
 
 The HUC0 translator independently reparses and checks the emitted text exactly
-as it checks handwritten HUC0. No generic HIR or specialization cache crosses
+as it checks handwritten HUC0. No generic HIR or specialization record crosses
 the translator boundary.
 
 A selected deferred body is parsed according to its enclosing module, type,
@@ -630,7 +629,7 @@ Each concrete type records:
 - whether it requires drop;
 - field layout;
 - phase class;
-- a stable structural fingerprint for caches.
+- a canonical identity for type comparison and specialization arguments.
 
 `construct_at` requires exactly two operands and `destruct_at` one. Infer a
 complete runtime object type `T` from `mod T*`; reject read-only/non-pointer
@@ -654,8 +653,8 @@ access permissions; it does not load an element or register cleanup.
 
 Fold `size_of<T>()` and `align_of<T>()` to target `usize`, and `is_basic<T>()`
 to `bool`, with no runtime operands. HUC1 evaluation and HUC0 lowering must
-use the same target layout and classification rules; include target layout
-inputs in specialization cache keys. HUC1 resolves a storage count and prints
+use the same target layout and classification rules; retain the target layout
+inputs in the translation context. HUC1 resolves a storage count and prints
 an integer literal in residual HUC0. Runtime counts are not valid type operands.
 
 ### 6.3 HUC1 phase checking
@@ -703,10 +702,10 @@ The resolver implements only the ranking specified by the language:
 
 Values and pointers do not implicitly convert to each other.
 
-For a generic specialization, its optional `if1 (predicate)` before the body is
-evaluated only after arity and structural-pattern matching. Predicate failure
-silently removes a candidate; evaluator failure is a diagnostic. Predicates
-filter candidates but never rank them.
+Generic specialization uses argument count and structural-pattern matching,
+not executable conditions. A body-level `if1` runs only after selection.
+Errors in the chosen body are diagnostics, never a reason to try another
+candidate.
 
 ### 6.5 C-linkage validation
 
@@ -823,7 +822,7 @@ in-process. Do not:
 - use host addresses as stable identities.
 
 An interpreter is slower than native execution, but makes it much easier to
-provide repeatable results, inspect execution, cache results, and report errors
+provide repeatable results, inspect execution, and report errors
 at source locations. Bytecode can improve performance later.
 
 ### 8.2 Values
@@ -869,7 +868,7 @@ types.
 
 Operations behave as follows:
 
-- a pure operation on concrete compile-time inputs evaluates immediately;
+- an operation scheduled for compiler execution evaluates with concrete inputs;
 - an ordinary runtime operation involving a symbolic input records residual
   source that the residualizer can print as HUC0;
 - `if1` requires a concrete boolean and selects one branch;
@@ -902,8 +901,8 @@ for runtime code.
 Completing a generic `fn` body for evaluation is separate from emitting it. A
 compile-time-only request does not mark the specialization for HUC0 emission.
 A retained runtime reference does, even when that specialization was evaluated
-earlier. Preparation caches and publication state distinguish program mode
-from evaluation mode. Ordinary `fn` declarations in retained modules are still
+earlier. Program definition/publication records are separate from each call's
+fresh evaluation-mode preparation. Ordinary `fn` declarations in retained modules are still
 emitted without demand filtering, independently of any evaluation-mode use.
 
 #### 8.4.1 Ordinary-function calls
@@ -960,11 +959,13 @@ print the most recent evaluation frames rather than a C++ stack trace.
 ### 8.6 Effects and dependencies
 
 The bootstrap phase interpreter has no filesystem, process-environment,
-network, clock, random, or host-process APIs. Its only compiler-supplied
-effect is `#` insertion (Section 10), whose text, insertion point, and origin
-are recorded explicitly. Building `compiler::Code` values has no effect, and
-`compiler::emitting()` only reads the current generation mode. The build dependency graph
-therefore consists of loaded HUC1/HUC0 modules and configured target inputs.
+network, clock, random, or host-process APIs. It executes permitted changes to
+compiler storage in source order. `#` insertion records its text, insertion
+point, and origin explicitly; `compiler::error` reports a diagnostic and fails
+translation. Building `compiler::Code` values inserts nothing, and
+`compiler::emitting()` only reads the current generation mode. These operation
+contracts do not require whole-function caching analysis. The build dependency
+graph consists of loaded HUC1/HUC0 modules and configured target inputs.
 Any future explicit external-input API must return a dependency record with
 its value and is part of the separate compiler-library design.
 
@@ -996,15 +997,15 @@ in these distinct parts:
 
 ```huc
 struct Buffer<T: auto, N: usize> { ... } // primary binders
-struct Buffer<T: auto, N: usize><T*, N> if1 (predicate) { ... }
+struct Buffer<T: auto, N: usize><T*, N> { ... }
 struct Buffer<><Widget, 8> { ... } // full specialization
 
 fn convert<T: auto>(mod value: T) -> T { ... }
-fn convert<T: auto><T*>(value: T*) -> T* if1 (predicate) { ... }
+fn convert<T: auto><T*>(value: T*) -> T* { ... }
 fn convert<><Widget>(mod value: Widget) -> Widget { ... }
 
 let selected<T: auto> { let selected: T = T(); }
-let selected<T: auto><T*> if1 (predicate) { let mod selected: T* = null; }
+let selected<T: auto><T*> { let mod selected: T* = null; }
 let selected<><Widget> { let selected: Widget = Widget(); }
 
 let value: Buffer<i32, 16> = Buffer<i32, 16>(); // request
@@ -1017,8 +1018,8 @@ function's parameters. The first list always declares binders. `<>` alone is a
 zero-binder primary. A second list supplies a specialization pattern: empty
 binders mean a full specialization; nonempty binders mean a partial one.
 Diagnose `<T>` in a declaration with a hint for `<T: auto>` or `<><T>`.
-An optional `if1 (predicate)` follows the
-completed specialization header, before its body. Reject predicates on primaries.
+The completed header is followed by its body. Reject declaration-level `if1`
+conditions on primaries and specializations; `if1` remains valid inside bodies.
 Parenthesize angle comparisons in value arguments and defaults. These header
 choices do not need name lookup. At expression use sites, retain ambiguous
 angle postfixes until resolution as before; the lexer emits separate angle tokens.
@@ -1038,10 +1039,10 @@ a second list; family selection chooses the specialization.
 Primaries may have trailing defaults; specializations may not add defaults.
 
 Selection first matches argument count and structural angle pattern, then
-binds variables and evaluates the optional pure predicate. Exact patterns
+binds variables. No separate condition filters candidates. Exact patterns
 outrank partial patterns, structurally more specific partial patterns outrank
-broader ones, and the primary is the fallback. Predicates filter but do not
-rank, and declaration order never resolves a tie.
+broader ones, and the primary is the fallback. Declaration order never resolves
+a tie. A condition or diagnostic inside the selected body does not retry selection.
 
 The primary must precede its specializations, and 0.1 requires every
 specialization in the primary's namespace. Only the selected body is parsed.
@@ -1070,12 +1071,13 @@ typedef struct HucSpecializationKey {
 } HucSpecializationKey;
 ```
 
-After evaluation, dependency hashes are attached to the cache entry. The key
-must never contain pointer addresses or non-canonical map iteration order.
+This key identifies a definition within the current translation, not a stored
+evaluation result. Record dependency inputs separately for reproducibility.
+The key must never contain pointer addresses or non-canonical map iteration order.
 
 ### 9.2 State machine
 
-Each specialization has a separate preparation record for each generation mode:
+Each program definition and canonical type has a construction record:
 
 ```text
 Absent -> InProgress -> Complete
@@ -1088,16 +1090,17 @@ and budgets instead: an in-progress evaluation is not a result. Requesting an
 `InProgress` type layout before indirection makes its size finite is an
 infinite-size diagnostic.
 
-Failed entries retain diagnostics for the same dependency and lookup environment
-so the same bad specialization is not repeatedly evaluated. Availability of
-published declarations must be validated before reusing evaluation records.
+Failed records support error recovery within this translation; they are not
+stored compiler-call failures. Each compiler call has a fresh private
+evaluation-mode preparation and execution frame, not a reusable record indexed
+by arguments. Resolve it using declarations already published and checked at
+that call. Do not reuse earlier preparations or results.
 
 Track `runtime_needed` and `module_output_published` independently of evaluation
 results. An evaluation request can complete without setting either. A retained
 runtime reference requires the program-mode preparation record and adds the
 specialization's runtime dependencies to the emission worklist.
-This also applies when the evaluation result was a cache hit. Requests found
-only while executing compiler code do not become runtime roots. Ordinary `fn`
+Requests found only while executing compiler code do not become runtime roots. Ordinary `fn`
 declarations remain runtime roots in retained modules, even if uncalled; their
 retained bodies can therefore require generic `fn` definitions. Do not treat an
 unexecuted ordinary runtime branch as an erased phase branch. Publish ordered
@@ -1137,10 +1140,10 @@ namespace sections for that output and print canonical references; do not
 invent caller-side lookup for the function body.
 
 Preparation follows deterministic source and depth-first import order. A
-worklist must preserve that order and inherited anchors, including on cache hits.
+worklist must preserve that order and inherited anchors.
 The flattened output depends on the complete runtime-needed specialization
-closure and its publication order. Revalidate these dependencies rather than
-reusing a defining-module artifact missing a new importing-site request.
+closure and its publication order. Construct that closure afresh for each
+compilation, including requests from importing sources.
 
 ## 10. Text generation and forward insertion
 
@@ -1182,11 +1185,20 @@ across compiler and runtime requests.
 | Program mode | Parsed into retained code | Published after the original request's anchor |
 | Evaluation mode | Parsed into a private evaluated body | Suppressed |
 
-The module's only other bootstrap member, `compiler::emitting()`, returns
+The bootstrap query `compiler::emitting()` returns
 `true` in program mode and `false` in evaluation mode, read from the active
 preparation. `if1` can therefore select a mode-specific branch before either
-branch is parsed. Reject the query in specialization predicates, which must
-give one answer per specialization key.
+branch is parsed. Structural selection does not evaluate this query or any
+other user condition.
+
+The bootstrap diagnostic operation `compiler::error(message)` accepts one
+compile-time text argument and has static result type `void`. When reached,
+it produces an evaluation failure with the supplied text, operation location,
+request site, and compiler call/specialization chain. It does not return,
+construct a code value, or emit a runtime call. Execute it in either generation
+mode; only unreachable compiler execution or skipped phase bodies avoid it.
+Do not turn this failure into candidate rejection or fallback. See specification
+section 11.6 for the source-level contract.
 
 Insert local code at the `#` item, then process it before advancing to
 subsequent source. Add immutable generated buffers to the parser's logical
@@ -1217,8 +1229,8 @@ In evaluation mode, do not insert, parse, or register module code and do not
 mark it published. Neither placement supports backward insertion or modifying
 previously prepared source. Missing declarations from suppressed code diagnose
 when needed. Resolve evaluated bodies using declarations already published and
-checked. Pending code is unavailable even through another function or a cached
-body; already published code is usable even by the evaluated body of the
+checked. Pending code is unavailable even through another function;
+already published code is usable even by the evaluated body of the
 function that inserted it. If completing an active anchor requires evaluating
 its pending code, diagnose the dependency cycle rather than draining the queue
 early.
@@ -1849,7 +1861,6 @@ build the HUC transpiler and driver.
 build/
   huc0/          flattened staged root source and origin/dependency sidecars
   c/             generated C17 headers, root source, runtime header, maps
-  cache/         content-addressed frontend/staging cache
   obj/           backend object files
   compile_commands.json
 ```
@@ -1857,58 +1868,43 @@ build/
 Generated HUC0 and C are inspectable build artifacts. Normal builds may
 remove them only through an explicit build-system operation.
 
-## 16. Caching and separate compilation
+## 16. Compilation records and reproducibility
 
-### 16.1 Content addressing
+### 16.1 No caching in 0.1
 
-Cache entries are keyed by cryptographic hashes of canonical serialized data,
-not timestamps.
+Do not implement frontend, staging, evaluation-result, preparation, or
+build-artifact caches. Do not classify functions by whether their results can
+be reused. Each build processes its sources and produces its artifacts afresh,
+including the flattened HUC0 file before invoking the public HUC0 translator.
+The textual boundary remains mandatory.
 
-Initial cacheable units:
+Each compiler call prepares a new private evaluation-mode body and executes
+it with the call's arguments, including repeated identical calls and recursion.
+Its preparation operations and permitted compiler-state changes occur again.
+Discard the private execution/preparation record when the call finishes;
+retain returned values and diagnostic origins as needed. Compiler intrinsics
+perform their operation directly in the active context. Ordinary arguments
+still become available only during execution, not preparation.
 
-- HUC1 indexed module and selected-body parse;
-- pure HUC1 family specialization, pure compiler value-call result, and restricted
-  ordinary-function evaluation result;
-- emitted flattened HUC0 text plus its origin map;
-- HUC0 lexed/parsed translation unit and namespace tables;
-- concrete HUC0 HIR/MIR;
-- generated C17 header, root source, and object.
+Keep per-translation declaration tables, canonical type identities, recursion
+states, and program definition/publication records. These establish which
+entity a reference denotes; they are not compiler-call result caches. Prepare
+each ordinary function or runtime-needed specialization in program mode once.
+Retain its checked body, origins, and ordered module output, and publish after
+its original requesting anchor. Repeated runtime references share that
+definition without replaying generation. Evaluation-mode completion cannot
+satisfy later program preparation or mark its output published.
 
-Even on a cache hit, `build` materializes the flattened HUC0 file before invoking
-the HUC0 translator. A cached private AST is not a substitute for the textual
-boundary.
+Each `#` during preparation inserts into its own body context. A code builder
+executes on every call. A source-level `let1` may explicitly retain a returned
+code value; each `#` using it still performs insertion. Separate insertion
+statements and phase-loop iterations remain distinct requests. Identical
+generated module declarations share one declaration with several origins;
+other duplicates diagnose. Runtime execution does not replay preparation.
 
-Ordinary-function evaluation caches record argument values, prepared-body and
-preparation-dependency fingerprints, transitively evaluated callees, immutable
-constants read, and target settings. Validate those dependencies before reuse;
-coarse invalidation by module/import closure is acceptable initially. Do not
-put ambient compiler state or evaluation-result dependencies into symbol names.
-Evaluation-cache hits never decide whether a runtime definition must be emitted.
-
-Preparation records are keyed by generation mode, definition, specialization
-arguments, and dependencies; ordinary argument values never enter them.
-A program-mode record includes a
-checked body, origins, and ordered module declarations to publish after its
-original requesting anchor. Publication is once per translation unit and
-definition or specialization, not once per emission API, helper name, or source line. A cache
-hit restores output once in a new compilation; repeated runtime uses in that
-compilation do not duplicate it. Cache reuse preserves import order, namespace
-lookup, and pending-versus-published visibility. Availability fingerprints are
-cache dependencies, not symbol-mangling inputs.
-
-An evaluation-mode record contains its private checked body and no module
-declarations from suppressed calls. Its completion cannot mark program output
-published or satisfy later program-mode preparation. Reuse common parsing and
-pure computations where sound, but never reuse a suppressed effect as though it
-had been emitted. Runtime execution of a prepared `fn` does not replay generation.
-
-Each `#` during preparation inserts into the context of its own body. A
-function that only builds code is cached like any compiler call, by its
-arguments and dependencies; a cached code value is still inserted by every `#`
-that uses it. Separate `#` statements and phase-loop iterations remain distinct
-requests.
-Identical generated declarations share one inserted declaration with several
-origins; other duplicates diagnose.
+Source/dependency hashes may still support reproducibility, stable identities,
+and diagnostic records; they do not enable result reuse or become ambient-state
+inputs to name mangling. No record carries evaluation results between builds.
 
 ### 16.2 Interface files
 
@@ -1918,8 +1914,8 @@ A future HUC0 interface format may contain:
 - type layouts where ABI-visible;
 - definition and dependency fingerprints.
 
-HUC1 family caches and future compiler-reflection metadata have separate
-formats and must not be passed to HUC0 semantic analysis. Until interface
+HUC1 family records and future compiler-reflection metadata must not be
+passed to HUC0 semantic analysis. Until interface
 serialization is stable, lower whole HUC0 programs without promising a stable
 generated ABI.
 
@@ -1935,9 +1931,9 @@ symbol hashes must be identical across processes for identical inputs.
 
 - tokenization, including `&`, `<`, `>`, `@`, and numbered keywords;
 - angle-binder declaration lookahead, zero-binder primaries, full and partial
-  patterns, and `if1` predicates after complete specialization headers;
+  patterns, and bodies immediately after complete declaration headers;
 - rejection of parenthesized generic binders, removed suffix-2 spellings,
-  predicates on primaries, and mixed generic-family/ordinary-overload names;
+  declaration-level `if1` conditions, and mixed generic-family/ordinary-overload names;
 - `in` accepted as an ordinary identifier;
 - valid and invalid numeric separator positions in all supported bases;
 - name-first declarations, independent binding/type `mod`, and generic `let` headers;
@@ -2057,7 +2053,11 @@ Compile and run small programs that record:
   calls, runtime-storage access, and shared mutable state;
 - unsupported operations skipped by ordinary branches versus reached operations,
   while both branches still receive normal syntax/type checks;
-- evaluation-cache invalidation after a constant or evaluated callee changes;
+- repeated compiler calls executing again, observing permitted compiler-state
+  changes, with no automatic result or private-preparation reuse;
+- `compiler::error` in either generation mode, computed messages in compiler
+  helpers, correct call/request origins, and no error from untaken compiler branches;
+- explicit errors in selected bodies not falling back to another specialization;
 - compile-time-only generic `fn` calls omitted from HUC0, later runtime demand causing
   emission, transitive runtime dependencies, and uncalled ordinary `fn` retention;
 - parsed generation at local, type-body, and forward module insertion points;
@@ -2067,7 +2067,7 @@ Compile and run small programs that record:
 - once-per-owner program publication, distinct emissions/iterations preserved,
   identical generated declarations inserted once, and other duplicates
   diagnosed;
-- `compiler::emitting()` in both modes, and its rejection in predicates;
+- `compiler::emitting()` in both modes;
 - unused angle-header bodies left opaque, requested bodies checked, and uncalled ordinary
   `fn` bodies prepared with module output immediately following their declaration;
 - zero-binder helpers called with and without `<>`, deduced/defaulted calls, and
@@ -2082,8 +2082,10 @@ Compile and run small programs that record:
   `@` inserting nothing in any position;
 - rejection of non-void standalone `@` statements (with a `#` hint for
   `compiler::Code`) and of `@` in a body reading its parameters or locals;
-- one cached preparation per specialization and mode, independent of argument
-  values, with `#` insertions preserved on cache hits;
+- fresh evaluation-mode preparation on every compiler call, independent of
+  ordinary argument values, with preparation effects executed each time;
+- one program definition per runtime specialization, despite repeated runtime
+  references, and explicitly stored code values inserted at every `#` use;
 - generic code builders selecting partial/full specializations, and `#` in a
   type body inserting members into that type rather than its requester;
 - nested `main -> A -> B` requests publishing module output only after `main`;
@@ -2155,15 +2157,16 @@ Implement in this order:
 3. `if1`, three-part `for1`, bounded phase loops, selected-body parsing, and
    module/type/function/block insertion contexts;
 4. generic `struct`, generic `fn`, and generic `let` primary/partial/full family selection with
-   angle patterns, deduction, predicates, and recursion states;
+   angle patterns, deduction, and recursion states;
 5. `@`, forced evaluation, `compiler::Code` values, `#` insertion with holes,
-   `compiler::emitting()`, generation modes, and composed diagnostics.
+   `compiler::emitting()`, `compiler::error`, generation modes, and composed diagnostics.
 
 The HUC1 frontend loads a versioned, inspectable generated interface for the
 compiler module before indexing user modules. This is the implementation
 equivalent of an always-included header; `import1 compiler` explicitly binds
-it. The bootstrap interface contains only `compiler::Code`, its constructors, and
-`compiler::emitting()`, and never exposes pointers to internal compiler objects.
+it. The bootstrap interface contains `compiler::Code`, its constructors,
+`compiler::emitting()`, and `compiler::error`, and never exposes pointers to
+internal compiler objects.
 
 Milestone 2 is complete only when every numbered/compiler-only construct is
 removed, flattened output is deterministic and readable, and the public
