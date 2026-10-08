@@ -59,6 +59,39 @@ fn inspect(widget: Widget*) -> i32 {
 These are presentation choices, not restrictions on operator spacing.
 For example, `a+b`, `a + b`, and `a+ b` are all valid binary additions in HUC.
 
+## Loop headers
+
+Keep a short C-style header on one line, with a space after each semicolon
+and between update expressions:
+
+```huc
+for (let mod index: usize = 0; index < count; index += 1, remaining -= 1) {
+    process(index);
+}
+
+for1 (let1 mod index: usize = 0; index < 3; index += 1) {
+    io::println(index);
+}
+```
+
+Use `for (;;) { ... }` when all clauses are empty. If a header is too long,
+put each clause on its own line and the closing parenthesis with the opening
+brace. A long update list can wrap further, following the usual list style:
+
+```huc
+for (
+    let mod index: usize = 0;
+    index < count;
+    index += 1,
+    remaining -= 1,
+) {
+    process(index);
+}
+```
+
+The final comma is optional syntax, not a required part of a `for` loop.
+Only the updates form a list; the initializer and condition do not.
+
 ## Deferred and generic declarations
 
 Keep angle-bracket binders attached to the family name. A function's ordinary

@@ -559,9 +559,12 @@ run pending cleanup.
 Unconsumed temporaries remain alive until their full expression finishes,
 then are destroyed in reverse order of completed initialization. An ordinary
 statement cleans them up at its end. A condition cleans them up after saving
-its result and before entering the branch or loop body. Each `for` initializer
-or step and each field initializer has its own boundary. A return binds its
-result before temporary cleanup, then cleans up remaining locals and parameters.
+its result and before entering the branch or loop body. Each `for` initializer,
+individual update expression, and field initializer has its own boundary.
+A loop's header binding survives iterations; body locals are cleaned up before
+updates, including on `continue`. Loop exit cleans up an active header value,
+even if the body never ran. A return binds its result before temporary cleanup,
+then cleans up remaining locals and parameters.
 
 Arguments, nested calls, and short-circuit operands do not create earlier
 boundaries for the caller's temporaries. A value consumed into a by-value
@@ -621,6 +624,13 @@ The source syntax follows the same small rules at both source levels:
   whether a trailing comma is accepted.
 - Conditions and loop headers retain parentheses. Control-flow bodies require
   braces, including single-statement bodies; `else if` chains are allowed.
+- `for (initialization; condition; updates)` accepts one `let` binding or
+  expression in its initializer, one condition expression, and an ordered
+  comma-separated update list. All three clauses are optional; a missing
+  condition means `true`. The binding is loop-local and the body is a nested
+  scope. Updates run after body cleanup on completion or `continue`, but not
+  on `break` or `return`. Each update is a separate full expression. This
+  introduces neither a general comma operator nor a range-based loop.
 - Semicolons, explicit `return`, and `//` comments remain. Interpolation,
   implicit returns, and additional declaration spellings are out of scope.
 - The [formatting guide](formatting.md) defines the default style, not compiler
@@ -840,16 +850,20 @@ Their operands must be compiler-available and the statements erase. The
 selected-body parser uses the inherited module, type, function, or block
 context; skipped bodies remain opaque.
 
-`for1` uses the same three-part expression header as ordinary `for`:
-`for1 (initialization; condition; step)`. Its clauses execute at compile time;
-an omitted condition means `true`. Declare a compiler-only loop variable with
-`let1` before the loop. `while1` reevaluates a compiler boolean. Both phase
+`for1` uses the same three-part header as ordinary `for`:
+`for1 (initialization; condition; updates)`, with `let1` instead of `let` for
+a header declaration. Its binding is initialized once and scoped to the loop;
+it creates no runtime scope or storage. Clauses execute at compile time; an
+omitted condition means `true`, and updates form the same ordered expression
+list. A predeclared compiler variable remains valid too. `while1` reevaluates
+a compiler boolean. Both phase
 loops are bounded by interpreter resource limits, and a zero-iteration body
 remains opaque. Neither `for` nor `for1` has a range-based form; `in` is not
 reserved.
 
 During compiler execution, ordinary `if`, `for`, and `while` already execute in compiler
-phase. HUC therefore has no `if2`, `for2`, or `while2`.
+phase. Such a `for` uses plain `let` for a header binding, including in selected
+module/type bodies. HUC therefore has no `if2`, `for2`, or `while2`.
 
 ### 6.8 Unified declarations and compiler storage
 
@@ -1272,6 +1286,8 @@ Cover:
 - `init` and `drop`;
 - `T*` and independent binding/pointee `mod` permissions;
 - required braces for control-flow bodies, including `else if` chains;
+- C-style `for` headers with a loop-local initializer binding and an ordered
+  update list; reject declaration lists and a general comma operator;
 - optional numeric digit separators and consistent optional trailing commas;
 - expressions and precedence;
 - constructor syntax;
@@ -1621,8 +1637,12 @@ runtime frontend rules while retaining a printable, independently checked HUC0
 boundary. A code value is built before its `#` inserts it; queued declarations
 are not visible to the call that built them. Code with a hole joins the next
 source block, establishing names and loop context before that block is checked.
-Do not add new `for` header expressions or any range-based loop syntax in this
-increment.
+Generated loops use the ordinary C-style header from the runtime frontend;
+this increment needs no generator-specific loop syntax. Keep `compiler::around`
+for wrapping an original block in loops, scoped resources, or other statements.
+It is not limited to filling a loop body, and it does not make its suffix run
+on early exit. Cleanup must use ordinary value destruction. No range-based
+loop syntax is introduced.
 
 Program-mode preparation retains a checked body and ordered module output;
 each compiler call prepares a fresh private evaluation-mode body and suppresses
@@ -1802,7 +1822,11 @@ Compile generated C17 and test:
 - temporary receivers surviving an outer observing call and then dropping
   in reverse order of completed initialization;
 - cleanup boundaries for discarded results, local and field initializers,
-  conditions on both outcomes, and `for` initializer/step expressions;
+  conditions on both outcomes, and `for` initialization and each update expression;
+- loop-local header bindings, left-to-right multiple updates, and `continue`
+  cleaning up body locals before updates without destroying header storage;
+- `break` and `return` skipping updates while cleaning up active header
+  storage, and header cleanup when the first condition is false;
 - evaluated-path-only cleanup for short-circuit operands and `?:` arms;
 - return-result binding before temporary cleanup, followed by local and
   parameter cleanup, with no cleanup of the value transferred to the caller;

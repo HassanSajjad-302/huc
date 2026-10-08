@@ -204,8 +204,9 @@ raw-storage-pattern
    fn1 and struct1 are not declaration keywords. Fields and working locals
    use let; let1 explicitly declares storage used during preparation. *)
 
-let1-decl         = "let1", [ "mod" ], identifier, ":", ( type-1 | "auto" ),
-                    [ "=", expression-1 ], ";" ;
+let1-binding      = "let1", [ "mod" ], identifier, ":", ( type-1 | "auto" ),
+                    [ "=", expression-1 ] ;
+let1-decl         = let1-binding, ";" ;
 global-let1-decl  = let1-decl ;
 
 (* ---------- Phase control and erased expression items ---------- *)
@@ -217,9 +218,10 @@ phase-control-item
 
 phase-if-item     = "if1", "(", expression-1, ")", deferred-body,
                     [ "else", deferred-body ] ;
-phase-for-item    = "for1", "(", [ expression-1 ], ";",
-                    [ expression-1 ], ";", [ expression-1 ], ")",
+phase-for-item    = "for1", "(", [ phase-for-init ], ";",
+                    [ expression-1 ], ";", [ for-updates-1 ], ")",
                     deferred-body ;
+phase-for-init    = let1-binding | expression-1 ;
 phase-while-item  = "while1", "(", expression-1, ")", deferred-body ;
 
 phase-expression-item
@@ -273,9 +275,7 @@ compiler-while-statement-1
                   = "while", "(", expression-1, ")",
                     compiler-block-1 ;
 compiler-for-statement-1
-                  = "for", "(", [ expression-1 ], ";",
-                    [ expression-1 ], ";", [ expression-1 ], ")",
-                    compiler-block-1 ;
+                  = for-header-1, compiler-block-1 ;
 
 (* ---------- Types ---------- *)
 
@@ -335,13 +335,17 @@ statement-0       = block-0
                   | "continue", ";"
                   | expression-statement-0 ;
 
-local-let-decl-0  = "let", [ "mod" ], identifier, ":", ( type-0 | "auto" ),
-                    [ "=", expression-0 ], ";" ;
+local-let-binding-0
+                  = "let", [ "mod" ], identifier, ":", ( type-0 | "auto" ),
+                    [ "=", expression-0 ] ;
+local-let-decl-0  = local-let-binding-0, ";" ;
 if-statement-0    = "if", "(", expression-0, ")", block-0,
                     [ "else", ( block-0 | if-statement-0 ) ] ;
 while-statement-0 = "while", "(", expression-0, ")", block-0 ;
-for-header-0      = "for", "(", [ expression-0 ], ";",
-                    [ expression-0 ], ";", [ expression-0 ], ")" ;
+for-header-0      = "for", "(", [ for-init-0 ], ";",
+                    [ expression-0 ], ";", [ for-updates-0 ], ")" ;
+for-init-0        = local-let-binding-0 | expression-0 ;
+for-updates-0     = expression-0, { ",", expression-0 }, [ "," ] ;
 for-statement-0   = for-header-0, block-0 ;
 return-statement-0
                   = "return", [ expression-0 ], ";" ;
@@ -364,14 +368,25 @@ statement-1       = block-1
                   | "continue", ";"
                   | expression-statement-1 ;
 
-local-let-decl-1  = "let", [ "mod" ], identifier, ":", ( type-1 | "auto" ),
-                    [ "=", expression-1 ], ";" ;
+local-let-binding-1
+                  = "let", [ "mod" ], identifier, ":", ( type-1 | "auto" ),
+                    [ "=", expression-1 ] ;
+local-let-decl-1  = local-let-binding-1, ";" ;
 if-statement-1    = "if", "(", expression-1, ")", block-1,
                     [ "else", ( block-1 | if-statement-1 ) ] ;
 while-statement-1 = "while", "(", expression-1, ")", block-1 ;
-for-statement-1   = "for", "(", [ expression-1 ], ";",
-                    [ expression-1 ], ";", [ expression-1 ], ")",
-                    block-1 ;
+for-header-1      = "for", "(", [ for-init-1 ], ";",
+                    [ expression-1 ], ";", [ for-updates-1 ], ")" ;
+for-init-1        = local-let-binding-1 | expression-1 ;
+for-updates-1     = expression-1, { ",", expression-1 }, [ "," ] ;
+for-statement-1   = for-header-1, block-1 ;
+
+(* The initialization clause has at most one binding or one expression.
+   Its binding is scoped to the loop. for1 uses let1; ordinary for uses let,
+   including when the ordinary loop executes in the compiler. The update
+   clause is an ordered expression list, not a general comma operator.
+   Each update is a separate full expression. No declaration list, condition
+   declaration, update declaration, or range-based header is provided. *)
 return-statement-1
                   = "return", [ expression-1 ], ";" ;
 expression-statement-1

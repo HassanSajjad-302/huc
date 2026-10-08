@@ -1279,8 +1279,7 @@ module examples.sum_constants;
 fn sum_constants<Values: i32...>() -> i32 {
     let mod result: i32 = 0;
 
-    let1 mod index: usize = 0;
-    for1 (; index < pack_size<Values>(); index += 1) {
+    for1 (let1 mod index: usize = 0; index < pack_size<Values>(); index += 1) {
         result += Values[index];
     }
 
@@ -1928,8 +1927,8 @@ fn loop_forward<>(items: compiler::Text, item: compiler::Text, index: compiler::
     let c: compiler::Text = "__items_" + item;
     return compiler::around(
         "{ let " + c + ": auto = " + items + "; "
-            + "let mod " + index + ": usize = 0; "
-            + "for (; " + index + " < " + c + "->size(); " + index + " += 1) { "
+            + "for (let mod " + index + ": usize = 0; "
+            + index + " < " + c + "->size(); " + index + " += 1) { "
             + "let " + item + ": auto = " + c + "->data() + " + index + ";",
         "} }",
     );
@@ -1954,8 +1953,7 @@ fn sum_visible(widgets: Vector_Widget*) -> i32 {
     let mod total: i32 = 0;
     {
         let __items_item: auto = widgets;
-        let mod index: usize = 0;
-        for (; index < __items_item->size(); index += 1) {
+        for (let mod index: usize = 0; index < __items_item->size(); index += 1) {
             let item: auto = __items_item->data() + index;
             {
                 if (item->hidden()) {
@@ -1971,14 +1969,69 @@ fn sum_visible(widgets: Vector_Widget*) -> i32 {
 
 `compiler::around` returns code with one hole. HUC1 parses the text around the
 hole together with the next source block, which fills it; the block is never
-passed to `loop_forward`. `continue` runs the generated step. `item` and `index`
-live in the generated block, so a second such loop in the same function does
-not collide, and no `for`-header grammar change is needed.
+passed to `loop_forward`. `continue` runs the generated updates. `item` and
+`index` stay local to the generated loop, so a second such loop in the same
+function does not collide. The header is an ordinary C-style `for`. `around`
+also supplies an outer scope that evaluates the container expression once,
+and an `item` binding before the caller's block on each iteration. The block
+keeps its ordinary `break`, `continue`, and `return` behavior.
 
 A missing block after a `#` whose code has a hole is an error. A code value has
 at most one hole, and the hole stands where a statement could. Names are not
 made unique automatically; `__items_item` is derived from the caller's binding
 name.
+
+#### Beyond loops: a scoped lock around the caller's block
+
+Assume a library provides `Mutex` and an Advanced `LockGuard`. Constructing
+`LockGuard(mutex)` locks the supplied mutex; its `drop` unlocks it. The code
+builder below does not need to know or inspect the statements it protects:
+
+```huc
+fn locked<>(mutex: compiler::Text) -> compiler::Code {
+    return compiler::around(
+        "{ let __lock_guard: LockGuard = LockGuard(" + mutex + ");",
+        "}",
+    );
+}
+
+fn consume_if_ready(mutex: mod Mutex*, queue: mod Queue*) -> void {
+    #locked("mutex"); {
+        if (queue->empty()) {
+            return;
+        }
+        queue->consume_next();
+    }
+}
+```
+
+The inserted code is equivalent to:
+
+```huc
+fn consume_if_ready(mutex: mod Mutex*, queue: mod Queue*) -> void {
+    {
+        let __lock_guard: LockGuard = LockGuard(mutex);
+        {
+            if (queue->empty()) {
+                return;
+            }
+            queue->consume_next();
+        }
+    }
+}
+```
+
+Both the early `return` and normal completion destroy the guard and unlock
+the mutex. A `break` or `continue` leaving this scope would do so too. These
+remain control transfers in the caller, not returns from a callback. This is
+an example of a library using ordinary destruction, not a new locking feature
+in the language.
+
+The text after the hole is ordinary code, **not** a `finally` clause. Writing
+an explicit unlock there would skip it on early return; the guard is what
+provides cleanup. As elsewhere in HUC, panic does not guarantee cleanup. The example
+assumes the caller does not use the helper's `__lock_guard` name; `around`
+does not provide automatic name hygiene.
 
 ### 7.5 Generated text must be HUC0
 

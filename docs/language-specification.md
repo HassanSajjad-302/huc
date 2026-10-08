@@ -272,8 +272,8 @@ concatenation and performs no runtime allocation.
 ### 3.3 List punctuation
 
 Comma-separated parameter, argument, phase-binder, specialization-pattern,
-phase-request, and constructor-initializer lists permit one optional comma
-after the last item. The rule is the same on one line or several lines:
+phase-request, constructor-initializer, and loop-update lists permit one
+optional comma after the last item. The rule is the same on one line or several lines:
 
 ```huc
 fn add(left: i32, right: i32,) -> i32 {
@@ -869,13 +869,15 @@ Its boundary is defined by the enclosing construct:
 | Construct | Temporary cleanup boundary |
 |---|---|
 | Expression statement, including assignment | After the whole expression finishes, including any destination replacement, before the next statement |
-| Local declaration initializer | After the declared value is fully initialized, before the next statement |
+| Local declaration initializer, including a `for` header binding | After the declared value is fully initialized, before the next statement or first loop condition |
 | `return expression;` | After binding the return value, before cleanup of the function's remaining locals and parameters |
 | `if`, `while`, or `for` condition | After computing and retaining the condition result, before entering the chosen branch/body or leaving the loop |
-| `for` initializer or step expression | After that expression finishes, before evaluating the condition |
+| `for` initialization expression | After that expression finishes, before the first condition |
+| Each expression in a `for` update list | After that expression finishes, before the next update or condition |
 | Field initialization | After that field is initialized, before the next field initializer or the constructor body |
 
-Each evaluation of a loop condition or step has its own boundary. The field
+Each evaluation of a loop condition or individual update has its own boundary.
+A header binding is not a temporary; its lifetime follows section 7.3. The field
 rule covers both declaration initializers evaluated during construction and
 explicit constructor initializer entries. All arguments of one entry belong
 to that entry's full expression; the field itself is not a temporary.
@@ -1318,7 +1320,7 @@ Loops use the same rule, including paths back to an earlier point:
 
 - The loop head combines entry state, after any `for` initializer, with the
   state returning from the body and from each `continue`. In a `for`, both
-  returning paths run the step before reaching the head.
+  returning paths run the update list, in order, before reaching the head.
 - The condition is checked at the head. Its resulting state feeds the body
   and the condition-false exit. A `for` without a condition has no
   condition-false exit, but can still be left with `break` or `return`.
@@ -1543,6 +1545,65 @@ These rules also apply when ordinary control flow executes in the compiler.
 Phase-control bodies remain braced deferred bodies. A single unbraced statement
 or a lone semicolon is not a loop body. Returning a value requires an explicit
 `return expression;`; a final expression in a block is not an implicit return.
+
+#### Three-part `for` loops
+
+The header is `for (initialization; condition; updates)`. The two semicolons
+are required, but all three clauses may be omitted:
+
+- **Initialization:** one local `let` declaration, one expression, or nothing.
+  It runs once, before the first condition. A declaration uses the usual
+  `name: Type` syntax and initialization rules; the header's first semicolon
+  terminates it.
+- **Condition:** one expression, checked before each iteration using the
+  normal condition rules in section 7.4. An omitted condition means `true`.
+- **Updates:** zero or more expressions separated by commas. They run from
+  left to right after each completed iteration, before checking the condition
+  again. Each result is discarded. A nonempty list permits one optional
+  trailing comma.
+
+```huc
+for (let mod index: usize = 0; index < count; index += 1) {
+    process(index);
+}
+
+let mod remaining: usize = count;
+for (let mod index: usize = 0; remaining > 0; index += 1, remaining -= 1) {
+    process(index);
+}
+
+for (;;) {
+    if (finished()) {
+        break;
+    }
+    do_work();
+}
+```
+
+A header binding belongs to a scope containing the condition, updates, and
+body. It is not visible after the loop. The braced body is a nested scope,
+entered anew each iteration; its declarations are not visible in the header.
+Ordinary binding and shadowing rules apply. The two `index` declarations
+above therefore do not conflict.
+
+On normal body exit or a `continue` targeting this loop, active body locals
+are destroyed before the updates run. `continue` keeps the header binding
+alive. A `break` targeting this loop skips the updates and leaves the loop;
+`return` also skips them. On a normal loop exit, including a false first
+condition, or on `break` or `return`, active header storage is cleaned up
+under the usual scope-exit rules, after any body locals. Relocating a header
+value follows the same checked-use and cleanup rules as any other local.
+
+Each update is a separate full expression: its unconsumed temporaries are
+destroyed before the next update starts (section 6.5.1). Commas here separate
+updates; HUC does not gain a general comma operator. The initializer does
+not accept multiple declarations or an expression list, and the condition
+and updates do not accept declarations. There is no range-based loop form.
+
+An ordinary `for` executing in compiler code uses this same header, including
+plain `let`; its header storage belongs to that compiler execution and creates
+no runtime storage. `for1` instead uses `let1` in its initializer and prepares
+its deferred body once per iteration (section 9.6).
 
 ### 7.4 No implicit truthiness
 
@@ -2046,12 +2107,23 @@ fn run() -> void {
 ```
 
 An `if1` condition must be a compiler `bool`. Only its selected branch is
-parsed. A `for1` uses `for1 (initialization; condition; step)`: initialization
-executes once, the condition is checked before each iteration, and the step
-executes after each completed iteration. All three clauses use compiler-only
-values. Like ordinary `for`, each clause is an optional expression; an omitted
-condition means `true`. Declare compiler-only loop variables with `let1` before
-the loop.
+parsed. A `for1` uses `for1 (initialization; condition; updates)`. As with
+ordinary `for`, initialization executes once, the condition is checked before
+each iteration, and updates execute from left to right after each completed
+iteration. All three clauses use compiler-only values:
+
+- Initialization is one `let1` declaration, one expression, or nothing.
+- The condition is a compiler `bool`; omitting it means `true`.
+- Updates are a comma-separated expression list, possibly empty, with the
+  same optional trailing comma and per-expression boundaries as ordinary `for`.
+
+A header `let1` is local to that loop, visible in its condition, updates, and
+selected body, but not afterward. It is initialized once per execution of the
+phase loop, not once per iteration. A `let1` declared before the loop may still
+be used instead. The header scope creates no runtime block and does not change
+where selected output is inserted. An ordinary compiler-only `for` inside a
+selected module/type body uses a plain `let` header binding, as other ordinary
+compiler loops do; it does not create a residual module declaration or field.
 
 A `while1` reevaluates a compiler `bool`. Both phase loops prepare and insert
 their body once per iteration and are bounded by the evaluator's resource
@@ -2060,8 +2132,7 @@ limits. A loop with zero iterations leaves its body opaque.
 For example:
 
 ```huc
-let1 mod index: usize = 0;
-for1 (; index < 3; index += 1) {
+for1 (let1 mod index: usize = 0; index < 3; index += 1) {
     io::println(index);
 }
 ```
@@ -2622,6 +2693,11 @@ names, `break`, and `continue` have the proper context. A missing block is a
 diagnostic. A hole stands where a statement could, never inside an expression;
 no other unmatched braces or partial fragments are accepted.
 
+The text after the hole follows ordinary control flow; it is not guaranteed
+to execute if the block returns or otherwise jumps past it. Use values with
+`drop` for cleanup that must run when leaving a generated scope normally or
+through `return`, `break`, or `continue`.
+
 For example, a builder can wrap a caller's block in a loop without seeing that
 block, assuming a `Vector` with `size()` and `data()`:
 
@@ -2631,8 +2707,8 @@ fn loop_forward<>(items: compiler::Text, item: compiler::Text, index: compiler::
     let c: compiler::Text = "__items_" + item;
     return compiler::around(
         "{ let " + c + ": auto = " + items + "; "
-            + "let mod " + index + ": usize = 0; "
-            + "for (; " + index + " < " + c + "->size(); " + index + " += 1) { "
+            + "for (let mod " + index + ": usize = 0; "
+            + index + " < " + c + "->size(); " + index + " += 1) { "
             + "let " + item + ": auto = " + c + "->data() + " + index + ";",
         "} }",
     );
@@ -2648,8 +2724,14 @@ fn draw_all(widgets: Vector<Widget>*) -> void {
 }
 ```
 
-The generated block declares `item` and `index` in its own scope, so two such
-loops in one block do not collide, and `continue` runs the generated step.
+The generated loop keeps `item` and `index` local, so two such loops in one
+block do not collide, and `continue` runs the generated updates. A richer
+`for` header does not replace `around`: the builder also evaluates the container
+expression once in an outer scope and introduces `item` inside each iteration
+before the caller's block. Other builders can wrap a block in scoped resources
+or multiple statements, not just a loop header; the scoped-lock example in
+[Use Cases and Examples](use-cases-and-examples.md#74-a-generated-loop-around-an-original-block)
+shows this distinction.
 Names are not made unique automatically; the helper name here is derived from
 the caller's binding name.
 
@@ -2853,8 +2935,9 @@ inserted HUC0 is compiler behavior, not a new user-callable parsing API.
 Phase control prepares selected ordinary HUC syntax; text becomes code only
 through `compiler::Code` values inserted with `#`. The bootstrap constructors
 take compile-time text; accepting ordinary string values there is a planned
-relaxation. Typed container dispatch, operator overloading, and extended `for`
-headers remain separate features.
+relaxation. Typed container dispatch and operator overloading remain separate
+features. Generated loops use the ordinary `for` rules in section 7.3; text
+generation adds no special loop syntax.
 
 ### 11.6 Explicit compile-time errors
 

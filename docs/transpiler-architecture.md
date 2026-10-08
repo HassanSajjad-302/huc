@@ -379,13 +379,18 @@ colon, and type. A `mod` inside that type is a separate pointee permission.
 `let` and `let1` precede variable declarations but not parameters. Phase binders
 also use `name: Type` or `name: auto`; they have no binding `mod`. All phase
 families, including variable families, put their name before an angle binder list. Both
-`for` and `for1` read three optional expressions separated by semicolons;
-`for1` requires compiler-only clauses and retains a deferred body. There is
-no range-based loop production.
+`for` and `for1` read three optional clauses separated by two semicolons.
+The initializer is one binding or expression; reuse the local-binding parser
+without its statement semicolon. Ordinary `for` accepts `let`, including
+compiler-executed ordinary loops; `for1` accepts `let1`. The condition is one
+expression and the update clause is an ordered list of expressions. Keep that
+list as a loop AST field, not a comma-expression node. A header binding has a
+loop scope with a nested body scope. `for1` requires compiler-only clauses and
+retains a deferred body. There is no range-based loop production.
 
 Use a shared list parser that accepts one optional trailing comma, including
-for constructor initializer entries. Do not make acceptance depend on whether
-the list spans several lines. Empty items remain errors. Ordinary control
+for constructor initializer entries and loop updates. Do not make acceptance
+depend on whether the list spans several lines. Empty items remain errors. Ordinary control
 flow parses braced bodies, with an `else if` alternative for chained
 conditionals; phase-control bodies still use the deferred-body scanner.
 Do not retain the old declaration order or `T&` as compatibility spellings.
@@ -873,8 +878,10 @@ Operations behave as follows:
   source that the residualizer can print as HUC0;
 - `if1` requires a concrete boolean and selects one branch;
 - ordinary `if` with a symbolic condition creates residual branches;
-- `for1` evaluates its initialization, condition, and step at compile time,
-  preparing and inserting its body once per iteration;
+- `for1` initializes its optional header binding once in a loop-local compiler
+  scope, tests the condition, and prepares and inserts its body once per
+  iteration; after each completed iteration it evaluates the update list in
+  order before testing again. Neither the binding nor its scope is emitted;
 - `#` statements insert code values under the forward insertion rules in
   section 10, in the mode of the body being prepared.
 
@@ -1424,6 +1431,13 @@ Each `break` edge joins the loop exit. A call whose result type is `never`
 has no successor. Unreachable code is exempt from this state check, not from
 ordinary parsing, name resolution, or type checking.
 
+Lower `for` with a loop scope, initialization, condition block, nested body
+scope, ordered update blocks, and exit. Both normal body completion and
+`continue` target the first update after body cleanup, or the condition if
+there are no updates. `break` and `return` bypass all updates. Track relocation
+through each update and condition before joining the back edge. Do not lower
+to a naive `while` whose `continue` skips updates or destroys the header local.
+
 Run the check on each concrete HUC0 function, including every residual
 specialization produced by HUC1, before runtime constant folding removes
 branches. Drop flags remain a cleanup mechanism: no runtime test of a flag
@@ -1453,7 +1467,10 @@ The pass adds cleanup before:
 - assignment over an active destination.
 
 It also adds temporary cleanup at every completed full-expression boundary,
-including condition and loop-step boundaries (section 12.5).
+including condition and individual loop-update boundaries (section 12.5).
+For a `for`, body cleanup precedes updates; header storage survives `continue`
+and is cleaned up only when leaving the loop, if active. The condition-false
+edge must clean up that storage even when the body never ran.
 
 There are no exception cleanup edges in 0.1.
 
@@ -1553,7 +1570,9 @@ Preserve these boundaries during lowering:
 - local initializers: after the destination is initialized;
 - conditions: save the result, clean up temporaries, then branch on the saved
   result; this applies to both outcomes and every loop-condition evaluation;
-- `for` initializer and step expressions: clean up before the condition;
+- `for` initialization: clean up helper temporaries before the first condition,
+  without destroying the header binding;
+- each `for` update expression: clean up before the next update or condition;
 - field initializers: after the field is initialized, before the next field
   or constructor body;
 - returns: bind the result, clean up return-expression temporaries, then
@@ -1954,6 +1973,10 @@ symbol hashes must be identical across processes for identical inputs.
 - optional trailing commas in nonempty single/multiline lists, and rejection
   of a comma in an empty list;
 - required control-flow braces, `else if`, and three-part `for`/`for1` headers;
+- empty and expression initializers, loop-local `let`/`let1` initializers,
+  optional conditions, and ordered update lists with optional trailing commas;
+- rejection of multiple initializer declarations, initializer expression lists,
+  condition/update declarations, and comma operators outside update lists;
 - rejection of old `T&`, type-first declarations, and range-based loop headers;
 - Pratt precedence, ambiguous angle postfixes, and recovery;
 - prefix `&` versus binary `&` and `&&`, including postfix field/index binding;
@@ -2031,7 +2054,11 @@ Compile and run small programs that record:
 - temporary receivers staying live through an outer observing call, followed
   by reverse-order temporary destruction;
 - cleanup after discarded results, declaration initializers, condition
-  evaluations on both outcomes, `for` initializers/steps, and field initializers;
+  evaluations on both outcomes, `for` initializers and each update, and field initializers;
+- loop-local binding visibility, left-to-right updates, and body cleanup before
+  updates on normal completion and `continue`;
+- header cleanup after a false first condition, `break`, and `return`, with
+  updates skipped by the latter two and no cleanup of relocated header values;
 - short-circuit and conditional expressions creating and destroying only
   the temporaries on evaluated paths, at the enclosing expression boundary;
 - return-result binding before temporary, local, and parameter cleanup;
@@ -2056,8 +2083,11 @@ Compile and run small programs that record:
 - early-return cleanup;
 - conditional relocation;
 - `if1` branch removal;
-- `for1` unrolling, initialization/condition/step order, omitted clauses,
-  zero-iteration body skipping, and rejection of runtime-dependent clauses;
+- `for1` unrolling, initialization/condition/update order, loop-local `let1`,
+  omitted clauses, zero-iteration body skipping, and rejection of
+  runtime-dependent clauses;
+- ordinary compiler-executed `for` loops using plain `let` header storage,
+  including inside selected module/type bodies;
 - forced `@` evaluation;
 - ordinary scalar `fn` calls from compiler code, nested calls, local mutation, bounded
   recursion, and direct `@` entry;

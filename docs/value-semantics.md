@@ -1148,12 +1148,21 @@ Some boundaries are not semicolons:
 - A condition's temporaries are destroyed after its result is computed,
   before the selected `if` branch or loop body starts. A loop cleans them up
   on every condition evaluation, including the final false one.
-- A `for` initializer or step cleans up its temporaries before the next
-  condition evaluation.
+- A `for` initializer cleans up its temporaries before the first condition.
+  Each expression in its comma-separated update list cleans up its own
+  temporaries before the next update or condition; this is not a comma operator.
 - A field initializer cleans up its temporaries after initializing that
   field, before the next field or the constructor body.
 - A `return` binds its result, destroys the expression's remaining temporaries,
   then cleans up the function's remaining locals and parameters.
+
+A value declared in a `for` initializer is not a temporary. It stays alive
+across iterations and is cleaned up when the loop exits, if still active.
+Body locals are cleaned up each iteration before the updates run, including
+on `continue`. `break` and `return` skip the updates but still clean up active
+body and header locals. A false first condition still cleans up the header
+value. These are the ordinary scope and relocation rules, not a second
+lifetime model for loops.
 
 Individual arguments, nested calls, and short-circuit operands do not end
 the caller's full expression. Their unconsumed temporaries stay alive until
