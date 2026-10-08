@@ -741,7 +741,10 @@ or nested-block scope and never as fields. Local generic functions/structures
 and nested type families are deferred.
 
 The primary must precede its specializations. In 0.1, every specialization
-must be declared in the primary's namespace, not necessarily the same file.
+must be declared in the primary's namespace, not necessarily the same file:
+another file may reopen that namespace. A specialization must also precede every
+request whose selection it would change, by being chosen or by making the
+choice ambiguous; declaring one afterwards is an error.
 
 Any family may be requested from an importing source with a caller-defined
 type; no reverse import is required. A concrete definition keeps its family's
@@ -763,6 +766,12 @@ incomparable matching candidates are ambiguous. Selection executes no user
 conditions. After selection, `if1` inside the body may choose an implementation
 or report an invalid request with `compiler::error`. It cannot ask selection
 to try another candidate; an error in the chosen body remains an error.
+
+Patterns support C++'s structural forms: concrete types and values, binders,
+pointers whose `mod` must agree, family applications, `raw_storage<T, N>`,
+repeated binders that match only identical arguments, and family binders such
+as `C<T>`. Ranking stays "matches a strict subset". Constraint-based and
+substitution-failure forms are not supported.
 
 HUC intentionally applies partial specialization uniformly to structures,
 functions, and variable families. This is inspired by C++ partial
@@ -852,6 +861,14 @@ may accept/return compiler-only values for compiler calls, but not runtime calls
 A scalar-only deferred function/type is runtime-capable if its prepared
 definition is valid. No separate compiler-only declaration marker is inferred.
 
+A `let1` acts like a typed, scoped macro. A module-level `let1` has one copy
+per translation unit; a function-local `let1` has one per preparation of its
+block. Compile-time code that can name a `let1 mod` may assign it, except
+ordinary functions evaluated under the scalar subset. Assignments happen in
+processing order. Reads made while a body is prepared are fixed into it; reads
+in executing compiler code see current values. Redeclaring a `let1` in the same
+scope, including from another file's section of that namespace, is an error.
+
 Register angle-header signatures without parsing or preparing their bodies.
 Parse the selected body on request; an unused body remains opaque. Each
 compiler call prepares a fresh private body and performs its `#` insertions
@@ -897,7 +914,8 @@ evaluated body keep the restricted scalar rules above.
 
 A standalone `@expression;` is an erased phase-expression item. It is legal at
 module, type-body, function, and nested-block scope, must evaluate completely
-at translation time, and must have type `void`. It never inserts code; a
+at translation time, and must have type `void` or `never`. It never inserts
+code; a
 `compiler::Code` result is rejected with a hint to use `#`. Every `@` call,
 including one in an initializer, argument, condition, or return expression,
 uses a private evaluation body and inserts nothing into its caller. Compiler
@@ -1035,7 +1053,7 @@ is part of 0.1. Definition identity, recursion tracking, and once-only program
 publication remain required.
 
 `compiler::error(message)` is also part of the bootstrap module. It accepts
-one compile-time text argument and has static result type `void`, but fails
+one compile-time text argument and has result type `never`: it fails
 translation rather than returning. Run it whenever compiler execution reaches
 it, in either generation mode. Report the message, operation location, request
 site, and compiler call/specialization chain. An unselected phase body or an
@@ -1499,6 +1517,8 @@ Enforce:
 Acceptance:
 
 - explicit `let1` storage and compiler calls of deferred functions/types run deterministically;
+- `let1 mod` assignments follow processing order across imports, and
+  redeclaring a `let1` in the same scope is an error;
 - scalar ordinary `fn` calls from compiler execution use available checked HUC
   bodies, target-width arithmetic, local mutation, and shared call/instruction
   limits;
@@ -1541,7 +1561,11 @@ Implement:
 - `auto` and typed binders;
 - type/value deduction;
 - primary, partial, and full patterns;
+- pattern forms: pointers with `mod`, family applications, `raw_storage`,
+  repeated binders, and family binders;
 - structural partial ordering;
+- errors for a specialization declared after a request whose selection it
+  would change;
 - ambiguity diagnostics;
 - recursion state: absent, in-progress, complete, failed;
 - deterministic generated names and lexical namespace preservation;
@@ -1556,6 +1580,10 @@ while generated module output follows the original request's anchor.
 Acceptance:
 
 - the same pattern system works for all three family kinds;
+- library traits such as `is_same` and `is_pointer` work through repeated
+  binders and `mod`-sensitive pointer patterns, ranked by strict subset;
+- a later specialization that would change an earlier selection is rejected,
+  while a later, less specific one is accepted;
 - only the selected body is parsed;
 - recursive functions resolve through in-progress entries;
 - compile-time completion and runtime emission demand are tracked separately;
@@ -1613,7 +1641,7 @@ Acceptance:
   executing in a compiler call, need no further `@`; inside a body, `@` cannot
   read parameters or `let` locals;
 - every `@` call uses a private body and inserts nothing into its caller; a
-  standalone `@` must have type `void`, and a `compiler::Code` result is
+  standalone `@` must have type `void` or `never`, and a `compiler::Code` result is
   rejected with a hint to use `#`;
 - `fn answer<>()` with a generated local works as both `@answer()` in a value
   expression and `answer()` at runtime, without introducing caller locals;

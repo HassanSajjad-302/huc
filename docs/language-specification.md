@@ -1511,13 +1511,14 @@ let1 mod generated: usize = 0;
 ```
 
 `let1` never creates runtime storage. `mod` before its name permits reassignment
-during translation. Working locals inside an evaluated function can instead use
-plain `let`; the call already supplies their compiler execution context (section
-9.8). A generic `let` instead names a specialization family whose
-selected body must residualize one ordinary runtime `let`. The
-`compiler::Type` example illustrates the separately designed future reflection
-library; the bootstrap compiler module initially exposes generated-code
-values, the mode query, and explicit compile-time diagnostics.
+during translation; section 9.8 states who may assign it and when. Working
+locals inside an evaluated function can instead use plain `let`; the call
+already supplies their compiler execution context (section 9.8). A generic
+`let` instead names a specialization family whose selected body must
+residualize one ordinary runtime `let`. The `compiler::Type` example
+illustrates the separately designed future reflection library; the bootstrap
+compiler module initially exposes generated-code values, the mode query, and
+explicit compile-time diagnostics.
 
 ### 7.3 Conditions and loops
 
@@ -1780,6 +1781,56 @@ A generic structure or variable request supplies every non-defaulted binder.
 Unlike an ordinary `fn` or `struct`, an unrequested zero-binder definition stays
 opaque. `<>` is therefore useful even when there is no parameter to deduce.
 
+#### Specialization patterns
+
+A pattern has one entry for each primary binder. Each entry is a concrete type
+or value, a binder, or a type built from them. Selection compares only this
+structure (section 9.3). HUC supports C++'s structural specialization forms;
+constraint-based and substitution-failure forms have no equivalent.
+
+| Form | Example | Matches |
+|---|---|---|
+| Concrete type or value | `<><i32>`, `<T: auto><T*, 4>` | Exactly that type or value |
+| Binder | `<T: auto, N: usize><T*, N>` | Any type or value, which the binder receives |
+| Pointer | `<T: auto><mod T*>` | A pointer with the same `mod`, binding its pointee |
+| Family application | `<T: auto><Vector<T>>` | Any specialization of that family |
+| Built-in parameterized type | `<T: auto, N: usize><raw_storage<T, N>>` | Matching storage, binding its element type and count |
+| Repeated binder | `<T: auto><T, T>` | Only identical arguments in those positions |
+| Family binder | `<C: auto, T: auto><C<T>>` | Any one-argument family specialization; `C` receives the family |
+
+The forms combine, as in `<K: auto, V: auto><Map<K, V>*>`. `mod` must agree:
+`T*` matches only read-only pointers and `mod T*` only writable ones. `T*` also
+matches pointer chains, because `T` may itself be a pointer type. A binder used
+in family position receives a family, which must take the same number of
+arguments as the pattern supplies.
+
+Library traits therefore need no compiler support:
+
+```huc
+fn is_same<A: auto, B: auto>() -> bool {
+    return false;
+}
+
+fn is_same<T: auto><T, T>() -> bool {
+    return true;
+}
+
+fn is_pointer<T: auto>() -> bool {
+    return false;
+}
+
+fn is_pointer<T: auto><T*>() -> bool {
+    return true;
+}
+
+fn is_pointer<T: auto><mod T*>() -> bool {
+    return true;
+}
+```
+
+A body can then check `if1 (is_same<T, u8>())` without a compiler query.
+Pattern forms for array, function, and pack types will follow those types.
+
 ### 9.3 Selection and residual declarations
 
 Each generic structure, variable, or function name has one primary family in
@@ -1788,9 +1839,15 @@ overloading remains a separate facility. In one scope, a function name is
 either a non-generic overload set or one generic family, never both. Use a full
 specialization such as `fn convert<><i32>(value: i32) -> i32 { ... }` for a
 family's concrete case, not a competing `fn convert(value: i32)` overload.
-The primary must precede its
-specializations, and a specialization must be declared in the primary's
-namespace in 0.1; this need not be a separately compiled source file.
+The primary must precede its specializations, and a specialization must be
+declared in the primary's namespace in 0.1. It need not be in the same file:
+another file may reopen that namespace to specialize a library family for its
+own types. A specialization must also precede every request whose result it
+would change. Declaring it afterwards is an error if, for an earlier request,
+it would have been selected instead of the chosen candidate or would have made
+the choice ambiguous. A later specialization that would still lose to the
+earlier choice is accepted. C++ has the same rule for specializations that
+would be used, but does not require a diagnostic.
 
 In 0.1, generic `struct` families are module-scope declarations; generic `fn` families may
 be declared at module scope or as type members; and generic `let` families may be
@@ -1929,8 +1986,8 @@ On a runtime `fn` request, prepare the selected specialization in program mode:
 run its compile-time operations and insertions once, where they appear, and
 retain its ordinary statements. A compiler call prepares the selected body the
 same way in evaluation mode, then executes it with the call's arguments
-(section 9.7). Each compiler call gets a fresh evaluation-mode preparation;
-section 12.2 distinguishes these calls from once-only program definitions.
+(section 9.7). Every compiler call behaves as if freshly prepared (section
+12.2), unlike once-only program definitions.
 
 An ordinary, non-generic `fn` is different: parse and prepare its body in program mode
 when its declaration is encountered in the active source stream, even if it
@@ -2161,6 +2218,35 @@ deferred function is allowed at runtime if its resulting definition is valid;
 there is no replacement `consteval` marker. Compiler calls may reuse ordinary
 functions under section 12.1; this does not make their runtime emission lazy.
 
+#### Compiler storage
+
+A `let1` works like a macro definition with a type and a scope. A module-level
+`let1` belongs to its namespace, importers see it like any other declaration,
+and there is one copy per translation unit. A function-local `let1` belongs to
+one preparation of its block: two specializations, two compiler calls of the
+same function, or two iterations of a phase loop each get their own.
+
+Compile-time code that can name a `let1 mod` may assign it: phase-control
+clauses, `@` and `#` operands, and deferred functions executing in a compiler
+call. Ordinary functions evaluated under section 12.1 cannot read or write
+mutable compiler state. Assignments take effect immediately, in processing
+order: source order, each import at its first import, each body when it is
+prepared, and each compiler call as it runs.
+
+A read observes the value at the moment the code containing it runs. A read
+made while a body is prepared, in phase control, an `@` or `#` operand, or a
+`let1` initializer, is fixed into that prepared body. A definition prepared
+earlier, such as a runtime specialization prepared at its first request, keeps
+what it saw. A read by code executing in a compiler call sees the current
+value, so `next_id()` in section 12.2 returns a new value on each call. Results
+that depend on processing order, such as a counter incremented from two
+imported files, are the programmer's responsibility, as with macros.
+
+Declaring a `let1` again in the same scope is a redefinition error, even from
+another file or another section of the same namespace. To change a value,
+declare it `let1 mod` and assign it. A later revision may add a `compiler`
+operation that removes a `let1`, after which its name can be declared again.
+
 ### 9.9 The `@` evaluation-island operator
 
 `@` goes before an expression and evaluates it at compile time. This is called
@@ -2206,8 +2292,8 @@ A standalone phase-expression item has this form:
 ```
 
 It is legal at module, type-body, function, and nested-block scope. The
-expression must completely evaluate in the compiler and have type `void`, which
-suits compile-time checks. The item itself is erased. A standalone expression
+expression must completely evaluate in the compiler and have type `void` or
+`never`, which suits compile-time checks. The item itself is erased. A standalone expression
 of type `compiler::Code` is rejected with a hint to use `#`.
 
 `@` never inserts code into the code around it. When an evaluated function
@@ -2775,8 +2861,9 @@ headers remain separate features.
 `compiler::error(message)` reports a user-written diagnostic and fails the
 current translation when execution reaches it. It accepts exactly one
 compile-time text argument, using the same text forms as the code constructors
-in section 11.2. Its static result type is `void`, but it never returns
-successfully. It is a compiler operation, not a runtime function or a code value.
+in section 11.2. Its result type is `never` (section 7.1), like `panic`:
+control does not continue past a reached call. It is a compiler operation, not a
+runtime function or a code value.
 
 Use it inside `if1` to reject an invalid generic request without a condition
 on the declaration header:
@@ -2904,15 +2991,18 @@ use compiler text and other compiler-only facilities. Inserted module code is
 suppressed in evaluation mode (section 11.2); a declaration that only it would
 provide cannot be used during evaluation.
 
-### 12.2 Execution without caching
+### 12.2 Repeated compiler calls
 
-HUC 0.1 does not cache compiler-call results or evaluation-mode preparations,
-and does not analyze functions to decide whether they can be cached. Each
-compiler call prepares a fresh private body, then executes it with that call's
-arguments. Repeated calls with identical arguments still run, including their
-preparation-time operations and permitted changes to compiler state. This
-applies to ordinary functions, deferred helpers, and code builders. Compiler
-intrinsics execute their specified operation directly in the active context.
+Every compiler call behaves as if its callee's body were freshly prepared in
+evaluation mode and then executed with that call's arguments. Repeated calls
+with identical arguments still run, including their preparation-time
+operations, permitted changes to compiler state, and `compiler::error` checks.
+This applies to ordinary functions, deferred helpers, and code builders.
+Compiler intrinsics execute their specified operation directly in the active
+context.
+
+An implementation may reuse work, such as a parsed body, only where no program
+can observe the difference.
 
 Preparation still cannot read ordinary arguments (section 9.7). The current
 compiler storage and published declarations supply the inputs visible to each
@@ -2939,8 +3029,8 @@ let1 saved: usize = first;      // 1; reads stored data without calling next_id
 The compiler still records declarations, canonical types, in-progress requests,
 and completed program definitions. Those records establish identity, detect
 recursion, and ensure once-only program preparation and publication. They do
-not allow it to skip compiler calls or their effects. Each compilation starts
-fresh; frontend, staging, and build-artifact caches are outside 0.1.
+not allow it to skip compiler calls or their effects. A translation's results
+never depend on an earlier build.
 
 Evaluating an ordinary function does not suppress its HUC0 definition. A
 generic `fn` specialization used only at compile time need not emit a runtime

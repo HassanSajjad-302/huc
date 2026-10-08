@@ -1746,7 +1746,7 @@ The first initializer becomes `42`; it does not declare `result` in
 `read_answer`. The runtime call needs a definition of `answer` with its own
 `result` local. `@answer<>()` has the same meaning as `@answer()`. A standalone
 `@counter_decl();` is rejected with a hint to use `#`, because an `@` statement
-must have type `void`.
+must have type `void` or `never`.
 
 Code inserted into a type body becomes members of that type:
 

@@ -492,7 +492,7 @@ though they share binder, pattern, and deferred-body components.
 The syntax tree also has a phase-expression item node for standalone
 `@expression;` and an insertion item node for `#expression;`, both at module,
 type-body, function, or block scope. A phase-expression item must evaluate to
-compiler `void` and inserts nothing. An insertion item's expression must
+compiler `void` or `never` and inserts nothing. An insertion item's expression must
 produce `compiler::Code`; preparation erases the node, inserts the code's local
 part at that position, queues its module part, and processes inserted text
 before the following source. When the code has a hole, the following braced
@@ -1024,6 +1024,14 @@ Parenthesize angle comparisons in value arguments and defaults. These header
 choices do not need name lookup. At expression use sites, retain ambiguous
 angle postfixes until resolution as before; the lexer emits separate angle tokens.
 
+Patterns may contain concrete types and values, binders, pointers whose `mod`
+must agree, family applications, `raw_storage<T, N>`, repeated binders, and
+family binders such as `C<T>`. Match repeated binders by canonical identity,
+and bind a family binder to the family of the matched specialization. Ranking
+remains "matches a strict subset". Record each resolved request so that a later
+specialization that would have been selected for it, or made it ambiguous, is
+diagnosed; a later specialization that would still lose is accepted.
+
 A function name in one scope is either an ordinary overload set or one generic
 family. Diagnose mixtures rather than adding a combined overload-resolution
 system. `fn1` and `struct1` are no longer declaration spellings. Compiler-only
@@ -1192,7 +1200,7 @@ branch is parsed. Structural selection does not evaluate this query or any
 other user condition.
 
 The bootstrap diagnostic operation `compiler::error(message)` accepts one
-compile-time text argument and has static result type `void`. When reached,
+compile-time text argument and has result type `never`. When reached,
 it produces an evaluation failure with the supplied text, operation location,
 request site, and compiler call/specialization chain. It does not return,
 construct a code value, or emit a runtime call. Execute it in either generation
@@ -1932,6 +1940,12 @@ symbol hashes must be identical across processes for identical inputs.
 - tokenization, including `&`, `<`, `>`, `@`, and numbered keywords;
 - angle-binder declaration lookahead, zero-binder primaries, full and partial
   patterns, and bodies immediately after complete declaration headers;
+- pattern forms: `mod`-sensitive pointers, pointer chains, family
+  applications, `raw_storage`, repeated binders, and family binders, with
+  strict-subset ranking and late-specialization errors;
+- `let1 mod` assignment order across imports, preparation-time reads fixed into
+  prepared bodies versus current-value reads in executing compiler code, a
+  separate function-local `let1` per preparation, and `let1` redefinition errors;
 - rejection of parenthesized generic binders, removed suffix-2 spellings,
   declaration-level `if1` conditions, and mixed generic-family/ordinary-overload names;
 - `in` accepted as an ordinary identifier;
@@ -2080,8 +2094,10 @@ Compile and run small programs that record:
 - `#counter_decl();` inserting returned code at the `#`, versus
   `let x: i32 = @answer();` keeping `answer`'s own inserted local private, and
   `@` inserting nothing in any position;
-- rejection of non-void standalone `@` statements (with a `#` hint for
-  `compiler::Code`) and of `@` in a body reading its parameters or locals;
+- rejection of standalone `@` statements whose type is neither `void` nor
+  `never` (with a `#` hint for `compiler::Code`), acceptance of
+  `@compiler::error(...)`, and rejection of `@` in a body reading its
+  parameters or locals;
 - fresh evaluation-mode preparation on every compiler call, independent of
   ordinary argument values, with preparation effects executed each time;
 - one program definition per runtime specialization, despite repeated runtime

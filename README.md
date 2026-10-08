@@ -28,7 +28,9 @@ families: `fn choose<T: auto>(left: T, right: T)`. A second list supplies a
 specialization pattern: `<T: auto><T*>` is partial; `<><i32>` is complete.
 Function calls may omit angles when arguments are deduced, defaulted, or absent:
 `choose(a, b)` and `@helper()`.
-`let1` and `import1` retain compiler-only bindings and imports. `if1`, `for1`,
+`let1` and `import1` retain compiler-only bindings and imports. A module-level
+`let1` behaves like a typed, scoped macro: importers see it, a `let1 mod` value
+can change, and declaring the same name twice is an error. `if1`, `for1`,
 and `while1` decide which code is prepared. Fields and working locals use `let`.
 Compiler-only types and operations are accepted for compiler use, but cannot
 survive in runtime storage, signatures, or executable code.
@@ -36,7 +38,9 @@ survive in runtime storage, signatures, or executable code.
 Specializations are selected by structural patterns, without declaration-level
 conditions. Use `if1` inside a selected body to choose code or report an invalid
 request with [`compiler::error(message)`](docs/language-specification.md#116-explicit-compile-time-errors).
-A failed body does not cause another specialization to be tried.
+A failed body does not cause another specialization to be tried. Patterns cover
+C++'s structural forms, including repeated binders such as `<T, T>` and family
+binders such as `<C<T>>`, so traits like `is_same` are library code.
 
 `module` provides a namespace. `import` processes source once as part of the
 same translation unit, preserving the imported code's lexical scope. Generics
@@ -61,10 +65,10 @@ top-level declaration as their module insertion anchor: a request inside `main`
 publishes module output after `main`. Compiler evaluation cannot use that output
 while it is pending, but later evaluations can use it once published.
 
-There is [no compiler caching or caching analysis in 0.1](docs/language-specification.md#122-execution-without-caching).
-Each compile-time call prepares and executes again. The compiler still tracks
-definition identity and publishes each program definition once; repeated runtime
-references do not repeat generation.
+[Every compile-time call runs again](docs/language-specification.md#122-repeated-compiler-calls),
+even with identical arguments; only an explicit `let1` keeps a result. The
+compiler still tracks definition identity and publishes each program definition
+once; repeated runtime references do not repeat generation.
 
 HUC has no general reference type. `T*`, `T**`, and longer pointer chains are
 non-owning raw-pointer types. Use unary `&value` to get a non-owning pointer

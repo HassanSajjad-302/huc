@@ -180,10 +180,18 @@ phase-argument-list
                     { ",", phase-argument }, [ "," ] ], ">" ;
 phase-argument    = type-pattern | expression-1 ;
 
-type-pattern      = [ "mod" ], type-pattern-primary, [ "*" ] ;
+type-pattern      = [ "mod" ], type-pattern-primary, { "*" } ;
 type-pattern-primary
                   = builtin-type
+                  | raw-storage-pattern
                   | symbol-path, [ phase-argument-list ] ;
+raw-storage-pattern
+                  = "raw_storage", "<", type-pattern, ",", phase-argument,
+                    [ "," ], ">" ;
+
+(* A binder may appear more than once in one pattern; it then matches only
+   identical arguments. A binder followed by a phase-argument-list in a
+   pattern stands for a family. These are semantic rules. *)
 
 (* Open-ended phase packs are intentionally absent from 0.1. *)
 
@@ -219,7 +227,7 @@ phase-expression-item
 insertion-item    = "#", expression-1, ";" ;
 
 (* A phase-expression-item evaluates its expression in the compiler; it must
-   have type void and never inserts code. An insertion-item's expression is
+   have type void or never, and it inserts no code. An insertion-item's expression is
    compiler code of type compiler::Code; the item inserts that code here (its
    module parts after the insertion anchor). If the code has a hole, the next
    source item must be a block-1, which fills it. Inside an @ or # operand,
