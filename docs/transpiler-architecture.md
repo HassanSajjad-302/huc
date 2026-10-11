@@ -377,7 +377,10 @@ nodes after an error so later diagnostics remain local.
 
 Variable and parameter parsers read an optional binding `mod`, then the name,
 colon, and type. A `mod` inside that type is a separate pointee permission.
-`let` and `let1` precede variable declarations but not parameters. Phase binders
+`let` and `let1` precede variable declarations but not parameters. There is no
+expression-parameter marker. Compiler calls classify their arguments into
+value or expression bindings; record this on each call, not the declaration's
+AST/signature and not by guessing from body uses of `compiler::expr`. Phase binders
 also use `name: Type` or `name: auto`; they have no binding `mod`. All phase
 families, including variable families, put their name before an angle binder list. Both
 `for` and `for1` read three optional clauses separated by two semicolons.
@@ -681,7 +684,8 @@ Examples of rejected edges:
 
 - a runtime value used as an `if1` condition;
 - a type with compiler-only fields stored in runtime memory;
-- a runtime-only argument passed to an ordinary `fn` during compiler execution;
+- an expression-bound argument read or converted to a value, or
+  `compiler::expr` used on a value-bound parameter;
 - a reached operation that cannot run in the compiler (specification section
   12), such as a foreign call or runtime-storage access. This is checked on the
   executed path, not from the callee's signature;
@@ -689,6 +693,12 @@ Examples of rejected edges:
 - an `@` in a function body that reads the body's parameters or `let` locals;
 - a standalone `@` statement whose type is `compiler::Code` (use `#`);
 - reserved future `@this` contextual reflection in bootstrap HUC1.
+
+Expression bindings allow runtime syntax inside compiler calls: resolve the
+argument type without loading its value. This is a per-call binding category,
+not a conversion from runtime memory to compiler memory. Preserve the source
+context for initial typing and diagnostics;
+later text insertion performs ordinary lookup again.
 
 The diagnostic should name both sides:
 
@@ -848,6 +858,7 @@ typedef enum HucCtValueKind {
     HUC_CT_POINTER,
     HUC_CT_TYPE,
     HUC_CT_SYMBOLIC_EXPR,
+    HUC_CT_EXPRESSION_ARGUMENT,
     HUC_CT_SEMANTIC_ID,
 } HucCtValueKind;
 
@@ -867,6 +878,7 @@ typedef struct HucCtValue {
         HucCtPointer pointer;
         HucTypeId type_id;
         HucSymbolicExprId symbolic_expr_id;
+        HucExpressionArgumentId expression_argument_id;
         HucSemanticId semantic_id; /* internal stable identity */
     } as;
 } HucCtValue;
@@ -876,6 +888,15 @@ The evaluator owns a compile-time heap with deterministic object IDs. Its
 allocation order is not observable except through equality defined by HUC.
 The stable semantic-ID case is an implementation facility for family
 selection and residualization; it is not yet a public reflection API.
+
+An expression-argument record carries the represented type, source expression,
+renderable HUC0 text, and source origin. It is not a `HucCtPointer`, has no
+represented object or cleanup obligation, and must not be mistaken for the
+internal symbolic values used to residualize ordinary generic code. The only
+user operations on an expression parameter are unchanged forwarding,
+`compiler::is_expr_param`, and `compiler::expr` text extraction. There is no
+public first-class handle type. Record the binding-kind bit separately from
+the description so preparation can query it without reading argument contents.
 
 Every compile-time object lives in a block: a frame slot, a `let1` object, a
 string literal, or a `compiler::allocate` allocation. A pointer is a block ID
@@ -913,7 +934,9 @@ Operations behave as follows:
   section 10, in the mode of the body being prepared.
 
 This is a small partial evaluator, not C++ template substitution. It has no
-bootstrap syntax-object, quote, splice, or structural emit value.
+bootstrap syntax-object, quote, splice, or structural emit value. Expression
+parameters expose typed text capture only, not this internal symbolic evaluator
+or automatic symbolic method execution.
 
 ### 8.4 Forced mode
 
@@ -924,8 +947,13 @@ Compiler intrinsics retain their specified behavior in the active preparation;
 for example, `compiler::emitting()` does not open a private body merely to
 read the mode. Preparation never sees ordinary argument values: they are
 symbolic after a runtime request and concrete only while a compiler call
-executes. Concrete evaluator inputs do not become family binders or affect
+executes. The separate binding-kind map is available to `is_expr_param` during
+preparation. Concrete evaluator inputs do not become family binders or affect
 mangling. An unresolved value needed during actual evaluation is a diagnostic.
+
+Expression parameters deliberately carry unevaluated arguments, not unresolved
+values to execute. Binding them follows section 8.4.2; `@` still requires a
+concrete compiler result, such as the `Text` or `Code` built from that description.
 
 A generic `fn` call retained in runtime code requests or calls a concrete runtime specialization.
 Prefixing that call with `@` instead requires complete compile-time evaluation,
@@ -980,6 +1008,88 @@ Compile-time operations may use compiler text while preparing it. Suppress
 inserted module code; it supplies no declarations. Later program-mode
 preparation must still produce and publish its module output. None of this
 permits execution of arbitrary native code.
+
+#### 8.4.2 Expression-argument binding
+
+Classify each argument using specification section 9.7.1 before evaluating it.
+Build a per-call binding-kind map, not a declaration/family map. Literals,
+`let1` objects, and actual evaluator-owned locals are values; runtime-dependent
+arguments are expressions, including references to runtime module globals.
+Forwarded parameters keep their kind. Classify
+compound arguments structurally, without constant folding or scanning a callee's
+body for effects. A call with no runtime inputs is a value computation; an
+unsupported execution diagnoses rather than falling back to capture. Explicit
+inner `@` and compiler-only result types request compiler computation of that
+subexpression, whose own calls use the same argument-binding rules.
+
+Deduce using represented expression types alongside value-argument types, then
+apply existing structural selection. Kinds never add an overload-ranking rule,
+a body-failure fallback, or a mangling component. Different compiler calls of
+the same specialization can have different kinds. Runtime preparation uses an
+all-value map and never emits binding tags into HUC0.
+
+Process argument positions left to right. Evaluate value arguments normally.
+For an expression binding, resolve and type-check the source expression in the
+surrounding prepared body's context, without emitting an executed call, load,
+construction, relocation, or cleanup. Match the substituted type exactly; do
+not insert numeric or pointer-permission conversions. Initial capture can
+describe code in a retained body or a private evaluation-mode body. Substitute
+materializable compiler-known components as HUC0 constants; reject compiler
+pointers or other components that cannot be rendered. A compiler-only result
+is computed, never captured. Being constant-foldable does not change a runtime
+binding's phase. Constructor calls, receivers, and intrinsics retain their
+specified operand contracts; expression binding adds no symbolic execution.
+
+During compiler execution, an existing parameter can be forwarded unchanged
+with its current kind. For an expression binding, preserve its original
+description and represented type, not the forwarding parameter's spelling.
+Diagnose attempts to read, assign,
+dereference, address, store, or return it as a value, or execute its object's
+methods. It is not a real parameter place and receives no drop or active flag,
+even if its declaration includes binding `mod`.
+The expression's ordinary checked-use effects are checked on inserted code,
+not registered as transfers or observations at the capture site.
+Typing a captured call may need a concrete signature, but capture alone does
+not enqueue its runtime definition. Retained inserted calls create that demand
+when the generated code is checked.
+
+`compiler::expr(parameter)` accepts one such parameter (optionally parenthesized)
+and returns compiler text. Render the corresponding HUC0 expression with
+parentheses, staged constants, and concrete names as required by residualization.
+Do not preserve raw HUC1 type arguments or phase syntax in that text. Preserve
+origin records for diagnostics, not hidden name-binding metadata. Its text can
+be copied, edited, stored in `let1`, and passed to the existing code constructors.
+At insertion, reparse it and perform ordinary lookup and checking, including
+accepting valid rebinding by shadowing. This is not structural AST splicing.
+For a family reference, use the same canonical concrete name as the HUC0
+printer, and resolve it through the specialization-name table in section 9.3.
+Do not leave a family request in generated text or require hidden links on
+individual strings. Source identifiers that remain unqualified can still rebind.
+
+Binding descriptions are available during the compiler call's execution, not
+its preceding preparation. A nested `@compiler::expr(parameter)` in that body
+must not inspect the incoming argument early. Existing type binders still work
+in `if1` and other preparation operations.
+
+`compiler::is_expr_param(parameter)` reads only the call's binding-kind map.
+Recognize its operand as the current function's parameter identity, optionally
+parenthesized, without evaluating it. Reject locals, literals, member access,
+and other operand shapes; it is neither overloadable nor first-class. Expose
+the bool during preparation and compiler execution. `if1` can then select a
+branch before checking its body, keeping value-only operations out of an
+expression-bound call and vice versa. No parameter values or text become
+available early. False in runtime preparation does not make the parameter a
+compiler-readable value. Fold every retained query to its bool result; reject
+any compiler-only operation still present in retained runtime code. Preparing
+the same function for a compiler call uses that call's fresh map, not an earlier
+runtime body's selected branch. This adds no preparation cache or runtime IR
+value kind.
+
+There is no capture-specific runtime lifetime analysis. Retaining text does not
+retain an object. Generated bindings may own Advanced temporaries, normal
+cleanup still applies, and duplicate inserted occurrences may execute repeatedly.
+The text helper does not validate whole generated fragments; that remains the
+insertion check in section 10.
 
 ### 8.5 Resource control
 
@@ -1094,7 +1204,9 @@ types can appear in deferred signatures for compiler calls, not runtime requests
 A `T: auto` binder's entity kind is inferred from use; a binder used in a type
 position must hold a type, while typed non-type binders use ordinary types.
 Normal generic `fn` requests may deduce binders by unifying runtime parameter and
-argument types. Non-deducible, non-defaulted binders require explicit angle arguments.
+argument types. Compiler requests also use the represented types of expression
+arguments, with per-call argument-driven binding metadata from section 8.4.2.
+Non-deducible, non-defaulted binders require explicit angle arguments.
 Resolve `f()` and `f<>()` to the same zero-binder family. Type and variable
 requests retain angles, including `S<>` and `v<>`. Call syntax never includes
 a second list; family selection chooses the specialization.
@@ -1196,6 +1308,22 @@ than assuming a prefix alone rules out every user-chosen foreign name. Preserve
 readable source names through debug information and origin maps. Exact symbol
 spellings remain implementation details until a native HUC ABI is specified.
 
+Assign and record the canonical qualified HUC0 name when a concrete signature
+is resolved, so `compiler::expr` can render it before runtime emission. Maintain
+the reverse lookup from that ordinary name to its specialization record. The
+inserted-text resolver uses this table just as it uses other named declaration
+records; reusing unchanged text in another namespace still names the selected
+specialization, not a new family lookup there. Reserving a name or extracting
+text does not set `runtime_needed` or prepare/publish a runtime body. A retained
+program reference does so through the normal worklist and insertion anchor;
+a private evaluation reference follows normal compiler-call availability rules.
+This table must not make pending generated module output visible early.
+
+Emit all required concrete definitions into final HUC0 using those same names.
+The independent HUC0 frontend resolves actual declarations in that file, not
+the HUC1 table. Do not expose a public name-construction algorithm or attach
+opaque bindings to editable text; builders treat rendered names as opaque.
+
 An imported family may receive a caller-defined type without a reverse import.
 Substitution carries canonical type identity; unqualified body names still
 resolve in the family's lexical context. The concrete function keeps the
@@ -1220,6 +1348,11 @@ compiler::local(text)
 compiler::module(text)
 compiler::around(before, after)
 ```
+
+`compiler::expr(parameter)` separately extracts parenthesized HUC0 expression
+text from an expression parameter (section 8.4.2). The constructors accept that
+text exactly like any other text; they do not validate or bind an expression
+fragment. No typed placeholder or first-class expression handle is added.
 
 A `#` statement inserts a code value:
 
@@ -1315,7 +1448,7 @@ maps add final HUC0 ranges when files are printed. Source locations never
 require rewriting earlier buffer offsets.
 
 There is no bootstrap `gen`, `gen_global`, `quote`, splice, `parse_huc`,
-structural syntax object, expression-capture API, automatic fresh-name service,
+structural syntax object, first-class expression-handle API, automatic fresh-name service,
 or structural `emit` API. Parsing inserted text is internal compiler behavior,
 not a public `parse_huc` function. A compiler reflection and
 structured-generation library may later provide environment, module,
@@ -1324,6 +1457,11 @@ separate language/library design. The bootstrap architecture must not invent
 its API. Such handles will be ordinary qualified compiler-only types, never
 `@Type` spellings, and should expose immutable snapshots and stable IDs rather
 than mutable internal AST storage.
+
+The specified argument-driven bindings, `compiler::is_expr_param`, and
+`compiler::expr` text extraction are the narrow exception to the future
+expression-library boundary. They do not expose
+an AST, preserve lexical bindings after insertion, or alter runtime lifetimes.
 
 The inspection mechanism is the ordinary stage output:
 
@@ -2161,6 +2299,27 @@ Compile and run small programs that record:
   expression;
 - immutable source locations, mixed-origin syntax nodes, forward module name
   resolution, and rejection of retroactive semantic changes;
+- argument-driven bindings with exact pointer permissions, no marker in the
+  grammar, no binding-kind overload ranking, and ordinary runtime calls;
+- the same parameter binding as a value for `let1`/evaluator locals and as an
+  expression for runtime inputs, mixed kinds in one call, and preserved forwarding;
+- structural compound-argument classification, explicit inner evaluation,
+  no-input calls evaluated as values, and no evaluation-failure fallback;
+- `is_expr_param` available to `if1` before execution, unselected branches not
+  checked, false in runtime preparation, and no argument-content access early;
+- capture and forwarding without runtime execution or cleanup-state changes,
+  parenthesized text extraction, and rejection of invalid query operands;
+- runtime-global arguments classified as expressions without reading storage;
+- captured family references using the printer's concrete names, insertion
+  under a different namespace resolving the same concrete declaration, unused
+  text creating no runtime demand, and standalone HUC0 containing all needed
+  definitions without depending on the HUC1 reverse-name table;
+- represented-object methods rejected in compiler execution, while the same
+  method calls in generated text are checked and executed normally;
+- expression text retained after its builder returns, later insertion using
+  ordinary lookup, and successful same-type shadowing without hidden bindings;
+- generated one-time bindings, repeated insertion with repeated side effects,
+  and normal Advanced temporary ownership and destruction;
 - HUC1 rejection of numbered syntax in inserted text and independent HUC0
   rejection if such syntax is supplied directly;
 - acceptance of every successful flattened translation unit by the standalone HUC0
@@ -2252,6 +2411,7 @@ For a staging-first milestone or the staging side of an end-to-end slice:
 4. generic `struct`, generic `fn`, and generic `let` primary/partial/full family selection with
    angle patterns, deduction, and recursion states;
 5. `@`, forced evaluation, `compiler::Code` values, `#` insertion with holes,
+   argument-driven bindings, `compiler::is_expr_param`, and `compiler::expr` text extraction,
    `compiler::emitting()`, `compiler::error`, generation modes, and composed diagnostics.
 
 The HUC1 frontend loads a versioned, inspectable generated interface for the

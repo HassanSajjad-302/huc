@@ -2133,7 +2133,8 @@ module examples.generated_loop;
 
 import1 compiler;
 
-fn loop_forward<>(items: compiler::Text, item: compiler::Text, index: compiler::Text)
+// The lower-level text builder remains useful without typed capture.
+fn loop_forward_text<>(items: compiler::Text, item: compiler::Text, index: compiler::Text)
         -> compiler::Code {
     let c: compiler::Text = "__items_" + item;
     return compiler::around(
@@ -2145,9 +2146,14 @@ fn loop_forward<>(items: compiler::Text, item: compiler::Text, index: compiler::
     );
 }
 
+fn loop_forward<P: auto>(items: P, item: compiler::Text, index: compiler::Text)
+        -> compiler::Code {
+    return loop_forward_text(compiler::expr(items), item, index);
+}
+
 fn sum_visible(widgets: Vector<Widget>*) -> i32 {
     let mod total: i32 = 0;
-    #loop_forward("widgets", "item", "index"); {
+    #loop_forward(widgets, "item", "index"); {
         if (item->hidden()) {
             continue;
         }
@@ -2163,7 +2169,7 @@ Generated HUC0, with an illustrative concrete name for `Vector<Widget>`:
 fn sum_visible(widgets: Vector_Widget*) -> i32 {
     let mod total: i32 = 0;
     {
-        let __items_item: auto = widgets;
+        let __items_item: auto = (widgets);
         for (let mod index: usize = 0; index < __items_item->size(); index += 1) {
             let item: auto = __items_item->data() + index;
             {
@@ -2191,6 +2197,218 @@ A missing block after a `#` whose code has a hole is an error. A code value has
 at most one hole, and the hole stands where a statement could. Names are not
 made unique automatically; `__items_item` is derived from the caller's binding
 name.
+
+#### Typed dispatch and forwarding
+
+`items` gets an expression binding because `widgets` is a runtime parameter.
+Binding it resolves the type of `widgets`
+without reading that pointer in the compiler. `compiler::expr(items)` returns
+ordinary parenthesized text. `item` and `index` remain value parameters holding
+compiler text. The same distinction works if the returned code is first stored
+in a `let1` and inserted later; it is not special behavior attached to `#`.
+
+The primary above uses a contiguous-container protocol. A user can provide a
+partial specialization for a different traversal. For example, assume `Set<E>`
+has `first()` returning a read-only node pointer or null, and each node has
+`next()` and `value()` methods returning the next node and an `E*` respectively:
+
+```huc
+fn loop_forward<E: auto><Set<E>*>(
+    items: Set<E>*,
+    item: compiler::Text,
+    index: compiler::Text,
+) -> compiler::Code {
+    let source: compiler::Text = compiler::expr(items);
+    let c: compiler::Text = "__set_" + item;
+    let cursor: compiler::Text = "__node_" + item;
+    return compiler::around(
+        "{ let " + c + ": auto = " + source + "; "
+            + "let mod " + index + ": usize = 0; "
+            + "for (let mod " + cursor + ": auto = " + c + "->first(); "
+            + cursor + " != null; "
+            + cursor + " = " + cursor + "->next(), " + index + " += 1) { "
+            + "let " + item + ": auto = " + cursor + "->value();",
+        "} }",
+    );
+}
+```
+
+Declare the specialization in the primary's namespace and before requests
+whose selection it changes. `Vector<Widget>*` uses the primary and
+`Set<Widget>*` selects this specialization under existing structural rules.
+The primary's `P` preserves the exact represented type; another specialization
+can handle `mod Set<E>*` without silently changing pointer permissions.
+
+This does not mean every container needs two complete traversal implementations.
+The generic primary already accepts either pointer permission when the
+container has the expected operations. A container-specific pattern such as
+`<Set<E>*>`, however, does not also match `<mod Set<E>*>`. Two thin specializations
+can share a text-building helper using `compiler::expr(items)`; the loop body
+need not be duplicated. An expression-bound pointer cannot be cast in executing
+compiler code. Permission-dropping conversion during forwarding would be a
+different rule from the current exact-type match, not an automatic consequence
+of the ordinary value conversion in specification section 7.5.
+
+A wrapper can forward the expression without replacing it with the wrapper's
+parameter name:
+
+```huc
+fn each<P: auto>(source: P, item: compiler::Text, index: compiler::Text)
+        -> compiler::Code {
+    return loop_forward(source, item, index);
+}
+```
+
+With `#each(get_widgets(scene), "item", "index"); { ... }`, where `scene` is a
+runtime binding, `get_widgets(scene)` is captured rather than called by the
+compiler. Its text initializes the generated container binding
+once at execution time. Calling `source->size()` inside `each` would instead
+be an error: there is no vector object there. The text builder generates such
+method calls for later execution. In contrast, an argument `get_widgets()` with
+no runtime inputs is a compiler value computation. If it reads runtime storage,
+that evaluation is an error, not a reason to silently capture it. Use the text
+builder for a runtime call that has no runtime inputs.
+
+#### One parameter, either binding kind
+
+The declaration does not select value versus expression binding. Query the
+current call's binding kind to support both. This builder accepts either a
+runtime expression or an already-computed `compiler::Text`:
+
+```huc
+fn source_text<T: auto>(argument: T) -> compiler::Text {
+    if1 (compiler::is_expr_param(argument)) {
+        return compiler::expr(argument);
+    } else {
+        return argument;
+    }
+}
+
+fn emit_use(pointer: Widget*) -> void {
+    let1 written: compiler::Text = "pointer";
+    let1 from_expression: compiler::Text = source_text(pointer);
+    let1 from_value: compiler::Text = source_text(written);
+}
+```
+
+The value branch requires `T` to be `compiler::Text`; another actual value type
+would need its own conversion or a different body. For the expression branch,
+that return conversion is not checked because `if1` discards the other branch.
+Unlike an ordinary `if`, `if1` lets the two kinds use different operations.
+
+The query accepts one parameter name, optionally parenthesized. A call can mix
+both kinds: `loop_forward(widgets, "item", "index")` has an expression-bound
+first parameter and two value-bound parameters. Type and binding kind are
+known during preparation, but ordinary parameter values and captured text are
+not. `compiler::expr` therefore runs in the executing builder, not behind an
+`@` inside its body.
+
+An actual object may call its supported methods in the value branch; an
+expression-bound object may not. A plain `let` local inside an executing
+compiler function is an actual object too, and forwarding it keeps a value
+binding. In a retained runtime definition, the query is false for all ordinary
+parameters; it does not change runtime calls or make their values readable by
+the compiler. The [standalone example](../examples/expression-arguments.huc1)
+tests both binding kinds with the same parameter type as well.
+
+That example deliberately uses an ordinary `increase(value: i32)` to test both
+requests. `@increase(10)` and runtime `increase(10)` take the value branch and
+produce `11`. If `number` is a runtime binding, `@increase(number)` instead
+receives a description of `number`, not its integer value; the example's
+expression branch returns `-1`. The difference is intentional and explicit in
+its `if1`, not a different meaning of integer addition. An angle header defers
+preparation; it is not required to query a parameter's binding kind.
+
+#### Text lookup and ordinary lifetimes
+
+The returned text is not a bound AST. If generated declarations shadow a name
+in it, ordinary insertion-site lookup applies, even if the new binding has
+the same type and passes all checks. Out-of-scope names diagnose at insertion;
+there is no capture-specific lifetime check. A code value can be retained
+after its builder returns, and insertion need not occur in its original scope.
+
+For example, suppose the captured text is `(count)` and the source `count` was
+`7`. This generated code reads the new `count`, not the captured declaration:
+
+```huc
+let count: i32 = 7;
+{
+    let count: i32 = 9;
+    let __saved: i32 = (count); // Inserted expression now reads 9.
+    use(__saved);
+}
+```
+
+A useful builder idiom is to bind the expression before adding declarations
+that could shadow its names, then use only that saved value:
+
+```huc
+let count: i32 = 7;
+{
+    let __saved: i32 = (count); // Insert first: reads 7, exactly once.
+    {
+        let count: i32 = 9;
+        use(__saved);
+    }
+}
+```
+
+The loop builder follows this pattern by binding the container before declaring
+its index and item. Prefer `__`-prefixed names for builder-authored helpers and
+keep them distinct from names in the captured expression and surrounding code.
+This is only a naming recommendation: the compiler does not reserve that prefix
+for builders or enforce collision avoidance. The author remains responsible.
+It does not provide hygiene or restore bindings already shadowed at insertion.
+
+Repeated insertion can repeat side effects. Neither capturing an expression
+nor storing its text owns the represented object. Ordinary generated bindings
+can nevertheless own temporaries, including Advanced containers:
+
+```huc
+fn with_owned_value<T: auto>(value: T) -> compiler::Code {
+    return compiler::around(
+        "{ let mod owned: auto = " + compiler::expr(value) + ";",
+        "}",
+    );
+}
+
+fn process_created(count: usize) -> void {
+    #with_owned_value(make_vector(count)); {
+        #loop_forward(&owned, "item", "index"); {
+            inspect(item);
+        }
+    }
+}
+```
+
+Here `count` is runtime input, so `make_vector(count)` is captured and inserted
+as the initializer of `owned`. Construction and destruction follow the existing
+destination and scope rules. The original block may contain HUC1 constructs,
+so its nested `#` is prepared normally;
+neither builder emits HUC1 text. There is no automatic lifetime extension or
+ban on temporary container expressions. For pointer-valued expressions, keeping
+the pointee alive remains the programmer's responsibility.
+
+Value parameters continue to receive actual compiler values, including objects
+declared with plain `let` inside compiler execution. A direct `let1` object or
+literal selects a value binding, not an expression binding. The same parameter
+can receive either on separate calls; the body must support the selected kind.
+Use the text builder directly when the input is already `compiler::Text`, or a
+wrapper such as `source_text` above.
+
+#### Captured calls to generic functions
+
+If `make_vector` above is a function family, `compiler::expr(value)` renders its
+selected specialization's concrete HUC0 name, not `make_vector<...>(count)`.
+That name is assigned by the same naming machinery used by the final printer.
+Inserted text resolves it to the already-selected concrete signature and, if
+the call is retained in the program, requests the runtime definition normally.
+The standalone HUC0 output contains that definition. A builder must reuse the
+rendered text rather than guess a mangled name; merely keeping the text without
+inserting it does not demand runtime emission.
+
+This concrete-name rule does not preserve the binding of the ordinary argument
+name `count`. That part of the rendered call still uses insertion-site lookup.
 
 #### Beyond loops: a scoped lock around the caller's block
 

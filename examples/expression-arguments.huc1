@@ -1,0 +1,159 @@
+module examples.expression_arguments;
+
+import1 compiler;
+
+let mod calls: i32 = 0;
+let mod drops: i32 = 0;
+
+fn next(previous: i32) -> i32 {
+    calls = previous + 1;
+    return calls;
+}
+
+fn identity<T: auto>(mod value: T) -> T {
+    return value;
+}
+
+struct Token {
+    let value: i32;
+
+    fn init(value: i32) : value(value) {
+    }
+
+    fn drop() mod -> void {
+        drops += 1;
+    }
+}
+
+fn bind_value<T: auto>(value: T, name: compiler::Text) -> compiler::Code {
+    return compiler::local("let " + name + ": auto = " + compiler::expr(value) + ";");
+}
+
+fn forward<T: auto>(value: T, name: compiler::Text) -> compiler::Code {
+    return bind_value(value, name);
+}
+
+fn expression_text<T: auto>(value: T) -> compiler::Text {
+    return compiler::expr(value);
+}
+
+fn with_owned<T: auto>(value: T) -> compiler::Code {
+    return compiler::around(
+        "{ let mod owned: auto = " + compiler::expr(value) + ";",
+        "}",
+    );
+}
+
+// The same i32 parameter can receive either binding kind in a compiler call.
+// Its ordinary runtime definition takes the value branch.
+fn increase(value: i32) -> i32 {
+    if1 (compiler::is_expr_param(value)) {
+        return -1;
+    } else {
+        return value + 1;
+    }
+}
+
+fn forward_increase<>(value: i32) -> i32 {
+    return increase(value);
+}
+
+fn local_value<>() -> i32 {
+    let value: i32 = 10;
+    return forward_increase(value); // Actual evaluator storage, not an expression.
+}
+
+fn mixed_bindings<>(first: i32, second: i32) -> bool {
+    return compiler::is_expr_param(first) && !compiler::is_expr_param(second);
+}
+
+struct Count {
+    let value: i32;
+
+    fn init(value: i32) : value(value) {
+    }
+
+    fn read() -> i32 {
+        return this->value;
+    }
+}
+
+fn read_or_describe<T: auto>(value: T) -> i32 {
+    if1 (compiler::is_expr_param(value)) {
+        return -1;
+    } else {
+        return value.read();
+    }
+}
+
+// Expected exit status: 0. Capture never calls next or constructs Token.
+fn main() -> i32 {
+    // Runtime globals count as runtime inputs, just like locals and parameters.
+    let1 pending: compiler::Code = forward(next(calls), "first");
+    #pending;
+    if (first != 1 || calls != 1) {
+        return 1;
+    }
+
+    // Text can be inserted again in a different scope; next(calls) executes again.
+    {
+        #pending;
+        if (first != 2 || calls != 2) {
+            return 2;
+        }
+    }
+
+    // Argument origin, not its type or constant-foldability, selects the kind.
+    let number: i32 = 7;
+    let1 compiler_number: i32 = 20;
+    let1 captured_result: i32 = forward_increase(number);
+    let1 concrete_result: i32 = forward_increase(compiler_number);
+    let1 literal_result: i32 = forward_increase(30);
+    let1 local_result: i32 = local_value();
+    let1 mixed: bool = mixed_bindings(number, compiler_number);
+    let1 compound: i32 = forward_increase(number + compiler_number);
+    let1 forced_inner: i32 = forward_increase(@increase(number));
+    let1 no_runtime_input: i32 = forward_increase(local_value());
+    if (captured_result != -1 || concrete_result != 21 || literal_result != 31
+            || local_result != 11 || !mixed || increase(number) != 8
+            || compound != -1 || forced_inner != 0 || no_runtime_input != 12) {
+        return 6;
+    }
+
+    let runtime_count: Count = Count(40);
+    let1 compiler_count: Count = Count(50);
+    let1 from_expression: i32 = read_or_describe(runtime_count);
+    let1 from_value: i32 = read_or_describe(compiler_count);
+    if (from_expression != -1 || from_value != 50) {
+        return 7;
+    }
+
+    // No ordinary runtime call requests identity<i32>; the inserted text does.
+    // Its concrete function name must resolve and have a definition in HUC0.
+    let1 family_call: compiler::Text = expression_text(identity(number));
+    #compiler::local("let echoed: i32 = " + family_call + ";");
+    if (echoed != 7) {
+        return 8;
+    }
+
+    // Text uses insertion-site lookup, not the original declaration binding.
+    let1 source: compiler::Text = expression_text(number);
+    {
+        let number: i32 = 9;
+        #compiler::local("let rebound: i32 = " + source + ";");
+        if (rebound != 9) {
+            return 3;
+        }
+    }
+
+    // Ordinary generated storage owns the temporary until this scope ends.
+    #with_owned(Token(number + 35)); {
+        if (owned.value != 42) {
+            return 4;
+        }
+    }
+    if (drops != 1) {
+        return 5;
+    }
+    return 0;
+}

@@ -234,8 +234,10 @@ insertion-item    = "#", expression-1, ";" ;
    compiler code of type compiler::Code; the item inserts that code here (its
    module parts after the insertion anchor). If the code has a hole, the next
    source item must be a block-1, which fills it. Inside an @ or # operand,
-   and in other compiler-only clauses, nested calls need no further @. These
-   are semantic checks on the AST. *)
+   and in other compiler-only clauses, nested value calls need no further @.
+   At compiler-call argument boundaries, runtime-dependent expressions instead
+   bind as descriptions; an explicit inner @ requests evaluation of that
+   subexpression under specification 9.7.1. These are semantic checks on the AST. *)
 
 deferred-body     = "{", ? scanner-delimited opaque source span ?, "}" ;
 
@@ -316,6 +318,17 @@ parameter-0       = [ "mod" ], identifier, ":", type-0 ;
 parameter-list-1  = "(", [ parameter-1,
                     { ",", parameter-1 }, [ "," ] ], ")" ;
 parameter-1       = [ "mod" ], identifier, ":", type-1 ;
+
+(* No parameter marker distinguishes values from expressions. In compiler
+   calls, arguments determine the binding kind under specification 9.7.1.
+   A plain let in an executing compiler function holds an actual value.
+   An expression binding has no value slot even if its parameter spells mod.
+   compiler::is_expr_param(parameter) queries the per-call binding metadata;
+   it is available to if1 without reading the argument. In runtime preparation
+   it is false for ordinary parameters. compiler::expr(parameter) extracts
+   compiler::Text from an expression binding during compiler execution.
+   Both accept a parameter name, optionally parenthesized; neither is a
+   first-class function. HUC0 has neither expression bindings nor these queries. *)
 
 (* A slot's mod precedes its name; a pointee's mod stays inside the type.
    Variables and parameters always spell name: type. Inference uses : auto

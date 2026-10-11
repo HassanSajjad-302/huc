@@ -231,6 +231,11 @@ families use `let name<T: auto> { ... }`; compiler-only variables use `let1`.
 There are no compatibility aliases for the former numbered generic declarations
 or suffix-2 compiler declarations. Section 9 defines the staging rules.
 
+Function parameters use the same spelling for value and expression bindings.
+The argument decides the binding kind during a compiler call (section 9.7.1);
+`compiler::expr` and `compiler::is_expr_param` are qualified compiler API names,
+not keywords.
+
 `in` is an ordinary identifier, not a reserved keyword. Neither `for` nor
 `for1` has a range-based form; both use three-part, semicolon-separated headers.
 
@@ -1763,8 +1768,9 @@ Generic `struct`, `fn`, and `let` declarations use one primary/partial/full
 specialization model. The primary's angle-bracket binder list follows the
 family name. A generic `fn` then has a separate parenthesized ordinary-parameter
 list; write `()` when it is empty. Those parameters are runtime inputs for a
-runtime call and compiler values for an evaluated call. Bodies remain deferred
-until requested, including zero-binder declarations such as `fn answer<>()`.
+runtime call. A compiler call binds each argument as a compiler value or an
+unevaluated expression under section 9.7.1. Bodies remain
+deferred until requested, including zero-binder declarations such as `fn answer<>()`.
 
 Primary families have binders and no angle pattern:
 
@@ -1852,7 +1858,8 @@ not request a compile-time specialization.
 
 A function call, with or without `@`, may omit the entire angle list when all
 binders are deduced or defaulted. Deduction unifies ordinary parameter types
-with argument types. Explicit arguments and defaults supply the remaining
+with argument types, including the represented types of expression parameters
+(section 9.7.1). Explicit arguments and defaults supply the remaining
 binders; a binder that cannot be determined is a diagnostic. `answer()` and
 `answer<>()` select the same zero-binder primary. Calls never have two angle
 lists: `convert<i32>(x)` requests the family, and selection finds its definition.
@@ -2204,10 +2211,12 @@ Prefixing the call with `@` instead requires complete compile-time evaluation:
 let folded: i32 = @choose<i32, false>(3, 5);
 ```
 
-Every argument of a compiler call must be a compiler value. The call prepares
-the selected body in evaluation mode, executes it in the evaluator with those
-arguments, and returns the result. A compiler call never inserts code into its
-caller; code reaches a body only through a `#` statement in that body
+Each argument of a compiler call determines its parameter's binding kind: an
+actual compiler value or a typed, unevaluated expression under section 9.7.1.
+The call prepares the selected body in evaluation mode,
+executes it in the evaluator with those arguments, and returns the result.
+A compiler call never inserts code into its caller; code reaches a body only
+through a `#` statement in that body
 (section 11.2).
 
 Preparation never sees ordinary argument values. Phase control, `@`
@@ -2216,14 +2225,24 @@ once per occurrence, and may use only compiler-known values: phase binders,
 `let1` storage, constants, and compiler queries. Ordinary parameters and `let`
 locals exist only when the body executes: as symbolic runtime inputs after a
 runtime request, and as concrete evaluator values during a compiler call.
+Expression-bound parameters describe code instead of holding objects.
 Runtime requests and compiler calls follow the same preparation rules, with
 their respective generation modes and currently visible compiler inputs.
-Preparation does not depend on ordinary argument values.
+Preparation does not depend on ordinary argument values. It does know each
+parameter's binding kind; `compiler::is_expr_param(parameter)` exposes that
+metadata without reading an argument.
+
+Expression arguments likewise become available only when the compiler call
+executes. An `@` or `#` inside its body cannot inspect its expression parameters
+during preparation. Call `compiler::expr(parameter)` directly in executing
+compiler code instead. Its represented type can be carried by a family binder,
+and its binding kind queried with `compiler::is_expr_param`, during preparation.
 
 Code that executes in the evaluator may use compiler-only values and call the
-compiler library directly, without further `@` (section 9.9). Such code makes
-the function compile-time-only: a runtime request rejects it and names the
-operation that cannot survive.
+compiler library directly, without further `@` (section 9.9). A runtime request
+must remove or resolve these operations during preparation, as it does for
+`compiler::is_expr_param`. Otherwise it rejects the function and names the
+compiler-only operation that cannot survive.
 
 The result of a compiler call may stay in compiler code; if it flows into
 runtime code, it must be materializable as HUC0. Failure is a diagnostic, with
@@ -2256,6 +2275,250 @@ remove unused runtime functions.
 Code inserted with `#` belongs to the body that contains the `#`, in that
 body's generation mode. Its module parts have a separate insertion anchor
 (section 11).
+
+### 9.7.1 Value bindings and expression bindings
+
+Parameters keep the ordinary `name: Type` or `mod name: Type` spelling. In a
+compiler call, each **argument** decides how its parameter is bound:
+
+| Argument | Binding | Available operations |
+|---|---|---|
+| An actual compiler value, such as a `let1` object or a literal | Value | Ordinary value operations and supported method calls |
+| An expression referring to runtime storage, including locals, parameters, and module-level globals | Expression | Binding-kind query, text extraction, and unchanged forwarding |
+
+A runtime `let` therefore supplies an expression, while a `let1` supplies a
+value. A plain `let` **inside an executing compiler function** also holds an
+actual compiler value: its keyword does not turn it into an expression.
+Module-level runtime bindings count too, even when their initializers are
+constants. For example, if `calls` is a runtime global, `next(calls)` is a
+runtime-dependent expression; capturing it does not read or update `calls`.
+Value bindings obey the usual copying, relocation, permissions, and cleanup
+rules. Expression bindings hold descriptions, not objects; they have no value
+slot or cleanup. Even a parameter declared `mod name: Type` cannot be mutated
+when expression-bound. A represented type such as `mod Vector<Widget>*` still
+retains its pointer permissions.
+
+For example, this builder expects an expression for `items` and actual compiler
+text for the two names, without declaring separate parameter kinds:
+
+```huc
+fn loop_forward<P: auto>(
+    items: P,
+    item: compiler::Text,
+    index: compiler::Text,
+) -> compiler::Code {
+    let source: compiler::Text = compiler::expr(items);
+    let c: compiler::Text = "__items_" + item;
+    return compiler::around(
+        "{ let " + c + ": auto = " + source + "; "
+            + "for (let mod " + index + ": usize = 0; "
+            + index + " < " + c + "->size(); " + index + " += 1) { "
+            + "let " + item + ": auto = " + c + "->data() + " + index + ";",
+        "} }",
+    );
+}
+```
+
+These bindings are properties of individual compiler calls, not function types
+or declarations. They apply to ordinary and deferred HUC functions; an ordinary
+function must still have a valid eagerly prepared runtime definition. Use an
+angle header for compiler-only builders such as the one above. Foreign calls,
+constructors, implicit method receivers, and built-in operations keep their own
+contracts: this rule does not give them symbolic execution. In particular, a
+method executed in the compiler needs an actual receiver object.
+
+Calls use ordinary argument syntax; no caller-side `capture` operation is
+required. This applies in `#`, `@`, `let1` initializers, and nested compiler
+calls, not only to functions called directly after `#`:
+
+```huc
+fn draw_all(widgets: Vector<Widget>*) -> void {
+    let1 loop: compiler::Code = loop_forward(widgets, "item", "index");
+    #loop; {
+        item->draw(index);
+    }
+}
+```
+
+#### Classifying arguments
+
+Classify an argument before evaluating it, using its source context and the
+declared types, not optimizer results or trial execution:
+
+- During compiler execution, an existing parameter forwarded unchanged keeps
+  its binding kind.
+- A `let1`, literal, phase binder, or actual evaluator-owned object supplies a
+  value. Operations using only compiler values also supply values.
+- A HUC0-capable expression that depends on a runtime binding supplies an
+  expression. Examples include `widgets`, `&widgets`, `scene.widgets`,
+  `widgets + Offset`, and `get_widgets(scene)`, where `scene` is a runtime
+  binding. Calls or constructors inside that captured expression do not run.
+- An explicit `@` subexpression is evaluated as compiler code, as are
+  subexpressions with compiler-only types. Their calls can in turn receive
+  expression arguments. For example, `@describe(widgets)` can produce a
+  compiler text value by describing, rather than reading, `widgets`. Treat
+  the result as a value when classifying the enclosing argument; runtime
+  references inside that compiler computation do not propagate outward.
+
+The compiler call itself is executed; these rules classify its arguments, not
+the whole call as an expression to capture. A nested call with no runtime
+input, such as `make_count()`, is a value computation. Do not inspect its body
+to guess that it was meant as runtime code: if evaluation reaches an unsupported
+operation, diagnose it. Never try evaluation and silently fall back to capture.
+Use the text-building interface when runtime code with no runtime inputs needs
+to be emitted rather than evaluated.
+
+Classification is structural, before executing ordinary short-circuit or
+conditional operators: a runtime-dependent operand makes the enclosing
+HUC0-capable argument an expression even if another operand is a constant.
+Compiler-known components inside a captured expression must have HUC0
+representations; substitute their values when rendering the text. A pointer
+into compiler storage cannot be smuggled into generated code this way.
+
+While preparing a body, its ordinary parameters and locals are code being
+prepared, not available evaluator objects. Passing such a reference to another
+compiler call can describe that code, but cannot inspect an incoming value or
+recover an incoming expression's text early. Preserving an incoming binding by
+forwarding applies when the function actually executes.
+
+For an expression argument, resolve names and determine the type in the
+argument's source context, without executing the expression. The argument may
+refer to visible runtime globals as well as parameters or locals in the body
+being prepared for later execution, in either program mode or evaluation mode.
+Its represented type must be usable in HUC0. A compiler-only result is computed
+as a value, not captured. No value is
+copied, relocated, constructed, destroyed, or read by this binding operation.
+Checked-use and cleanup effects belong to any later inserted occurrences, not
+to the capture itself. Ordinary syntax, type, and access-permission errors in
+the original expression still diagnose.
+
+Process argument positions left to right: evaluate value arguments normally
+and bind expression descriptions without executing their represented effects.
+Capturing a call does not itself request emission of its runtime definition;
+an inserted call that survives into HUC0 creates runtime demand normally.
+
+An error in a body does not change a binding kind. Reading an expression-bound
+parameter cannot make it a value, and calling `compiler::expr` on a value-bound
+parameter cannot capture it retroactively. Runtime bindings remain expressions
+even if an optimizer could replace their reads with constants.
+
+Deduction uses the expression's represented type. Match that type exactly to
+the substituted parameter type; no implicit conversion wraps the
+captured expression. Use an explicit cast in the argument if needed. Existing
+structural specialization selects the implementation. There is no declaration-
+level parameter-kind map and no new overload-ranking dimension. The same
+specialization can receive different binding kinds on separate compiler calls;
+prepare each call with its own binding metadata. This does not change public
+name mangling or add caching. Failure in a selected body does not cause another
+specialization to be tried.
+
+#### Querying a parameter's binding kind
+
+`compiler::is_expr_param(parameter)` returns `bool`: `true` for an expression
+binding and `false` for a value binding. Its single operand must name a parameter
+of the current function, optionally parenthesized. A local, literal, member
+access, or other arbitrary expression is a diagnostic. The query is compiler-
+known and non-overloadable, not a first-class function. It neither evaluates nor
+copies, moves, or otherwise observes the represented argument.
+
+The query is available during body preparation and during compiler execution.
+It is the narrow exception that exposes a parameter's **binding metadata** to
+`if1`, not its value or expression text:
+
+```huc
+fn describe_argument<T: auto>(argument: T) -> compiler::Text {
+    if1 (compiler::is_expr_param(argument)) {
+        return compiler::expr(argument);
+    } else {
+        return argument.describe();
+    }
+}
+```
+
+Here a value argument must provide a supported `describe()` returning
+`compiler::Text`. An expression argument needs no such method: the other branch
+is not parsed or checked. An ordinary `if` would still check both branches and
+is not a substitute for this `if1`. Two parameters of the same call may have
+different binding kinds; query each separately.
+
+For a retained runtime definition, all ordinary parameters are value parameters
+and this query resolves to `false` during preparation. It is not a query for
+"is this a compiler value?": those runtime parameter values remain unavailable
+to preparation. No binding tag or compiler query survives into HUC0. Runtime
+calls retain their ordinary argument evaluation and value semantics.
+
+#### Using and forwarding expression bindings
+
+Inside an executing compiler function, an expression parameter may only be
+passed unchanged to another compatible function parameter, or supplied to
+`compiler::expr` or `compiler::is_expr_param`. Parentheses around the parameter
+are harmless. Forwarding preserves its represented type and original
+expression, rather than capturing the helper's formal parameter name. Do not
+read its fields, call its represented object's methods, dereference it, take
+its address, assign it, compare it, return
+it as a value, or store it in a `let`. Those operations would need a real object.
+The represented type can be inspected through existing binder-based queries;
+this adds no general reflection API or symbolic execution of its methods.
+
+`compiler::expr(parameter)` is a compiler-known, non-overloadable operation
+with exactly one expression-parameter operand and result type `compiler::Text`.
+It is not a first-class function. A value parameter, local, literal, or arbitrary
+expression used as its operand is a diagnostic. It returns parenthesized HUC0
+expression text, with HUC1 substitutions and necessary concrete naming applied;
+whitespace and comments need not match the source. It does not evaluate the
+expression. Calling it twice produces text twice, not two executions.
+
+For a resolved family reference, "concrete naming" means the canonical qualified
+HUC0 name of the selected specialization, using the same name as ordinary HUC0
+printing (section 9.3). Assign that name when resolving the concrete signature;
+the function body need not be emitted or prepared for runtime merely to name it.
+When the text is inserted in the same translation unit, that ordinary concrete
+name resolves to the recorded specialization. A reference retained in program
+code requests its runtime definition and dependencies normally. A reference in
+a private evaluation body follows compiler-call rules and does not by itself
+require runtime emission. Unused text requires neither.
+
+The final HUC0 contains the required concrete declarations and definitions;
+its reader needs no HUC1 name table. Generated names remain opaque implementation
+details: builders may reuse the returned text, but must not construct names by
+guessing a mangling scheme or expect them to be portable between compilations.
+This is ordinary lookup of compiler-assigned names, not hidden links attached
+to text. Source names left unqualified still follow insertion-site lookup.
+
+The result is ordinary text, not a bound syntax handle. Builders concatenate,
+store, or edit it normally and pass it to `compiler::local`, `compiler::module`,
+or `compiler::around`. Constructing `compiler::Code` does not validate the
+fragments as expressions or statements; insertion performs the checks in
+section 11. Unqualified names in the inserted text use insertion-site lookup.
+There is no hidden link back to the original declarations or a hidden assertion
+that inserted text must retain the type used for dispatch. A generated variable
+can shadow an original name and still type-check; avoiding unwanted rebinding
+is the generator author's responsibility.
+
+To reduce accidental rebinding, initialize one nonconflicting temporary from
+the expression before introducing loop indices or other helper declarations,
+then use that temporary in the generated code. Prefer `__`-prefixed names for
+builder-authored helpers, such as `__loop_items`. This is a recommendation, not
+a reserved namespace or an enforced rule. Collision avoidance remains entirely
+the author's responsibility; bindings already shadowed at the insertion site
+remain shadowed. This idiom is not automatic name hygiene; section 7.4 of
+[Use Cases and Examples](use-cases-and-examples.md#74-a-generated-loop-around-an-original-block)
+shows the difference.
+
+No capture-specific runtime lifetime or scope restriction is added. The text
+owns no represented object and may be retained after the builder returns.
+An unavailable name at insertion is an ordinary lookup error; a name that
+resolves differently uses that new binding. Each inserted occurrence executes
+under normal control flow, with the usual value, permission, and lifetime rules.
+Duplicated text can therefore duplicate side effects. To evaluate an expression
+once, generate one binding and reuse it. Temporary values, including Advanced
+containers, are permitted: an enclosing generated binding can own them through
+the wrapped block. No lifetime extension is implicit, and unchecked pointer
+misuse remains the programmer's responsibility.
+
+These rules do not change ordinary runtime calls: a materializable `let1`
+scalar can still supply a runtime value parameter. They do not add general
+struct-value materialization or allow a pointer into compiler storage to escape.
 
 ### 9.8 Unified functions, types, and compiler storage
 
@@ -2307,9 +2570,9 @@ requested context.
 Compiler-only values may be used by phase control, family arguments,
 evaluation, reflection, and generation. None may leak into HUC0. A deferred
 function without compiler-only types is allowed at runtime if its resulting
-definition is valid; there is no replacement `consteval` marker. Compiler calls
-may reuse ordinary functions under section 12.1; this does not make their
-runtime emission lazy.
+definition is valid after preparation; there is no replacement `consteval`
+marker. Compiler calls may reuse ordinary functions under section 12.1; this
+does not make their runtime emission lazy.
 
 #### Compiler storage
 
@@ -2386,8 +2649,11 @@ The declared type above is `compiler::Function`, not `@Function` and not
 The whole operand of `@` is compiler code: calls, operators, constructors, and
 method calls inside it need no further `@`. The same holds in other places that
 only hold compiler code: `if1`, `for1`, and `while1` clauses,
-`let1` initializers, and the operand of `#`. A redundant `@` there
-has no effect.
+`let1` initializers, and the operand of `#`. Automatic expression binding at a
+function argument boundary is the exception: runtime-dependent arguments are
+described rather than executed (section 9.7.1). An explicit inner `@` requests
+evaluation of that subexpression, with the same argument-binding rules for its
+own calls. Elsewhere a redundant `@` has no effect.
 
 Code that executes in a compiler call is compiler code too, so a function used
 that way calls the compiler library directly. In any function body, however,
@@ -2396,12 +2662,14 @@ body is prepared, which cannot read the body's parameters or `let` locals
 (section 9.7).
 
 An evaluation island must not read a runtime-only value. Its result may be used
-by compiler code without materialization. If it flows into residual runtime
-code, it must have an exact HUC0 representation, such as a scalar, boolean,
-floating value, or string literal accepted at that location. Compiler handles,
-`compiler::Code` values, compiler-only structures, and pointers to compile-time
-objects, including values that contain them, cannot be materialized as runtime
-values.
+by compiler code without materialization. Passing runtime expression text to an
+expression-bound parameter is not a read (section 9.7.1). The binding-kind query
+can inspect a parameter's metadata during preparation, not its value or text.
+A result flowing into residual runtime code must have an exact HUC0
+representation, such as a scalar, boolean, floating value, or string literal
+accepted at that location. Compiler handles, `compiler::Code` values,
+compiler-only structures, and pointers to compile-time objects, including
+values that contain them, cannot be materialized as runtime values.
 
 A standalone phase-expression item has this form:
 
@@ -2560,7 +2828,8 @@ The module's declarations come from a versioned, inspectable generated
 interface unit loaded before user HUC1 modules, analogous to an always-included
 header. The explicit `import1 compiler` still binds its namespace and makes the
 phase dependency visible. The bootstrap interface declares only
-`compiler::Code`, its three constructors, `compiler::emitting()`,
+`compiler::Code`, its three constructors, `compiler::expr(parameter)`,
+`compiler::is_expr_param(parameter)`, `compiler::emitting()`,
 `compiler::error(message)`, `compiler::allocate`, and `compiler::deallocate`;
 the object-model design remains separate.
 
@@ -2751,11 +3020,12 @@ For example, a builder can wrap a caller's block in a loop without seeing that
 block, assuming a `Vector` with `size()` and `data()`:
 
 ```huc
-fn loop_forward<>(items: compiler::Text, item: compiler::Text, index: compiler::Text)
+fn loop_forward<P: auto>(items: P, item: compiler::Text, index: compiler::Text)
         -> compiler::Code {
+    let source: compiler::Text = compiler::expr(items);
     let c: compiler::Text = "__items_" + item;
     return compiler::around(
-        "{ let " + c + ": auto = " + items + "; "
+        "{ let " + c + ": auto = " + source + "; "
             + "for (let mod " + index + ": usize = 0; "
             + index + " < " + c + "->size(); " + index + " += 1) { "
             + "let " + item + ": auto = " + c + "->data() + " + index + ";",
@@ -2764,7 +3034,7 @@ fn loop_forward<>(items: compiler::Text, item: compiler::Text, index: compiler::
 }
 
 fn draw_all(widgets: Vector<Widget>*) -> void {
-    #loop_forward("widgets", "item", "index"); {
+    #loop_forward(widgets, "item", "index"); {
         if (item->hidden()) {
             continue;
         }
@@ -2782,7 +3052,10 @@ or multiple statements, not just a loop header; the scoped-lock example in
 [Use Cases and Examples](use-cases-and-examples.md#74-a-generated-loop-around-an-original-block)
 shows this distinction.
 Names are not made unique automatically; the helper name here is derived from
-the caller's binding name.
+the caller's binding name. `items` binds as an expression for this runtime
+pointer without evaluating it; `compiler::expr(items)` provides parenthesized text. Existing
+specialization can choose another traversal for a different pointer type.
+The text-based builder remains a valid lower-level alternative.
 
 Module code is queued in program mode for the `#` site's namespace, after its
 module insertion anchor:
@@ -2977,16 +3250,17 @@ escape literals correctly.
 
 ### 11.5 Facilities not added by text generation
 
-HUC does not define `quote`, structural syntax values, expression capture,
-`compiler::fresh`, splicing, `emit`, `gen`, `gen_global`, `gen_up`,
+HUC does not define `quote`, structural syntax values, a first-class expression
+handle, `compiler::fresh`, splicing, `emit`, `gen`, `gen_global`, `gen_up`,
 `gen_module`, `gen_huc0_module`, or a public `parse_huc` operation. Parsing
 inserted HUC0 is compiler behavior, not a new user-callable parsing API.
 Phase control prepares selected ordinary HUC syntax; text becomes code only
 through `compiler::Code` values inserted with `#`. The bootstrap constructors
 take compile-time text; accepting ordinary string values there is a planned
-relaxation. Typed container dispatch and operator overloading remain separate
-features. Generated loops use the ordinary `for` rules in section 7.3; text
-generation adds no special loop syntax.
+relaxation. Expression parameters and `compiler::expr` supply typed dispatch and
+text extraction under section 9.7.1, not hygienic AST splicing. General operator
+overloading remains separate. Generated loops use the ordinary `for` rules in
+section 7.3; text generation adds no special loop syntax.
 
 ### 11.6 Explicit compile-time errors
 
@@ -3030,11 +3304,13 @@ conforming implementation may interpret typed HUC IR, compile it to a sandboxed
 VM, or use another equivalent technique.
 
 Code that runs in the compiler follows HUC's semantics for the selected target.
-An ordinary function computes what it would compute at run time, or evaluation
-fails with a diagnostic. No marker is needed: any function whose HUC body is
-available may run in the compiler, and eligibility is checked along the path
-that actually executes (section 12.1). C++ instead requires `constexpr` on
-such functions.
+Ordinary value operations compute what they would at run time, or evaluation
+fails with a diagnostic. A function that branches on generation mode or
+parameter-binding metadata, directly or through a function it calls, can
+deliberately choose different behavior. The compiler does not prove the branches
+equivalent. No marker is needed: any function whose HUC body is available may
+run in the compiler, and eligibility is checked along the path that actually
+executes (section 12.1). C++ instead requires `constexpr` on such functions.
 
 Compile-time values have HUC value semantics. Raw addresses into the compiler
 process are not materializable and must not be used as stable declaration or
@@ -3066,8 +3342,10 @@ evaluable.
 ### 12.1 Ordinary functions in compiler execution
 
 The evaluator may call an ordinary `fn` whose HUC definition is available.
-Arguments must be compiler-available values; it cannot read a runtime value
-merely because that value's type is supported. Within code that executes in
+Arguments bind as compiler values or unevaluated expressions under section
+9.7.1. An expression binding does not permit reading the runtime value merely
+because its type is supported; use the binding query and text operations or
+forward it unchanged. Within code that executes in
 the compiler, use normal call syntax. From otherwise runtime source,
 `@` requests complete evaluation under the same rules. No new function marker
 or alternative declaration is required.

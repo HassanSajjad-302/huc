@@ -57,6 +57,21 @@ as `let x: i32 = @compute();` never inserts code into its caller. Inside an `@`
 or `#` operand, and in code already running in the compiler, compiler calls
 need no further `@`.
 
+Compiler calls use ordinary parameters: the argument decides whether each
+receives a **value binding** or an **expression binding**. A `let1` or actual
+compiler local supplies a value; a runtime `let` supplies an unevaluated
+expression. `compiler::is_expr_param(name)` lets `if1` select the right branch
+without reading the argument. `compiler::expr(name)` extracts an expression
+binding's HUC0 text. Existing deduction and partial specialization can choose
+traversal code for a vector, set, or custom container. Expression bindings do
+not expose runtime objects; ordinary runtime calls keep their value semantics.
+
+Extracted expressions remain text, not bound syntax handles. Names resolve
+again where `#` inserts the text; generated names can shadow them. The resulting
+code receives ordinary checks and lifetime rules, with no capture-specific
+ownership or lifetime extension. See the
+[typed loop builder](docs/use-cases-and-examples.md#74-a-generated-loop-around-an-original-block).
+
 Text generation has two [generation modes](docs/language-specification.md#111-program-mode-and-evaluation-mode):
 **program mode** prepares the HUC0 program; **evaluation mode** prepares a private
 body for the compiler to execute. Inserted local code is parsed and checked
@@ -258,6 +273,7 @@ it is not a prerequisite for the first implementation slice.
 - [Resource-transfer example](examples/ownership.huc0)
 - [Value-semantics example](examples/value-semantics.huc0)
 - [Staging and generics example](examples/phases.huc1)
+- [Expression arguments and text insertion](examples/expression-arguments.huc1)
 
 ## Status
 
