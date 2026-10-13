@@ -2648,8 +2648,9 @@ module's **compiler state**. Imports merge values into that state as described
 in section 9.8.1. A function-local `let1` belongs to one preparation or compiler
 call; different calls, specializations, and phase-loop iterations get their own.
 
-Compile-time code that can name a `let1 mut` may assign it: phase-control
-clauses, `@` and `#` operands, and deferred functions executing in the compiler.
+Compile-time code that can name a `let1 mut` may assign it: compiler
+assignment items, phase-control clauses, `@` and `#` operands, and deferred
+functions executing in the compiler.
 Ordinary functions evaluated under section 12.1 still cannot name `let1 mut`
 storage directly. They may change compiler objects through pointers they
 receive, including `this`. Mutation permissions and access checks do not change.
@@ -2889,7 +2890,7 @@ The declared type above is `compiler::Function`, not `@Function` and not
 The whole operand of `@` is compiler code: calls, operators, constructors, and
 method calls inside it need no further `@`. The same holds in other places that
 only hold compiler code: `if1`, `for1`, and `while1` clauses,
-`let1` initializers, and the operand of `#`.
+`let1` initializers, compiler assignment items, and the operand of `#`.
 Automatic expression binding at a function argument boundary
 is the exception: runtime-dependent arguments are
 described rather than executed (section 9.7.1). An explicit inner `@` requests
@@ -2922,6 +2923,52 @@ It is legal at module, type-body, function, and nested-block scope. The
 expression must completely evaluate in the compiler and have type `void` or
 `never`, which suits compile-time checks. The item itself is erased. A standalone expression
 of type `compiler::Code` is rejected with a hint to use `#`.
+
+A compiler assignment item changes compiler storage directly:
+
+```huc
+module options.fast;
+
+import options.defaults;
+
+defaults::checks = false;
+```
+
+It is legal at module scope and at type-body scope, including inside selected
+phase bodies there. It runs in the compiler, changes only the active state
+(section 9.8.1), and is then erased. Its target must be compiler
+storage: a `let1 mut`, or a place reached from compiler storage through fields
+or pointers, such as `a::pair.x` or `*a::p`. Both sides are compiler code, so
+calls in them need no `@`. Compound assignment such as `count += 1;` is
+allowed. The item cannot be marked `pub`, and it cannot assign a runtime `let`
+global; runtime code changes those at run time. Directly at module or
+type-body scope, a bare expression that is not an assignment still needs `@`.
+Inside a selected module or type phase body, other compiler-only expression
+statements remain allowed as before (section 9.6).
+
+At module scope, the item runs in source order. In a type body, it runs when
+that body is prepared, in the state that preparation uses:
+
+```huc
+module shapes;
+
+pub let1 mut declared: usize = 0;
+
+struct Point {
+    declared += 1; // Runs while Point is prepared: 1.
+    let x: i32;
+    let y: i32;
+}
+```
+
+Names resolve as in the type body. The type's own fields are runtime members,
+not compiler storage, so `x = 1;` in the body above is a diagnostic. An
+ordinary structure is prepared when encountered, in its module's working
+state, so its assignments act like module-level ones at that point. A generic
+structure runs them once per prepared specialization. A specialization
+prepared after its module finished uses a fresh private view of the completed
+state, and its writes are discarded (section 9.8). A counter in a generic body
+therefore cannot count specializations requested from other modules.
 
 `@` never inserts code into the code around it. When an evaluated function
 inserts local code into its own body with `#`, that code stays in its private

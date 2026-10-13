@@ -937,10 +937,8 @@ module c;
 pub import a;
 
 pub let1 before: u64 = a::t; // 3.
-if1 (true) {
-    a::t = 5;
-    a::pair.x = 10;
-}
+a::t = 5;
+a::pair.x = 10;
 pub let1 after: u64 = *a::p; // 5: the pointer sees c's version too.
 ```
 
@@ -952,10 +950,8 @@ module d;
 pub import a;
 
 pub let1 before: u64 = a::t; // 3, not c's 5.
-if1 (true) {
-    *a::p = 7;
-    a::pair.y = 20;
-}
+*a::p = 7;
+a::pair.y = 20;
 pub let1 after: u64 = a::t; // 7: direct access sees the pointer write.
 ```
 
@@ -978,10 +974,10 @@ fn main() -> i32 {
 }
 ```
 
-`if1 (true)` provides the existing module-level compiler statement context.
-It is not a new override syntax. The `pub import` lines let the app name
-`a`; ordinary private imports also carry state, but do not expose their
-dependencies' names.
+The assignments are module-level assignment items: they run in the compiler,
+change only that module's state, and disappear from HUC0. The `pub import`
+lines let the app name `a`; ordinary private imports also carry state, but do
+not expose their dependencies' names.
 
 The completed states are:
 
@@ -2227,6 +2223,11 @@ The implementation must pass these tests. None has run yet.
 | Equal variable names in different namespaces | Distinct permitted variables |
 | Two calls in one module update that module's let1 counter | Both calls run and update the same object |
 | An importer assigns to an imported let1 mut | Changes only the importer's state |
+| A module-level assignment item such as a::t = 5; | Runs in the compiler in source order and is erased |
+| A module-level assignment item targets a runtime let global or uses pub | Diagnostic |
+| A struct body assigns a let1 mut | Runs while the type is prepared, in that preparation's state |
+| A struct body assigns one of its own runtime fields as a compiler item | Diagnostic |
+| A generic struct requested late from another module assigns a module counter | The write stays in that preparation's private view |
 | An importer changes an imported let1 through a pointer, a method, or a compiler call | Same isolation as direct assignment |
 | A library function changes a let1 that its caller owns, through a pointer | Accepted |
 | Two dependencies change a shared imported value to 5 and 7 | Each keeps its own state; their parent gets the later value |

@@ -509,13 +509,16 @@ though they share binder, pattern, and deferred-body components.
 The syntax tree also has a phase-expression item node for standalone
 `@expression;` and an insertion item node for `#expression;`, both at module,
 type-body, function, or block scope. A phase-expression item must evaluate to
-compiler `void` or `never` and inserts nothing. An insertion item's expression must
-produce `compiler::Code`; preparation erases the node, inserts the code's local
-part at that position, queues its module part, and processes inserted text
-before the following source. When the code has a hole, the following braced
-source block fills it. Do not check that block's loop context prematurely.
-Reject numbered syntax, `@`, and `#` in inserted HUC0; insertion does not start
-another staging pass.
+compiler `void` or `never` and inserts nothing. A compiler assignment item
+node holds a module-level or type-body assignment to compiler storage, such as
+`defaults::checks = false;`; the compiler executes it in the active state,
+in source order or while the type body is prepared, and erases it. An
+insertion item's expression must produce `compiler::Code`; preparation erases
+the node, inserts the code's local part at that position, queues its module
+part, and processes inserted text before the following source. When the code
+has a hole, the following braced source block fills it. Do not check that
+block's loop context prematurely. Reject numbered syntax, `@`, and `#` in
+inserted HUC0; insertion does not start another staging pass.
 
 Ordinary `import` exposes a module's `pub` declarations of every kind, under
 their phase rules; `import1` is compiler-only; `pub import` also re-exports

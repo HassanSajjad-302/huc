@@ -107,6 +107,7 @@ module-item-1     = [ "pub" ], ( runtime-declaration-1
                                | global-let1-decl )
                   | phase-control-item
                   | phase-expression-item
+                  | compiler-assignment-item
                   | insertion-item ;
 
 runtime-declaration-1
@@ -139,6 +140,7 @@ struct-member-1   = field-decl-1
                   | generic-function-decl
                   | phase-control-item
                   | phase-expression-item
+                  | compiler-assignment-item
                   | insertion-item ;
 
 field-decl-1      = "let", [ "mut" ], identifier, ":", type-1,
@@ -245,7 +247,17 @@ phase-while-item  = "while1", "(", expression-1, ")", deferred-body ;
 
 phase-expression-item
                   = "@", unary-expression-1, ";" ;
+compiler-assignment-item
+                  = unary-expression-1, assignment-op, expression-1, ";" ;
 insertion-item    = "#", expression-1, ";" ;
+
+(* A compiler-assignment-item is an assignment at module or type-body scope
+   that runs in the compiler and is then erased. At module scope it runs in
+   source order; in a type body it runs when that type body is prepared. Its
+   target must be compiler storage: a let1 mut, or a place reached from
+   compiler storage through fields or pointers. Runtime fields and runtime
+   let globals are not targets. Both sides are compiler code. It cannot have
+   pub. *)
 
 (* A phase-expression-item evaluates its expression in the compiler; it must
    have type void or never, and it inserts no code. An insertion-item's expression is

@@ -1921,6 +1921,9 @@ Implement:
 
 - compile-time evaluation islands;
 - erased module/type/function/block phase-expression items;
+- erased module- and type-body-level assignment items that change compiler
+  storage, such as `defaults::checks = false;`, rejecting runtime fields,
+  runtime `let` targets, and `pub`;
 - forced generic `fn` evaluation;
 - ordinary `fn` evaluation from compiler code and explicit `@` entry;
 - result materialization rules;

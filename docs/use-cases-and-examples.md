@@ -1333,9 +1333,7 @@ module options.fast;
 
 pub import options.defaults;
 
-if1 (true) {
-    defaults::checks = false;
-}
+defaults::checks = false;
 pub let1 selected: bool = defaults::checks; // false in this module.
 ```
 
