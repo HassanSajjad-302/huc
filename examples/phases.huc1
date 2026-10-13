@@ -19,24 +19,24 @@ if1 (BuildDiagnostics) {
 // Phase control inside a type selects fields before its runtime layout is checked.
 struct Report {
     if1 (BuildDiagnostics) {
-        let mod messages: u64;
+        let mut messages: u64;
     } else {
-        let mod messages: u32;
+        let mut messages: u32;
     }
 }
 
 // A structure family has one primary, a pointer partial specialization, and a
 // bool full specialization. Requests use angle brackets.
 struct Cell<T: auto> {
-    let mod value: T;
+    let mut value: T;
 }
 
 struct Cell<T: auto><T*> {
-    let mod value: T*;
+    let mut value: T*;
 }
 
 struct Cell<><bool> {
-    let mod value: bool;
+    let mut value: bool;
 }
 
 struct CountedCell<T: auto, Count: usize> {
@@ -44,7 +44,7 @@ struct CountedCell<T: auto, Count: usize> {
     if1 (Count == 0) {
         @compiler::error("CountedCell requires a nonzero Count");
     }
-    let mod value: T;
+    let mut value: T;
     let count: usize = Count;
 
     fn capacity() -> usize {
@@ -73,7 +73,7 @@ fn describe<><bool>(value: bool) -> c8* {
 
 // The angle list contains phase binders; parentheses contain runtime
 // parameters. if1 selects runtime syntax while ordinary if remains runtime.
-fn choose<T: auto, Greater: bool = true>(mod left: T, mod right: T) -> T {
+fn choose<T: auto, Greater: bool = true>(mut left: T, mut right: T) -> T {
     if1 (Greater) {
         if (left > right) {
             return left;
@@ -106,7 +106,7 @@ fn add_at_compile_time<>(left: i32, right: i32) -> i32 {
 
 // A code builder returns code; the # that uses it decides where it goes.
 fn counter_decl<>() -> compiler::Code {
-    return compiler::local("let mod generated_counter: i32 = 0;");
+    return compiler::local("let mut generated_counter: i32 = 0;");
 }
 
 // Both value evaluation and runtime preparation keep this local inside answer.
@@ -132,18 +132,18 @@ fn main() -> i32 {
     io::println(greater);
     io::println(describe(greater)); // Call-site angles are optional when deduced.
 
-    let mod integer_cell: Cell<i32>;
+    let mut integer_cell: Cell<i32>;
     integer_cell.value = greater;
 
-    let mod pointer_cell: Cell<i32*>;
+    let mut pointer_cell: Cell<i32*>;
     pointer_cell.value = &integer_cell.value;
     io::println(describe<i32*>(pointer_cell.value));
 
-    let mod bool_cell: Cell<bool>;
+    let mut bool_cell: Cell<bool>;
     bool_cell.value = true;
     io::println(describe<bool>(bool_cell.value));
 
-    let mod buffer: CountedCell<i32, 4>;
+    let mut buffer: CountedCell<i32, 4>;
     buffer.value = left + right;
     io::println(buffer.capacity());
 
@@ -153,11 +153,11 @@ fn main() -> i32 {
     }
 
     let slot<T: auto><T*> {
-        let mod slot: T* = null;
+        let mut slot: T* = null;
     }
 
     let slot<><bool> {
-        let mod slot: bool = false;
+        let mut slot: bool = false;
     }
 
     io::println(slot<i32>);
@@ -181,13 +181,13 @@ fn main() -> i32 {
     }
 
     // Runtime loop: the index is local to this loop; updates run left to right.
-    let mod remaining: usize = 3;
-    for (let mod index: usize = 0; remaining > 0; index += 1, remaining -= 1) {
+    let mut remaining: usize = 3;
+    for (let mut index: usize = 0; remaining > 0; index += 1, remaining -= 1) {
         io::println(index);
     }
 
     // Preparation loop: emits three println calls, with no runtime index.
-    for1 (let1 mod index: usize = 0; index < 3; index += 1) {
+    for1 (let1 mut index: usize = 0; index < 3; index += 1) {
         io::println(index);
     }
 

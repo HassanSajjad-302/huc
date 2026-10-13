@@ -45,10 +45,10 @@ the others.
 - Keep calls tight: `run(value)`, not `run ( value )`.
 - Put a space after a control-flow keyword: `if (ready)`.
 - Keep type suffixes attached: `Widget*`.
-- Put binding `mod` before the name and pointee `mod` inside the type.
+- Put binding `mut` before the name and pointee `mut` inside the type.
 
 ```huc
-let mod widget: Widget = Widget(42);
+let mut widget: Widget = Widget(42);
 let observer: Widget* = &widget;
 
 fn inspect(widget: Widget*) -> i32 {
@@ -65,11 +65,11 @@ Keep a short C-style header on one line, with a space after each semicolon
 and between update expressions:
 
 ```huc
-for (let mod index: usize = 0; index < count; index += 1, remaining -= 1) {
+for (let mut index: usize = 0; index < count; index += 1, remaining -= 1) {
     process(index);
 }
 
-for1 (let1 mod index: usize = 0; index < 3; index += 1) {
+for1 (let1 mut index: usize = 0; index < 3; index += 1) {
     io::println(index);
 }
 ```
@@ -80,7 +80,7 @@ brace. A long update list can wrap further, following the usual list style:
 
 ```huc
 for (
-    let mod index: usize = 0;
+    let mut index: usize = 0;
     index < count;
     index += 1,
     remaining -= 1,
@@ -100,12 +100,12 @@ parameters. Fields and working locals use `let`; `let1` is for explicit compiler
 storage:
 
 ```huc
-fn identity<T: auto>(mod value: T) -> T {
+fn identity<T: auto>(mut value: T) -> T {
     return value;
 }
 
 struct Cell<T: auto> {
-    let mod value: T;
+    let mut value: T;
 }
 
 struct BuildOptions<> {

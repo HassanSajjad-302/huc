@@ -11,7 +11,10 @@ Target audience: compiler implementers, library authors, and language reviewers
 > [value-semantics specification](value-semantics.md). The
 > [implementation plan](implementation-plan.md) controls release scope,
 > backend choices, and sequencing; it is not a different set of language
-> semantics. Proposed features remain separate until their rules are adopted.
+> semantics. The [compilation model](compilation-model.md) explains the
+> module, visibility, specialization-placement, and compile-time-state rules
+> of sections 2, 9, and 11 with examples and reasons. Proposed features remain
+> separate until their rules are adopted.
 
 ## 1. Purpose and scope
 
@@ -81,6 +84,9 @@ The current HUC design makes these promises:
   never an overload-selected user call.
 - Compilation resolves generic families and removes compiler-only constructs
   before backend code generation.
+- Each module has isolated compiler state. Later imported object values win in
+  the parent, but cannot change a dependency's completed state, names, or
+  specializations. Reordering siblings changes only their importer's merge.
 - Selected HUC1 syntax is residualized structurally. Generated text is parsed
   and checked when HUC1 inserts it; printed HUC0 is checked again by the
   independent HUC0 translator before LLVM IR is emitted.
@@ -99,9 +105,10 @@ HUC does not promise:
 A staged source file has the extension `.huc1`; a runtime-only source file has
 the extension `.huc0`. Source starts with a module declaration, followed by
 imports and declarations. A root file and its imported sources form one
-translation unit. Modules supply namespaces, not separate compilation or
-specialization ownership. The HUC1 translator writes one printable, flattened
-`.huc0` translation unit; the standalone HUC0 translator consumes that text.
+translation unit. Each source file is a module: it has its own namespace, its
+own name lookup, and its own private declarations. Modules are not compiled
+separately. The HUC1 translator writes one printable, flattened `.huc0`
+translation unit; the standalone HUC0 translator consumes that text.
 
 ```huc
 module app.main;
@@ -116,34 +123,59 @@ fn main() -> i32 {
 
 Import processing is inclusion-like: process an imported source at its first
 import, then resume the importing source. Unlike literal text substitution,
-the imported source keeps its own namespace and lexical name lookup. HUC keeps
-`module` and `import`; it does not add a HUC `#include` directive.
+the imported source keeps its own namespace and lexical name lookup, and its
+completed compiler state is saved for merging by importers (section 9.8).
+HUC keeps `module` and `import`; it does not add a HUC `#include` directive.
 
 ### 2.1 Modules
 
 - A module name is a dot-separated sequence of identifiers.
-- A source file starts with `module name;`. That declaration selects the
-  namespace for following declarations. Another `module name;` starts a new
-  section, selecting or reopening a namespace; it does not start another
+- A source file starts with `module name;`. That declaration names the file's
+  module and selects its namespace for the following declarations. Another
+  `module name;` starts a new section. A later section may reopen the file's
+  own namespace, or open the namespace of a visible module only to add
+  specializations of its families (section 9.3). It does not start another
   translation unit. Ordinary authored files normally need only one section.
+- All imports form one block directly after the file's first `module`
+  declaration. An import after any other declaration, or after a later
+  `module` line, is a diagnostic. The imports apply to the whole file,
+  including its later sections.
 - `import a.b;` binds the imported module under its last component, `b`.
-- `import a.b as c;` binds the module to `c`.
+- `import a.b as c;` binds the module to `c`. `as _` binds no alias.
+- `pub import a.b;` imports the module and also re-exports it: files that
+  import this module may name `a::b` too. There is no `pub import1`.
+- Importing one module twice in one file is a diagnostic, even with different
+  aliases or import forms. Compare resolved module identities, not spellings.
+  One ordinary `import` gives both runtime and compiler-only access, so it
+  needs no matching `import1`.
 - Unqualified wildcard imports do not exist.
-- Every top-level declaration is accessible through its namespace. A full
-  canonical name uses `::`, for example `app::widget::Widget`; an import alias
-  provides the shorter spelling. HUC has no module visibility or `export`
-  keyword. Imports load source and bind aliases; they are not access barriers.
+- A file may name only its **visible modules**: its own module, its direct
+  imports, and the modules reached from those imports by following
+  `pub import` edges. A full canonical name uses `::`, for example
+  `app::widget::Widget`; an import alias provides the shorter spelling. A
+  module that is loaded but not visible cannot be named, even by its full
+  canonical name.
+- A top-level declaration is private to its file unless it is marked `pub`.
+  Other files may name only `pub` declarations of their visible modules. This
+  covers functions, generic families, structures, type aliases, `extern`
+  declarations, `let`, and `let1`. Structure members stay public
+  (section 4.6). Specializations have no `pub` of their own; they apply
+  wherever their family is used.
 - Resolve source imports with the configured module-to-file search paths.
   Process each imported source once per translation unit, in depth-first import
-  order. A repeated import binds its alias without repeating declarations or
-  compiler-stage effects. On return, restore the importer's namespace and
-  lexical context. Conflicting aliases are diagnostics.
+  order. A later import of an already processed module, from another file,
+  refers to the same module; it repeats no declarations or compiler execution.
+  Each import merges the dependency's completed compiler state into the
+  importing module's state, with later values winning (section 9.8.1).
+  On return, restore the importer's namespace and lexical context. Conflicting
+  aliases are diagnostics.
 - Import cycles are a diagnostic.
 
 An imported function resolves unqualified names in its own lexical context,
 not in the caller's locals. A generic may nevertheless receive any suitable
 type available at its request, including a type declared by the importer. It
 does not need a reverse import to name that type through its phase parameter.
+This also works for a private type, because the generic never names it.
 
 Flattened HUC0 uses repeated `module name;` sections to preserve namespaces
 while keeping declarations in forward processing order. Its first section
@@ -151,7 +183,9 @@ names the configured root, even if initially empty. Imports are resolved away;
 the printer rewrites imported aliases to canonical names. Reopening a section
 is only a change of naming scope, not another import or another execution of
 previous declarations. The flattened file is ordinary valid HUC0, with no
-private module bundle or hidden HUC1 state.
+private module bundle or hidden HUC1 state. The import, `pub`, namespace, and
+specialization-placement checks were made before flattening, so they do not
+apply to a flattened file. `huc lower --flattened` reads one (section 17).
 
 An imported member is named with `::`:
 
@@ -166,6 +200,8 @@ point with this bootstrap signature:
 ```huc
 fn main() -> i32;
 ```
+
+`main` needs no `pub`: the driver finds it in the root module.
 
 Program arguments will be exposed through an opaque standard-library value,
 not through a C-style pointer representation. Its API and any alternate entry-point
@@ -333,7 +369,7 @@ void
 never
 T
 T*
-mod T*
+mut T*
 raw_storage<T, N>
 ```
 
@@ -367,10 +403,10 @@ struct Point {
 }
 
 struct Buffer {
-    let mod data: mod u8*;
+    let mut data: mut u8*;
     let size: usize;
 
-    fn drop() mod -> void {
+    fn drop() mut -> void {
         probable_free(this->data);
         this->data = null;
     }
@@ -396,7 +432,7 @@ when it supports the clone protocol in section 6.6.
 - Dereferencing null, dangling, misaligned, one-past-the-end, or otherwise
   invalid pointers is undefined behavior.
 
-`T*` prohibits mutation of `T` through that pointer. `mod T*` permits mutation.
+`T*` prohibits mutation of `T` through that pointer. `mut T*` permits mutation.
 Neither form extends the pointee lifetime or implies exclusive access.
 
 ### 4.3 Values and observation
@@ -417,9 +453,9 @@ type; it does not add ownership or lifetime tracking. Pointer dereferencing is
 unchecked at every level.
 
 The non-overloadable unary operator `&place` returns `T*` for a fixed inline
-`T` place and `mod T*` for a writable inline `T` place. For a pointer slot it
+`T` place and `mut T*` for a writable inline `T` place. For a pointer slot it
 adds one pointer level, so taking the address of a `Widget*` place produces
-`Widget**`, or `mod Widget**` when the pointer slot is writable. Its operand
+`Widget**`, or `mut Widget**` when the pointer slot is writable. Its operand
 must be an addressable data place. It evaluates the place once without
 copying, relocating, destroying, or extending the lifetime of its value. It
 does not allocate or create a temporary, or change activation or cleanup state.
@@ -433,8 +469,8 @@ prefix and binary `&` by expression position, not by whitespace.
 ```huc
 let value: Widget = Widget(7);
 let observer: Widget* = &value;
-let mod writable: Widget = Widget(9);
-let writable_observer: mod Widget* = &writable;
+let mut writable: Widget = Widget(9);
+let writable_observer: mut Widget* = &writable;
 ```
 
 `&` accepts addressable locals, parameters, fields, elements, and dereferenced
@@ -449,9 +485,9 @@ reuse storage after a direct transfer, retain its pointer before the transfer,
 or use `raw_storage`. Neither obtaining nor casting an address creates a live
 value, extends storage lifetime, or changes automatic cleanup state.
 
-Each `mod` keeps its own meaning inside a structure. A fixed structure
+Each `mut` keeps its own meaning inside a structure. A fixed structure
 prevents assignment to its fields and mutation of values stored inline in
-them. A `mod T*` field still allows mutation of the separate
+them. A `mut T*` field still allows mutation of the separate
 object it points to. A read-only method may therefore mutate that pointee but
 may not replace the address stored in the field.
 
@@ -496,9 +532,9 @@ guaranteed destination construction lets `init` observe
 the final `this` address; it is not optional backend copy elision. The LLVM
 backend may use explicit destination pointers to preserve this guarantee.
 
-`init` has an implicit `this: mod T*` receiver. Constructor initializer entries
+`init` has an implicit `this: mut T*` receiver. Constructor initializer entries
 and default initialization establish every field before the body begins; the
-body may then mutate fields declared with `mod` before their names. Fixed
+body may then mutate fields declared with `mut` before their names. Fixed
 fields are initialized by their declaration or initializer entry and cannot
 be assigned in the body.
 
@@ -511,7 +547,7 @@ constructing elements (section 6.7.5).
 Methods receive an implicit non-owning `this`:
 
 - `this: T*` for a read-only method, which is the default;
-- `this: mod T*` for a method with trailing `mod`.
+- `this: mut T*` for a method with trailing `mut`.
 
 Calling a method through a raw pointer observes the pointee and never transfers it:
 
@@ -524,14 +560,14 @@ widget->update(); // observes the pointee; no relocation
 An Advanced structure may declare exactly one lifecycle method:
 
 ```huc
-fn drop() mod -> void {
+fn drop() mut -> void {
     // release non-field resources
 }
 ```
 
 `drop` must be a runtime, zero-parameter method returning `void`. It cannot be
 called directly; the compiler invokes it during destruction. Its implicit
-receiver is `this: mod T*`. The body runs before fields are destroyed in reverse
+receiver is `this: mut T*`. The body runs before fields are destroyed in reverse
 order. HUC has no user-defined move constructor, relocation constructor,
 assignment operator, or C++-style destructor overload. Explicit logical copying
 is customized only by `clone`.
@@ -600,7 +636,7 @@ parameter relocates it into the result on that arm's path.
 This also applies when the result is used only as a method receiver:
 
 ```huc
-// a and b are live Advanced locals declared with binding mod.
+// a and b are live Advanced locals declared with binding mut.
 (condition ? a : b).size(); // transfers the selected value, then observes it
 // The result is destroyed at this semicolon. Both a and b are now MaybeActive.
 ```
@@ -670,7 +706,7 @@ ptr_as<usize>(pointer) // raw data pointer to target-sized integer address
 
 `ptr_as<Target>(value)` takes one value operand and evaluates it once. When
 `Target` is a raw-pointer type, it accepts a raw pointer or a `usize` data
-address. The target can include pointer chains and spelled `mod` permissions.
+address. The target can include pointer chains and spelled `mut` permissions.
 When `Target` is `usize`, the source must be a raw data pointer. Other target
 types and other source/target combinations are rejected.
 
@@ -712,12 +748,12 @@ Taking a value's address or calling a method does not transfer it. To observe
 an inline value through a raw-pointer parameter, pass `&value` explicitly.
 
 Whenever relocation from a named root is otherwise permitted, its source
-storage must be writable, expressed by `mod` before the binding name.
-Relocation through `*pointer` instead requires `mod T*`; the pointer binding
+storage must be writable, expressed by `mut` before the binding name.
+Relocation through `*pointer` instead requires `mut T*`; the pointer binding
 itself need not be writable. Section 6.4 defines the source cleanup rules and
 further restricts direct subobject sources. Fresh unnamed results can
 be transferred directly: function results, evaluated `copy` results, and
-other temporary Advanced values need no binding `mod`. Direct
+other temporary Advanced values need no binding `mut`. Direct
 `T(arguments)` destination construction has no temporary source place.
 
 ### 6.2 Destructive-relocation initialization
@@ -798,7 +834,7 @@ Relocation has two source forms:
   are **root places**. The compiler tracks their active state and suppresses
   cleanup after a direct transfer. It may use static control-flow facts or
   separate drop flags at joins. Straight-line transfers require no flag.
-- A dereference `*pointer` of type `T`, reached through `mod T*`. This
+- A dereference `*pointer` of type `T`, reached through `mut T*`. This
   transfers a live Advanced pointee and makes its old slot inactive. The
   programmer manages source cleanup: the operation does not find or update
   automatic cleanup state through aliases, including aliases of locals or
@@ -970,7 +1006,7 @@ materialize a temporary or make `&make_text()` valid.
 struct Text {
     let bytes: ByteArray; // probable concrete HUC0 library type
 
-    fn init(mod bytes: ByteArray) : bytes(bytes) {
+    fn init(mut bytes: ByteArray) : bytes(bytes) {
     }
 
     fn clone() -> Text {
@@ -1010,7 +1046,7 @@ Copying a raw pointer does not create cleanup responsibility. Structures that
 manage resources must release them in `drop`; raw-pointer fields do not
 destroy or deallocate their pointees.
 
-An Advanced value can be extracted with `*pointer` through `mod T*`, under
+An Advanced value can be extracted with `*pointer` through `mut T*`, under
 the programmer-managed cleanup rules in section 6.4. The old slot is inactive,
 not an empty live value, and must be excluded from destruction until a new
 value is constructed there. This operation does not deallocate the storage.
@@ -1019,10 +1055,10 @@ Two non-overloadable HUC0 intrinsics manage these lifetimes:
 
 | Expression | Required state of the destination/pointee | Result |
 |---|---|---|
-| `construct_at(pointer, value)` | Inactive storage suitable for `T` | The same address as a `mod T*`, now pointing to a live `T` |
+| `construct_at(pointer, value)` | Inactive storage suitable for `T` | The same address as a `mut T*`, now pointing to a live `T` |
 | `destruct_at(pointer)` | A live `T` | `void`; the slot becomes inactive |
 
-Both infer `T` from a first operand of type `mod T*`. The pointer binding
+Both infer `T` from a first operand of type `mut T*`. The pointer binding
 itself may be fixed. `T` must be a complete runtime object type, not `void`
 or `never`. Pointer slots are valid destinations when the supplied pointer has
 the appropriate pointer-chain type. There is no additional type operand,
@@ -1045,7 +1081,7 @@ ordinary by-value parameter that would first receive its own `T`.
 Type checking and initialization follow the same rules as `let local: T = value`:
 
 - a Basic value is copied and its source remains active;
-- an eligible Advanced source is relocated, with the usual `mod` and source
+- an eligible Advanced source is relocated, with the usual `mut` and source
   cleanup rules; `copy source` explicitly requests cloning;
 - a direct `T(arguments)` expression constructs in the supplied slot, so
   `init` observes its final address. A direct function-result initializer
@@ -1063,9 +1099,9 @@ Examples, each assuming `slot` is inactive before the call:
 
 ```huc
 construct_at(slot, File(handle)); // direct construction in slot
-construct_at(slot, existing); // Advanced transfer; existing requires binding mod
+construct_at(slot, existing); // Advanced transfer; existing requires binding mut
 construct_at(slot, copy existing); // explicit clone into new storage
-construct_at(number_slot, 42); // Basic initialization; number_slot is mod i32*
+construct_at(number_slot, 42); // Basic initialization; number_slot is mut i32*
 ```
 
 Use an explicit initializer: `construct_at(slot, T())` for a default
@@ -1180,7 +1216,7 @@ an address does not permit using the same slot for an unrelated type.
 
 `storage_ptr(pointer)` takes exactly one pointer to a live `raw_storage<T, N>`
 object and returns the address of its first element slot. A read-only storage
-pointer produces `T*`; a writable storage pointer produces `mod T*`. The
+pointer produces `T*`; a writable storage pointer produces `mut T*`. The
 operand is evaluated once. It must be non-null, aligned, and valid; the
 operation neither reads the payload nor constructs an element. It works even
 when all element slots are inactive. It has no type operand and cannot be
@@ -1188,8 +1224,8 @@ overloaded or used as a function value. Use `&storage` to address the storage
 object itself, and `storage_ptr(&storage)` to address its element region.
 
 ```huc
-let mod storage: raw_storage<File, 4> = raw_storage<File, 4>();
-let slots: mod File* = storage_ptr(&storage);
+let mut storage: raw_storage<File, 4> = raw_storage<File, 4>();
+let slots: mut File* = storage_ptr(&storage);
 construct_at(slots, File(handle)); // only slot 0 is now live
 let file: File = *slots; // Advanced extraction; slot 0 is inactive again
 // file has automatic cleanup; storage never closes a File by itself.
@@ -1264,13 +1300,13 @@ The parameter type communicates whether a function observes or receives a value:
 
 ```huc
 fn inspect(widget: Widget*) -> void; // read-only observation
-fn mutate(widget: mod Widget*) -> void; // writable observation
+fn mutate(widget: mut Widget*) -> void; // writable observation
 fn receive(widget: Widget) -> void; // copies Basic or consumes Advanced Widget
 ```
 
 Pass `&widget` to observe an inline value. An Advanced by-value parameter
 receives the transferred value and its cleanup obligation. An ordinary
-`mod Widget*` can also let a function replace a caller's writable value,
+`mut Widget*` can also let a function replace a caller's writable value,
 subject to the usual source, destination, and lifetime rules.
 It can also extract the pointee. Such a function must document that it leaves
 the slot inactive and requires the caller to manage source cleanup; the
@@ -1291,7 +1327,7 @@ not keep its source alive for the caller.
 Values and pointers do not implicitly convert to each other. Use `&value`
 to observe addressable inline storage and `*pointer` to access a live
 pointee. Binding from `*pointer` copies a Basic value or relocates an Advanced
-value. Advanced extraction requires `mod T*` and programmer-managed source
+value. Advanced extraction requires `mut T*` and programmer-managed source
 cleanup as described in section 6.4. Explicit `copy *pointer` may clone a
 copyable pointee without making it inactive.
 
@@ -1394,7 +1430,7 @@ In the following examples, `Widget` and `Job` are Advanced types, for example
 because they declare `drop`:
 
 ```huc
-let mod widget: Widget = Widget();
+let mut widget: Widget = Widget();
 
 if (condition) {
     receive(widget);
@@ -1419,7 +1455,7 @@ A transfer inside a loop is checked by the same rules. Here the next
 iteration could try to submit a value that was already transferred:
 
 ```huc
-let mod job: Job = Job(1);
+let mut job: Job = Job(1);
 
 while (more_work()) {
     submit(job); // error: job may have been transferred in an earlier iteration
@@ -1511,14 +1547,14 @@ reach a `return` or its closing brace. `panic` has result type `never`.
 
 ### 7.2 Local declarations
 
-Runtime locals begin with `let` and use `let [mod] name: Type`. The brackets
-here mean that `mod` is optional; they are not source punctuation. Fields,
+Runtime locals begin with `let` and use `let [mut] name: Type`. The brackets
+here mean that `mut` is optional; they are not source punctuation. Fields,
 globals, and parameters use the same name-before-type order, but parameters
-omit `let`. A binding's `mod` precedes its name; `mod` inside `mod T*`
+omit `let`. A binding's `mut` precedes its name; `mut` inside `mut T*`
 still controls access to the pointee, not the binding slot.
 
 ```huc
-let mod count: i32 = 0;
+let mut count: i32 = 0;
 let result: auto = compute();
 let limit: i32 = 100;
 ```
@@ -1534,10 +1570,10 @@ Use `let1` for a compiler-only binding while preparing runtime code:
 ```huc
 let1 element: compiler::Type =
     @compiler::find_type("app.Widget"); // future reflection API
-let1 mod generated: usize = 0;
+let1 mut generated: usize = 0;
 ```
 
-`let1` never creates runtime storage. `mod` before its name permits reassignment
+`let1` never creates runtime storage. `mut` before its name permits reassignment
 during translation; section 9.8 states who may assign it and when. Working
 locals inside an evaluated function can instead use plain `let`; the call
 already supplies their compiler execution context (section 9.8). A generic
@@ -1588,12 +1624,12 @@ are required, but all three clauses may be omitted:
   trailing comma.
 
 ```huc
-for (let mod index: usize = 0; index < count; index += 1) {
+for (let mut index: usize = 0; index < count; index += 1) {
     process(index);
 }
 
-let mod remaining: usize = count;
-for (let mod index: usize = 0; remaining > 0; index += 1, remaining -= 1) {
+let mut remaining: usize = count;
+for (let mut index: usize = 0; remaining > 0; index += 1, remaining -= 1) {
     process(index);
 }
 
@@ -1653,7 +1689,7 @@ just advice.
 ### 8.1 Raw observers are unchecked
 
 ```huc
-let mod saved: Widget*;
+let mut saved: Widget*;
 
 fn remember(widget: Widget*) -> void {
     saved = widget;
@@ -1675,7 +1711,7 @@ The compiler does not infer or check a relationship between `saved` and
 For an Advanced `Widget`:
 
 ```huc
-let mod widget: Widget = Widget();
+let mut widget: Widget = Widget();
 
 if (condition) {
     receive(widget);
@@ -1721,12 +1757,12 @@ HUC1 source
     v
 printable flattened HUC0 source
     |
-    | runtime transpilation
+    | HUC0 compilation
     v
 LLVM IR -> object files -> executable
 ```
 
-The first translator must finish all compiler work and write ordinary HUC0.
+The first translator must finish all staging work and write ordinary HUC0.
 The second translator consumes that text through the same public HUC0 parser
 used for handwritten HUC0. There is no private staged object format between the
 two translators.
@@ -1776,10 +1812,10 @@ Primary families have binders and no angle pattern:
 
 ```huc
 struct Cell<T: auto> {
-    let mod element: T;
+    let mut element: T;
 }
 
-fn convert<T: auto>(mod value: T) -> T {
+fn convert<T: auto>(mut value: T) -> T {
     return value;
 }
 
@@ -1792,7 +1828,7 @@ Partial specializations add an angle pattern:
 
 ```huc
 struct Cell<T: auto><T*> {
-    let mod element: T*;
+    let mut element: T*;
 }
 
 fn convert<T: auto><T*>(value: T*) -> T* {
@@ -1812,7 +1848,7 @@ Full specializations have an empty first list and a concrete second list:
 
 ```huc
 struct Cell<><i32> {
-    let mod element: i32;
+    let mut element: i32;
 }
 
 fn convert<><i32>(value: i32) -> i32 {
@@ -1825,7 +1861,7 @@ let value<><i32> {
 ```
 
 A phase binder is `Name: auto` or `Name: Type`, with an optional default where
-permitted. Phase binders are not writable slots and do not take binding `mod`.
+permitted. Phase binders are not writable slots and do not take binding `mut`.
 `T: auto` binds a compiler entity whose kind is inferred from its uses; a binder
 used in a type position must hold a type. A typed binder such as `Count: usize`
 binds a compiler value of that type. Primary declarations may give trailing
@@ -1881,14 +1917,14 @@ constraint-based and substitution-failure forms have no equivalent.
 |---|---|---|
 | Concrete type or value | `<><i32>`, `<T: auto><T*, 4>` | Exactly that type or value |
 | Binder | `<T: auto, N: usize><T*, N>` | Any type or value, which the binder receives |
-| Pointer | `<T: auto><mod T*>` | A pointer with the same `mod`, binding its pointee |
+| Pointer | `<T: auto><mut T*>` | A pointer with the same `mut`, binding its pointee |
 | Family application | `<T: auto><Vector<T>>` | Any specialization of that family |
 | Built-in parameterized type | `<T: auto, N: usize><raw_storage<T, N>>` | Matching storage, binding its element type and count |
 | Repeated binder | `<T: auto><T, T>` | Only identical arguments in those positions |
 | Family binder | `<C: auto, T: auto><C<T>>` | Any one-argument family specialization; `C` receives the family |
 
-The forms combine, as in `<K: auto, V: auto><Map<K, V>*>`. `mod` must agree:
-`T*` matches only read-only pointers and `mod T*` only writable ones. `T*` also
+The forms combine, as in `<K: auto, V: auto><Map<K, V>*>`. `mut` must agree:
+`T*` matches only read-only pointers and `mut T*` only writable ones. `T*` also
 matches pointer chains, because `T` may itself be a pointer type. A binder used
 in family position receives a family, which must take the same number of
 arguments as the pattern supplies.
@@ -1912,7 +1948,7 @@ fn is_pointer<T: auto><T*>() -> bool {
     return true;
 }
 
-fn is_pointer<T: auto><mod T*>() -> bool {
+fn is_pointer<T: auto><mut T*>() -> bool {
     return true;
 }
 ```
@@ -1929,9 +1965,32 @@ either a non-generic overload set or one generic family, never both. Use a full
 specialization such as `fn convert<><i32>(value: i32) -> i32 { ... }` for a
 family's concrete case, not a competing `fn convert(value: i32)` overload.
 The primary must precede its specializations, and a specialization must be
-declared in the primary's namespace. It need not be in the same file:
-another file may reopen that namespace to specialize a library family for its
-own types. A specialization must also precede every request whose result it
+declared in the primary's namespace. It need not be in the same file, but it
+must be in an **owning file**:
+
+- the file that declares the family; or
+- a file that declares a type in the pattern, if no binder comes before that
+  type when the pattern is read from left to right.
+
+The left-to-right reading includes the arguments of nested types, so the
+file that declares `Point` may write `hash<Pair<Point, T>>` but not
+`hash<Pair<T, Point>>`. A binder is any placeholder in the pattern: a type,
+value, or family binder. Built-in types belong to no file, and a type alias
+gives no ownership because it names the same type (section 4.8). Another
+file specializes a family by reopening the family's namespace in a later
+section; the family must be `pub` and its module visible. Any other placement
+is a diagnostic at the specialization.
+
+When a file finishes, check each specialization it declared against the
+other specializations of the same family in the files it imports, directly
+or indirectly. If both can match one request and neither is more specific,
+that is a diagnostic in this file, unless a specialization for exactly their
+overlap also exists. The left-to-right condition guarantees that two
+specializations from different files that can match one request are always
+checked together in this way. The
+[compilation model](compilation-model.md), section 9.5, explains why.
+
+A specialization must also precede every request whose result it
 would change. Declaring it afterwards is an error if, for an earlier request,
 it would have been selected instead of the chosen candidate or would have made
 the choice ambiguous. A later specialization that would still lose to the
@@ -1970,10 +2029,17 @@ Only after selection does the translator parse and prepare the chosen body:
 - a generic `let` request produces exactly one concrete runtime `let` as specified in
   section 9.4.
 
-Concrete specializations keep their family's namespace and lexical lookup,
-but have no separate defining-module compilation boundary. The printer places
-them at their family declaration positions, including methods within their
-containing type and local variable specializations within their block.
+Concrete specializations keep their family's namespace, which gives their
+canonical names. Their bodies are checked in the source context of the file
+that wrote the selected definition: the family's file for the primary, or
+the owning file that wrote the specialization (section 9.3). That file's
+imports, aliases, visible modules, and private declarations apply, and a `#`
+in the body belongs to that file (section 11.2). Unqualified names resolve
+in the family's namespace, as in any section of that namespace, and another
+file's private declarations stay hidden. There is no separate compilation
+boundary for the defining module. The printer
+places them at their family declaration positions, including methods within
+their containing type and local variable specializations within their block.
 This placement of concrete family definitions is distinct from module code
 inserted with `#` in their bodies: that code follows the original runtime
 request's top-level declaration (section 11), including for nested requests. The HUC0
@@ -2009,7 +2075,7 @@ determines the complete runtime declaration:
 ```huc
 let counter<Writable: bool> {
     if1 (Writable) {
-        let mod counter: i32 = 0;
+        let mut counter: i32 = 0;
     } else {
         let counter: i32 = 0;
     }
@@ -2121,9 +2187,9 @@ if1 (EnableTracing) {
 
 struct Counters {
     if1 (EnableTracing) {
-        let mod traced_calls: u64;
+        let mut traced_calls: u64;
     } else {
-        let mod calls: u32;
+        let mut calls: u32;
     }
 }
 
@@ -2160,7 +2226,7 @@ limits. A loop with zero iterations leaves its body opaque.
 For example:
 
 ```huc
-for1 (let1 mod index: usize = 0; index < 3; index += 1) {
+for1 (let1 mut index: usize = 0; index < 3; index += 1) {
     io::println(index);
 }
 ```
@@ -2178,7 +2244,7 @@ A generic `fn` has angle-bracket phase binders followed by parenthesized runtime
 parameters:
 
 ```huc
-fn choose<T: auto, Greater: bool = true>(mod left: T, mod right: T) -> T {
+fn choose<T: auto, Greater: bool = true>(mut left: T, mut right: T) -> T {
     if1 (Greater) {
         if (left > right) {
             return left;
@@ -2278,7 +2344,7 @@ body's generation mode. Its module parts have a separate insertion anchor
 
 ### 9.7.1 Value bindings and expression bindings
 
-Parameters keep the ordinary `name: Type` or `mod name: Type` spelling. In a
+Parameters keep the ordinary `name: Type` or `mut name: Type` spelling. In a
 compiler call, each **argument** decides how its parameter is bound:
 
 | Argument | Binding | Available operations |
@@ -2294,8 +2360,8 @@ constants. For example, if `calls` is a runtime global, `next(calls)` is a
 runtime-dependent expression; capturing it does not read or update `calls`.
 Value bindings obey the usual copying, relocation, permissions, and cleanup
 rules. Expression bindings hold descriptions, not objects; they have no value
-slot or cleanup. Even a parameter declared `mod name: Type` cannot be mutated
-when expression-bound. A represented type such as `mod Vector<Widget>*` still
+slot or cleanup. Even a parameter declared `mut name: Type` cannot be mutated
+when expression-bound. A represented type such as `mut Vector<Widget>*` still
 retains its pointer permissions.
 
 For example, this builder expects an expression for `items` and actual compiler
@@ -2311,7 +2377,7 @@ fn loop_forward<P: auto>(
     let c: compiler::Text = "__items_" + item;
     return compiler::around(
         "{ let " + c + ": auto = " + source + "; "
-            + "for (let mod " + index + ": usize = 0; "
+            + "for (let mut " + index + ": usize = 0; "
             + index + " < " + c + "->size(); " + index + " += 1) { "
             + "let " + item + ": auto = " + c + "->data() + " + index + ";",
         "} }",
@@ -2576,56 +2642,230 @@ does not make their runtime emission lazy.
 
 #### Compiler storage
 
-A `let1` works like a macro definition with a type and a scope. A module-level
-`let1` belongs to its namespace, importers see it like any other declaration,
-and there is one copy per translation unit. A function-local `let1` belongs to
-one preparation of its block: two specializations, two compiler calls of the
-same function, or two iterations of a phase loop each get their own.
+A `let1` is typed compiler storage with a scope. A module-level declaration
+has one identity per translation unit, but its value belongs to the current
+module's **compiler state**. Imports merge values into that state as described
+in section 9.8.1. A function-local `let1` belongs to one preparation or compiler
+call; different calls, specializations, and phase-loop iterations get their own.
 
-Compile-time code that can name a `let1 mod` may assign it: phase-control
-clauses, `@` and `#` operands, and deferred functions executing in a compiler
-call. Ordinary functions evaluated under section 12.1 cannot name mutable
-compiler storage, which has no run-time equivalent. They may still change
-compile-time objects through pointers they receive, including `this`, so
-`registry.push(entry)` can update a container held in a `let1 mod`.
-Assignments take effect immediately, in processing order: source order, each
-import at its first import, each body when it is prepared, and each compiler
-call as it runs.
+Compile-time code that can name a `let1 mut` may assign it: phase-control
+clauses, `@` and `#` operands, and deferred functions executing in the compiler.
+Ordinary functions evaluated under section 12.1 still cannot name `let1 mut`
+storage directly. They may change compiler objects through pointers they
+receive, including `this`. Mutation permissions and access checks do not change.
 
-A read observes the value at the moment the code containing it runs. A read
-made while a body is prepared, in phase control, an `@` or `#` operand, or a
-`let1` initializer, is fixed into that prepared body. A definition prepared
-earlier, such as a runtime specialization prepared at its first request, keeps
-what it saw. A read by code executing in a compiler call sees the current
-value, so `next_id()` in section 12.2 returns a new value on each call. Results
-that depend on processing order, such as a counter incremented from two
-imported files, are the programmer's responsibility, as with macros.
+An assignment, pointer write, or method call changes only the active compiler
+state. It never changes a dependency's saved state or a sibling module's state.
+This applies equally to numbers, structures, pointers, and allocated objects.
+There is no separate configuration declaration or scalar-only restriction.
 
-A `let1` value lives as long as code can still use it. A function-local one
-lasts while the body it was prepared for can run: in program mode, until that
-preparation completes, because the runtime body keeps only the values it read;
-in evaluation mode, until the compiler call that prepared the body finishes
-executing, because the executing body may read and assign it. A module-level
-`let1` lasts until the end of the translation unit. Values are then destroyed
-in reverse processing order, and any `drop` runs in the compiler.
-Assigning a `let1 mod` destroys the old value as ordinary assignment does
-(section 6.3). A `let1` can therefore own compile-time allocations that persist
-across compiler calls (section 12.3).
+A read during preparation is fixed into that prepared body. An executing
+compiler call reads current values in its active state. Compiler calls inherit
+that state, including calls to imported functions: lexical name lookup still
+uses the callee's source, but calling it does not switch storage to its module.
+Thus an imported helper can update the caller's version of an imported
+`let1 mut`, or an object passed by pointer. Repeated calls execute again.
+
+Preparing a retained runtime definition is different from executing a compiler
+call. Program-mode preparation uses the selected definition's source module:
+its working state if still being processed, otherwise a private working view
+of its completed state. It does not use the requester's merged state. The same
+rule applies to preparing canonical type layouts and other shared declarations,
+even if requested during evaluation. A late preparation cannot modify the
+completed source module. This prevents importer values from changing the
+meaning of one shared runtime definition or type. Existing program definitions
+remain once-only; use explicit generic arguments for distinct versions.
+
+Each distinct late program-mode preparation gets a fresh working view of the
+completed defining-module state. Never reuse a previous preparation's changed
+view, including for another specialization of the same family. Compiler calls
+executed within one preparation share that preparation's view; a nested request
+for a different retained definition starts its own preparation. An in-progress
+recursive reference does not start another one. Keep a view until its dependent
+work and queued insertions finish, then clean it up privately under section
+9.8.1. Do not publish its writes back to the completed module.
+
+Late writes remain allowed. Consequently, a module counter is not a unique-name
+allocator across late preparations: each starts from the same saved value.
+Generated names must distinguish their declarations independently of that
+counter. The existing duplicate-definition checks still apply.
+
+Evaluation-mode preparation and execution use the active requesting state.
+They may deliberately observe different `let1` values from program-mode
+preparation. This is compiler-state behavior, not a change to ordinary runtime
+value operations. An already prepared body retains constants it has embedded;
+a later state change does not rewrite it.
+
+Declaring a `let1` twice in one scope is a redefinition error, including across
+namespace sections. Importing the same declaration through different branches
+does not redeclare it. Use ordinary assignment to change a mutable value.
+
+A function-local `let1` lasts until preparation completes in program mode,
+or until its compiler call finishes in evaluation mode. Module-level state is
+saved when its source finishes and remains available until translation ends.
+Section 9.8.1 defines merging and cleanup of those saved states. Ordinary
+assignment still destroys the replaced value under section 6.3; import merging
+is not an assignment expression.
+
+### 9.8.1 Isolated compiler state and ordered imports
+
+Each module is processed from its own source and its own ordered imports, not
+from its importer's current compiler state. A completed module saves the values
+and lifetime state of its module-level `let1` objects and supporting memory.
+That result includes inherited state, not just objects the module changed.
+
+Process direct imports in source order. Merge each dependency's completed state
+into the importing module. For the same logical object, the later import's
+complete value and lifetime state replace the earlier import's entry. Entries
+found only in one branch remain. A later unchanged value wins too: there is no
+special distinction between a default and an explicit override.
+
+For example, if `a::t` starts at 3, `c` imports `a` and changes its value to 5,
+and `d` separately imports `a` and changes its value to 7:
+
+| Context | Value of `a::t` |
+|---|---|
+| Completed `a` | 3 |
+| Completed `c` | 5 |
+| Completed `d` | 7 |
+| Parent importing `c`, then `d` | 7 |
+| Parent importing `d`, then `c` | 5 |
+
+If `d` does not change `t`, it contributes 3 and replaces `c`'s 5 in the
+parent. If both independently increment the inherited 3, both contribute 4;
+the parent gets 4, not 5. No assignment is replayed during merging.
+
+“Same object” means the same declaration or allocation identity, not the same
+name, type, or bytes. Two unrelated modules' `t` declarations remain different
+objects. Independently created allocations remain different too. Subobjects
+belong to their containing object: merge a whole structure or allocation block,
+not fields or elements from different versions.
+
+All source import forms use this rule, including `import1`, `pub import`, and
+`as _`. Loading source once and merging its result are separate operations:
+a later import reuses the completed state without repeating initializers,
+compiler calls, declarations, or specialization registration. Normal duplicate
+direct-import and import-cycle diagnostics remain.
+
+State includes supporting private objects and allocations needed by imported
+values. Carrying this state grants no additional name access. Existing
+`pub`, visible-module, and pointer-permission rules continue to apply.
+
+#### Reads of objects missing from the active state
+
+A generic prepared in a library's state may evaluate a specialization written
+in the file of a caller-defined type. That specialization can name its own
+file's compiler objects even though they are absent from the library's state.
+Resolve such reads as follows:
+
+1. Use the active state's entry if one exists. An inactive, uninitialized, or
+   deallocated entry is still an entry; never bypass it with a fallback.
+2. If a module-level object has no entry, read its version from its declaring
+   module's completed state. This is a read-only fallback, not an import or
+   a merge. Do not consult an importer's or sibling's modified version.
+3. If that module has not completed, or its saved entry is unavailable or
+   invalid, diagnose the access. Do not finish a module recursively or guess
+   its future value. Pass the needed value explicitly when an earlier request
+   must work before that module finishes.
+
+Name visibility is checked first using the executing code's lexical context.
+Fallback does not let library source spell otherwise invisible names. Only
+already resolved objects are eligible; there is no implicit module loading.
+
+Read supporting allocations through the same saved state when their IDs are
+also absent from the active state. Active entries always take priority. Mark
+fallback entries read-only even if their types permit mutation. Direct writes,
+writes through aliases or methods, relocation out, construction, destruction,
+and deallocation of such entries are diagnostics. Explicit copying is allowed
+when the type supports it and its clone does not modify fallback storage.
+
+Fallback entries are not owned by the working state: do not forward them as
+import-merge entries or destroy them during that state's teardown. Retain the
+provider-state reference for borrowed pointers and record it as a dependency
+for diagnostics and future package artifacts. No function-local or expired
+allocation is made live by fallback.
+
+#### Objects and pointers
+
+Compiler pointers identify logical objects and positions within them. Resolve
+a pointer through the active state, with the read-only missing-object fallback
+above, not through a host address. Two aliases of one object resolve to the
+same version within that state.
+
+For example, `a` may declare:
 
 ```huc
-fn count<>() -> usize {
-    let1 mod n: usize = 0;
-    n += 1; // runs during the call, while n is still alive
-    return n;
-}
-
-let1 result: usize = count(); // 1
+pub let1 mut t: u64 = 3;
+pub let1 p: mut u64* = &t;
 ```
 
-Declaring a `let1` again in the same scope is a redefinition error, even from
-another file or another section of the same namespace. To change a value,
-declare it `let1 mod` and assign it. A later revision may add a `compiler`
-operation that removes a `let1`, after which its name can be declared again.
+After an importer assigns 7 to its `a::t`, reading `*a::p` there gives 7 too.
+The saved state of `a` still contains 3. Writing through `a::p` changes the
+same importer-local object as direct assignment. Reassigning a mutable pointer
+changes its target; it does not itself replace the pointed-to value.
+
+The same rules cover Advanced values and their allocations. An importer may
+relocate or destroy its version under the usual permissions and lifetime rules.
+The dependency's version remains intact. Save inactive slots and deallocated
+object identities too, so a later state cannot accidentally restore an earlier
+live version where the winning state says it is dead. Ordinary checked-use and
+evaluator diagnostics still apply to the resulting state, including stale
+pointers and invalid ownership created by user code.
+
+Saving and merging state are compiler operations, not HUC value operations.
+They do not call `clone`, run `drop`, relocate the dependency's source, or
+require a type to be copyable. The compiler may share unchanged representations
+internally, provided writes remain isolated and aliases keep their meaning.
+
+#### Cleanup
+
+Ordinary assignments, scope exits, explicit destruction, and deallocation run
+normally in the active state. A saved dependency state is never changed by
+those operations. Function-local objects cannot outlive their ordinary scopes.
+
+After program output is complete, clean up each completed module state in its
+own private working view, in reverse module-processing order. Within a view,
+destroy its remaining live module-level values in reverse recorded
+initialization order, including inherited values, then apply the existing leak
+checks. Each value is destroyed once in that view; separate views have separate
+lifetimes. A `drop` may change accessible mutable dependency objects in that
+view, but cannot change any other saved view. Compiler metadata discarded when
+one imported version loses a merge does not itself run user cleanup.
+
+Only memory needed by surviving state entries, pointers, or lifetime records
+needs to be retained. Discarding an unselected saved version is not a HUC leak;
+leaks caused by executing HUC code remain errors. End-of-unit cleanup writes
+are not published back as a module's completed result.
+
+This rule can repeat cleanup of inherited values across many module states.
+It is an accepted compile-time cost, not a promise of one destructor call per
+declaration for the entire build. Shared backing storage alone does not permit
+skipping a state's cleanup: a destructor may read that state's other values or
+report an error. Basic values without cleanup need no destructor work.
+Diagnostics should identify the state being cleaned up; an implementation may
+stop after the first error or group equivalent reports, without suppressing
+the failure. Shared cleanup would need a separate design decision.
+
+#### Definitions, generated code, and later package builds
+
+Module state and name lookup are separate. A finished module's names stay
+fixed: later generated declarations retain the existing preparation-local
+visibility rule in section 11.2. Runtime globals remain one shared runtime
+object per declaration; this isolation applies only to compiler state.
+
+Generated text uses its insertion site's active state. The insertion request
+keeps that context when output waits for a forward anchor; strings themselves
+carry no state. Building code and inserting it remain separate operations.
+
+Runtime specialization identity and mangling do not acquire an implicit state
+argument. Program-mode preparation uses its source module as described above.
+Packages must preserve each module's completed state, logical object identities,
+and existing prepared definitions. Importing a saved result then performs the
+same merge as importing source. The dependency record includes the order of
+imports; parallel completion order must not affect the result.
+
+See the [single-document walkthrough](compilation-model.md#87-one-walkthrough-values-objects-and-pointers)
+for the complete diamond example.
 
 ### 9.9 The `@` evaluation-island operator
 
@@ -2649,8 +2889,9 @@ The declared type above is `compiler::Function`, not `@Function` and not
 The whole operand of `@` is compiler code: calls, operators, constructors, and
 method calls inside it need no further `@`. The same holds in other places that
 only hold compiler code: `if1`, `for1`, and `while1` clauses,
-`let1` initializers, and the operand of `#`. Automatic expression binding at a
-function argument boundary is the exception: runtime-dependent arguments are
+`let1` initializers, and the operand of `#`.
+Automatic expression binding at a function argument boundary
+is the exception: runtime-dependent arguments are
 described rather than executed (section 9.7.1). An explicit inner `@` requests
 evaluation of that subexpression, with the same argument-binding rules for its
 own calls. Elsewhere a redundant `@` has no effect.
@@ -2702,21 +2943,25 @@ request.
 
 ### 9.10 Imports and residual HUC0
 
-HUC1 has two import forms:
+HUC1 has two import forms, and an ordinary import may also re-export:
 
 ```huc
 import app.data;
 import1 compiler;
+pub import app.shapes;
 ```
 
-`import` exposes runtime declarations and generic families and processes the
-imported source in the same translation unit under section 2.1. `import1`
-exposes compiler-only declarations; it does not create a runtime dependency.
-The compiler-supplied `compiler` namespace is bound this way without reading
-a user source file. Both import forms disappear from flattened HUC0; retained
-declarations use namespace sections and canonical references instead.
-These are the two import forms. Import cycles are rejected with the
-complete cycle path.
+`import` processes the imported source in the same translation unit under
+section 2.1. It exposes the module's `pub` declarations of every kind:
+runtime declarations, generic families, and compiler-only declarations such
+as `let1`, each under its usual phase rules. Importing a
+compiler-only value does not make it usable as runtime storage. `import1`
+exposes only compiler-only declarations; it does not create a runtime dependency. The
+compiler-supplied `compiler` namespace is bound this way without reading a
+user source file. `pub import` is an ordinary import that also re-exports the
+module (section 2.1). All import forms disappear from flattened HUC0;
+retained declarations use namespace sections and canonical references
+instead. Import cycles are rejected with the complete cycle path.
 
 Residualization removes the phase mechanism itself:
 
@@ -2759,7 +3004,11 @@ scope uses the boundary after its own item. The
 output depends on the complete runtime-needed specialization closure, including
 requests from importing sources. A caller-defined type is a valid phase
 argument; the family need not import the caller. Substitution carries canonical
-type identity, while unqualified names still use the family's lexical context.
+type identity, while names in the body still resolve in the source context of
+the selected definition (section 9.3), not the requester's.
+Program-mode specialization preparation uses the selected definition's module
+state, not the requester's merged state (section 9.8). Reordering unrelated
+imports therefore cannot change a shared runtime definition.
 
 The translation unit records each program definition, its checked body,
 generation origins, and ordered module output. Each ordinary function definition
@@ -2954,7 +3203,8 @@ fn area<Scale: i32>(side: i32) -> i32 {
 The emitted `area<2>` calls the generated `square`. The evaluated `area<2>`
 never refers to it. Without the query, `@area<2>(3)` cannot use `square` while
 that declaration is still pending or if it has never been emitted. A later
-evaluation may use an already published, checked `square` (section 11.2).
+evaluation may use an already published, checked `square`, unless it was
+generated after `area`'s module finished (section 11.2).
 The two bodies may differ by design, and the compiler does not compare them;
 keeping their results consistent is the programmer's responsibility.
 
@@ -3003,6 +3253,52 @@ code takes the place of the `#` statement and must be valid there:
 - in a type body, complete members;
 - in a function or nested block, statements and local declarations.
 
+Names in inserted text follow the rules of the file that contains the `#`
+site:
+
+- A module path in inserted text is a canonical module name. Import aliases
+  are not consulted for it, even aliases declared at the `#` site, so a
+  builder writes `library::output::record`, not `output::record`. The module
+  must be visible at the `#` site (section 2.1). Locals, fields, methods, and
+  unqualified names follow the normal rules of the insertion site.
+- Inserted text may name only `pub` declarations of other files. A helper
+  that a builder's returned code names must therefore be `pub`. A generic
+  body, and a `#` in the builder's own file, are checked in that file and may
+  use its private declarations.
+- A declaration inserted by `#` belongs to the file of that `#`. It is
+  private unless the inserted text includes `pub`.
+- A `#` in a deferred body belongs to the file that wrote that body: the
+  family's file for the primary, or the owning file that wrote a
+  specialization (section 9.3). This holds even when its module output
+  follows a caller's anchor in another file. Code returned by a builder and
+  inserted by a caller belongs to the caller's `#`.
+- Module code goes into the namespace of its `#` site and follows the
+  namespace rule of section 2.1: it cannot add ordinary declarations to
+  another module's namespace. So module code from a `#` in a specialization
+  that another file wrote in the family's namespace is a diagnostic. Put such
+  helpers in that file's own namespace.
+
+The original block wrapped by a code value with a hole is authored code and
+keeps its file's aliases. `compiler::expr` already renders module references
+with canonical names.
+
+**Late module output.** A module's names are fixed when it finishes, like its
+compile-time values (section 9.8). One of its deferred bodies may still be
+prepared later, when another module requests it, and a `#` in that body may
+still insert module code into the module's namespace. Only the preparation
+that generated such a declaration may name it. Other files cannot name it,
+even if it is marked `pub`. Another preparation may name it only by
+generating the identical declaration itself, which then shares it
+(section 11.3). So one module's requests cannot change which names other
+modules can use.
+
+An evaluation-mode preparation inserts no module code, so it never generates
+or shares such a declaration and cannot use one. A deferred body that needs
+a late-generated helper at compile time takes its own path with
+`compiler::emitting()`, as `area` does in section 11.1. Helpers generated
+while their module was being processed are part of its names, and later
+evaluations may use them as usual.
+
 Local text is parsed before the following source is processed. If the code has
 a hole, the `#` statement must be followed by a braced source block, which
 fills the hole. The text before the hole, that block, and the text after the
@@ -3026,7 +3322,7 @@ fn loop_forward<P: auto>(items: P, item: compiler::Text, index: compiler::Text)
     let c: compiler::Text = "__items_" + item;
     return compiler::around(
         "{ let " + c + ": auto = " + source + "; "
-            + "for (let mod " + index + ": usize = 0; "
+            + "for (let mut " + index + ": usize = 0; "
             + index + " < " + c + "->size(); " + index + " += 1) { "
             + "let " + item + ": auto = " + c + "->data() + " + index + ";",
         "} }",
@@ -3087,9 +3383,12 @@ on suppressed or pending code. This is a timing rule, not a permanent ban on
 using its own generated declarations. Already published and checked
 declarations may be used by later evaluations, including evaluations of the
 function whose body inserted them, subject to the ordinary evaluator
-restrictions. An evaluation inside `main` cannot use code queued after `main`,
-directly or through another function. Unresolved references are diagnostics,
-not a reason to fall back to program mode. Section 11.1 shows how
+restrictions. This does not cover a declaration generated into a module
+after that module finished: only the preparation that generated it may use
+it (see late module output, earlier in this section). An evaluation inside
+`main` cannot use code queued after `main`, directly or through another
+function. Unresolved references are diagnostics, not a reason to fall back
+to program mode. Section 11.1 shows how
 `compiler::emitting()` gives an evaluated body its own path.
 
 Neither placement supports backward insertion, moving one arbitrary scope
@@ -3102,7 +3401,7 @@ goes:
 
 ```huc
 fn counter_decl<>() -> compiler::Code {
-    return compiler::local("let mod generated_counter: i32 = 0;");
+    return compiler::local("let mut generated_counter: i32 = 0;");
 }
 
 fn main() -> i32 {
@@ -3115,7 +3414,8 @@ fn main() -> i32 {
 The declaration enters `main` because the `#` is in `main`. Calling
 `counter_decl` inserts nothing, and builders compose as values, for example
 `return counter_decl() + limit_decl();`. An imported builder works the same
-way; its text is parsed in the context of the `#` site.
+way; its text is parsed in the context of the `#` site, under the name rules
+of section 11.2.
 
 A function can also insert code into its own body. The `#` then runs while that
 body is prepared, whether the function is later executed at runtime or in a
@@ -3305,8 +3605,8 @@ VM, or use another equivalent technique.
 
 Code that runs in the compiler follows HUC's semantics for the selected target.
 Ordinary value operations compute what they would at run time, or evaluation
-fails with a diagnostic. A function that branches on generation mode or
-parameter-binding metadata, directly or through a function it calls, can
+fails with a diagnostic. A function that reads compiler state or branches on
+generation mode or parameter-binding metadata, directly or through a callee, can
 deliberately choose different behavior. The compiler does not prove the branches
 equivalent. No marker is needed: any function whose HUC body is available may
 run in the compiler, and eligibility is checked along the path that actually
@@ -3319,7 +3619,7 @@ type identities.
 Deferred `fn` definitions can compute values, including `compiler::Code`
 values, under the call rules in sections 9.7 and 9.9. Code executing in a
 compiler call can also use compiler-only values, call compiler APIs directly,
-and assign `let1 mod` storage (section 9.8). Compiler-only fields, parameters,
+and assign `let1 mut` storage (section 9.8). Compiler-only fields, parameters,
 and results are permitted for these calls but not for runtime requests.
 
 These operations never run in the compiler:
@@ -3359,12 +3659,12 @@ The evaluator supports the runtime language, including:
 - raw pointers to compile-time objects: `&`, `*`, `->`, `null`, equality, and
   arithmetic and ordering within one object or allocation;
 - `raw_storage<T, N>`, `construct_at`, `destruct_at`, and extraction through
-  `mod T*` (sections 6.4 and 6.7);
+  `mut T*` (sections 6.4 and 6.7);
 - compile-time allocation (section 12.3);
 - string literals, as read-only compile-time data;
 - immutable constants with compiler-known values, without accessing runtime
   storage;
-- local mutation where `mod` permits it, ordinary control flow, and recursion.
+- local mutation where `mut` permits it, ordinary control flow, and recursion.
 
 Integer arithmetic uses HUC's target widths, and unsigned arithmetic wraps.
 Floating-point arithmetic is IEEE 754 binary32 or binary64, rounding each
@@ -3383,7 +3683,7 @@ diagnostic with the evaluation call stack, never host undefined behavior:
 - constructing over a live value or destroying an inactive slot;
 - deallocation errors and leaks (section 12.3).
 
-An ordinary function cannot name `let1 mod` storage, which has no run-time
+An ordinary function cannot name `let1 mut` storage, which has no run-time
 equivalent. It may still change compile-time objects through pointers it
 receives, including `this` (section 9.8). Actual `u8` and `c8` objects, such
 as string literal bytes or `Vector<u8>` elements, are accessed like any other
@@ -3401,8 +3701,8 @@ call stack. There is no fallback to a runtime call.
 For example:
 
 ```huc
-fn count_digits(mod value: u32) -> u32 {
-    let mod count: u32 = 1;
+fn count_digits(mut value: u32) -> u32 {
+    let mut count: u32 = 1;
     while (value >= 10) {
         value /= 10;
         count += 1;
@@ -3468,7 +3768,7 @@ chain, including recursive calls.
 For example, these identical calls both execute:
 
 ```huc
-let1 mod next: usize = 0;
+let1 mut next: usize = 0;
 
 fn next_id<>() -> usize {
     next += 1;
@@ -3498,7 +3798,7 @@ compiler-call execution.
 Two compiler operations allocate memory while code runs in the compiler:
 
 ```huc
-compiler::allocate<T>(count)          // mod T* to count inactive slots
+compiler::allocate<T>(count)          // mut T* to count inactive slots
 compiler::deallocate<T>(slots, count) // releases them
 ```
 
@@ -3517,12 +3817,12 @@ the mode query, and the same container works in both phases:
 ```huc
 import1 compiler;
 
-extern "C" fn malloc(size: usize) -> mod u8*; // probable runtime allocator
+extern "C" fn malloc(size: usize) -> mut u8*; // probable runtime allocator
 
-fn allocate_slots<T: auto>(count: usize) -> mod T* {
+fn allocate_slots<T: auto>(count: usize) -> mut T* {
     if1 (compiler::emitting()) {
         // Overflow checking of count * size_of<T>() is omitted here.
-        return ptr_as<mod T*>(malloc(count * size_of<T>()));
+        return ptr_as<mut T*>(malloc(count * size_of<T>()));
     } else {
         return compiler::allocate<T>(count);
     }
@@ -3564,6 +3864,12 @@ compiler-only types, or compiler metadata. Resource management across C boundari
 documented functions returning or accepting raw pointers or scalar handles.
 Copying or passing a raw pointer does not itself establish or release any
 cleanup obligation.
+
+An `extern "C"` declaration is private to its file unless it is marked
+`pub`, like any other declaration (section 2.1). `pub` controls which HUC
+files may name it, not its link name. Only `main` and functions exported to C
+need link names visible outside the program; other HUC definitions may stay
+internal to it.
 
 C-layout structure attributes, opaque foreign handle declarations, and C
 variadics are deferred pending separate designs. A small C shim can flatten
@@ -3619,6 +3925,8 @@ design, not the complete set of features that release 0.1 might leave unimplemen
 - user-defined operator overloading;
 - dynamic runtime reflection;
 - a stable HUC-to-HUC binary ABI;
+- separately compiled HUC packages, whose required rules are set in the
+  [compilation model](compilation-model.md), section 13;
 - compile-time network access or untracked host execution.
 
 Shared ownership, when needed, should initially be ordinary library types such
@@ -3633,7 +3941,7 @@ The closest C++ equivalents are conceptual, not the backend representation:
 | HUC | Approximate C++ |
 |---|---|
 | `T*` | `const T*` for a non-pointer `T` |
-| `mod T*` | `T*` for a non-pointer `T` |
+| `mut T*` | `T*` for a non-pointer `T` |
 | `&value` | `std::addressof(value)` or `&value` |
 | `ptr_as<usize>(pointer)` | A raw data pointer converted to `std::uintptr_t` |
 | `copy a` | clone/copy construction, explicitly selected |
@@ -3647,6 +3955,10 @@ The closest C++ equivalents are conceptual, not the backend representation:
 | `if1 (compiler::emitting())` | roughly `if !consteval` |
 | generic `struct` | type generation/monomorphization |
 | `#code;` with a `compiler::Code` value | macro expansion or a build-time code generator, but checked as HUC0 at the insertion site |
+| A declaration without `pub` | `static`, or an unnamed namespace, in a `.cpp` file |
+| `pub fn` | `export` on a declaration in a C++20 module |
+| `pub import a.b;` | `export import a.b;` in a C++20 module |
+| Isolated module compiler state with later-import-wins merging | No direct C++ equivalent; imported HUC state cannot change a dependency's saved result |
 
 This comparison is explanatory, not definitional. In C++, `std::move` merely
 selects operations such as a possibly user-defined move constructor; the source
@@ -3662,9 +3974,17 @@ The bootstrap driver exposes:
 
 ```text
 huc lower <root.huc0> --out-dir <llvm-directory>
+huc lower --flattened <program.huc0> --out-dir <llvm-directory>
 huc stage <root.huc1> --out-dir <huc0-directory>
 huc build <root.huc1> --out-dir <build-directory>
 ```
+
+By default, `lower` reads HUC0 source files under the module rules of
+section 2.1, including imports. With `--flattened`, it reads one complete
+flattened program: imports are rejected, and the import, `pub`, namespace,
+and specialization-placement checks do not apply. The input kind comes from
+this option, never from a file name or the absence of imports. `build`
+writes the flattened HUC0 file and lowers it with `--flattened`.
 
 Every implementation must report its language revision, supported feature
 subset, and target triple. Release 0.1 need not implement the entire draft.
@@ -3710,7 +4030,7 @@ fn consume(widget: Widget) -> void {
     inspect(&widget);
 }
 
-fn choose<T: auto, Greater: bool = true>(mod left: T, mod right: T) -> T {
+fn choose<T: auto, Greater: bool = true>(mut left: T, mut right: T) -> T {
     if1 (Greater) {
         if (left > right) {
             return left;
@@ -3725,10 +4045,10 @@ fn choose<T: auto, Greater: bool = true>(mod left: T, mod right: T) -> T {
 }
 
 fn main() -> i32 {
-    let mod first: Widget = Widget(7);
+    let mut first: Widget = Widget(7);
     inspect(&first);
 
-    let mod second: Widget = first;
+    let mut second: Widget = first;
     let independent: Widget = copy second;
 
     let a: i32 = 3;

@@ -1,7 +1,7 @@
 module examples.raw_storage;
 
 // A self-contained lifetime example: main returns 0 when the checks pass.
-let mod drop_order: i32;
+let mut drop_order: i32;
 
 struct Probe {
     let id: i32;
@@ -9,36 +9,36 @@ struct Probe {
     fn init(id: i32) : id(id) {
     }
 
-    fn drop() mod -> void {
+    fn drop() mut -> void {
         drop_order = drop_order * 10 + this->id;
     }
 }
 
 struct InlineProbes {
-    let mod storage: raw_storage<Probe, 2>;
-    let mod length: usize;
+    let mut storage: raw_storage<Probe, 2>;
+    let mut length: usize;
 
     fn init() {
         // No Probe is constructed. length starts at zero.
     }
 
     // Precondition: length < 2. The parameter is consumed by this call.
-    fn push(mod value: Probe) mod -> void {
-        let slots: mod Probe* = storage_ptr(&this->storage);
+    fn push(mut value: Probe) mut -> void {
+        let slots: mut Probe* = storage_ptr(&this->storage);
         construct_at(slots + this->length, value);
         this->length += 1;
     }
 
     // Precondition: length > 0.
-    fn pop() mod -> Probe {
+    fn pop() mut -> Probe {
         let last: usize = this->length - 1;
-        let mod result: Probe = *(storage_ptr(&this->storage) + last);
+        let mut result: Probe = *(storage_ptr(&this->storage) + last);
         this->length = last; // exclude the inactive source slot
         return result;
     }
 
-    fn drop() mod -> void {
-        let slots: mod Probe* = storage_ptr(&this->storage);
+    fn drop() mut -> void {
+        let slots: mut Probe* = storage_ptr(&this->storage);
         while (this->length > 0) {
             this->length -= 1;
             destruct_at(slots + this->length);
@@ -59,7 +59,7 @@ fn main() -> i32 {
     }
 
     {
-        let mod buffer: InlineProbes = InlineProbes();
+        let mut buffer: InlineProbes = InlineProbes();
         buffer.push(Probe(1));
         buffer.push(Probe(2));
         let removed: Probe = buffer.pop();
@@ -78,7 +78,7 @@ fn main() -> i32 {
 
     drop_order = 0;
     {
-        let mod buffer: InlineProbes = InlineProbes();
+        let mut buffer: InlineProbes = InlineProbes();
         buffer.push(Probe(3));
         buffer.push(Probe(4));
     } // reverse initialized-range cleanup: 4, then 3
@@ -87,8 +87,8 @@ fn main() -> i32 {
     }
 
     {
-        let mod numbers: raw_storage<i32, 1> = raw_storage<i32, 1>();
-        let slot: mod i32* = storage_ptr(&numbers);
+        let mut numbers: raw_storage<i32, 1> = raw_storage<i32, 1>();
+        let slot: mut i32* = storage_ptr(&numbers);
         construct_at(slot, 10);
         let old: i32 = *slot; // Basic copy: source remains live
         destruct_at(slot); // retire it before construction reuses the slot

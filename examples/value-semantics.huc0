@@ -4,7 +4,7 @@ module examples.value_semantics;
 import std.io as io;
 import std.memory as memory;
 
-let mod temporary_drop_order: i32 = 0;
+let mut temporary_drop_order: i32 = 0;
 
 // Records destruction without allocation; view() observes inline storage.
 struct TemporaryProbe {
@@ -17,7 +17,7 @@ struct TemporaryProbe {
         return &this->id;
     }
 
-    fn drop() mod -> void {
+    fn drop() mut -> void {
         temporary_drop_order = temporary_drop_order * 10 + this->id;
     }
 }
@@ -36,7 +36,7 @@ struct Point {
 
 // NativeBuffer is Advanced because it declares clone and drop.
 struct NativeBuffer {
-    let mod data: mod u8*;
+    let mut data: mut u8*;
     let size: usize;
 
     fn init(size: usize)
@@ -52,19 +52,19 @@ struct NativeBuffer {
         return this->data[0];
     }
 
-    fn fill(value: u8) mod -> void {
+    fn fill(value: u8) mut -> void {
         memory::fill_bytes(this->data, value, this->size);
     }
 
     // Only an explicit copy expression calls this method.
     fn clone() -> NativeBuffer {
-        let mod result: NativeBuffer = NativeBuffer(this->size);
+        let mut result: NativeBuffer = NativeBuffer(this->size);
         memory::copy_bytes(result.data, this->data, this->size);
         return result;
     }
 
     // The compiler calls this, then cleans up fields in reverse order.
-    fn drop() mod -> void {
+    fn drop() mut -> void {
         if (this->data) {
             memory::free_raw_bytes(this->data, this->size);
             this->data = null;
@@ -75,9 +75,9 @@ struct NativeBuffer {
 // Packet is Advanced because of its Advanced field, despite having no clone or drop.
 struct Packet {
     let tag: i32;
-    let mod payload: NativeBuffer;
+    let mut payload: NativeBuffer;
 
-    fn init(tag: i32, mod payload: NativeBuffer)
+    fn init(tag: i32, mut payload: NativeBuffer)
         : tag(tag),
           payload(payload),
     {
@@ -88,13 +88,13 @@ struct Packet {
 // Transferring it inline leaves a stale self pointer. This is invalid unless the
 // programmer can prove the pointer will never be used afterward.
 struct AddressDependent {
-    let mod self: AddressDependent*;
+    let mut self: AddressDependent*;
 
     fn init() : self(null) {
         this->self = this;
     }
 
-    fn drop() mod -> void {
+    fn drop() mut -> void {
     }
 }
 
@@ -110,9 +110,9 @@ fn receive(buffer: NativeBuffer) -> u8 {
 // Do not use this helper on an automatic local and then let that inactive
 // local be destroyed. Backing allocation is a separate container operation;
 // main demonstrates manual lifetimes in existing stack storage instead.
-fn pop_last_buffer(data: mod NativeBuffer*, length: mod usize*) -> NativeBuffer {
+fn pop_last_buffer(data: mut NativeBuffer*, length: mut usize*) -> NativeBuffer {
     let last: usize = *length - 1;
-    let mod result: NativeBuffer = *(data + last);
+    let mut result: NativeBuffer = *(data + last);
     // The old slot is inactive. Extraction neither clears it nor changes data.
     *length = last;
     return result; // direct local transfer suppresses result's cleanup here
@@ -120,13 +120,13 @@ fn pop_last_buffer(data: mod NativeBuffer*, length: mod usize*) -> NativeBuffer 
 
 // Preconditions: the live prefix has *length elements, a spare inactive slot
 // follows it, and length points to separate writable bookkeeping.
-fn push_buffer(data: mod NativeBuffer*, length: mod usize*, mod buffer: NativeBuffer) -> void {
+fn push_buffer(data: mut NativeBuffer*, length: mut usize*, mut buffer: NativeBuffer) -> void {
     construct_at(data + *length, buffer);
     *length += 1;
 }
 
 // The caller owns cleanup of exactly this live prefix; allocation is unchanged.
-fn clear_buffers(data: mod NativeBuffer*, length: mod usize*) -> void {
+fn clear_buffers(data: mut NativeBuffer*, length: mut usize*) -> void {
     while (*length > 0) {
         *length -= 1;
         destruct_at(data + *length);
@@ -142,19 +142,19 @@ fn demonstrate_copy_values() -> void {
 }
 
 fn demonstrate_inline_relocation() -> void {
-    let mod original: NativeBuffer = NativeBuffer(64);
+    let mut original: NativeBuffer = NativeBuffer(64);
     original.fill(7);
 
     let duplicate: NativeBuffer = copy original; // calls clone
     // Bitwise relocation transfers the stored value without calling user code.
     // original becomes inactive: its lifetime ends, and neither its drop nor
     // its field cleanup runs.
-    let mod relocated: NativeBuffer = original;
+    let mut relocated: NativeBuffer = original;
 
     relocated = relocated; // exact self-relocation is a no-op
     original = NativeBuffer(32); // reinitializes inactive storage
 
-    let mod target: NativeBuffer = NativeBuffer(8);
+    let mut target: NativeBuffer = NativeBuffer(8);
     // Clone a temporary, drop old target, then relocate the replacement.
     target = copy duplicate;
 
@@ -162,7 +162,7 @@ fn demonstrate_inline_relocation() -> void {
 }
 
 fn demonstrate_observation_and_consumption() -> void {
-    let mod buffer: NativeBuffer = NativeBuffer(128);
+    let mut buffer: NativeBuffer = NativeBuffer(128);
     buffer.fill(42);
 
     let observer: NativeBuffer* = &buffer;
@@ -175,7 +175,7 @@ fn demonstrate_observation_and_consumption() -> void {
 }
 
 fn demonstrate_advanced_fields() -> void {
-    let mod source: Packet = Packet(1, NativeBuffer(16));
+    let mut source: Packet = Packet(1, NativeBuffer(16));
     let destination: Packet = source;
     // source and source.payload are inactive. Only destination cleans up.
     io::println(destination.tag, destination.payload.first());
@@ -218,15 +218,15 @@ fn demonstrate_temporary_lifetimes() -> void {
 fn demonstrate_manual_lifetimes() -> void {
     temporary_drop_order = 0;
     {
-        let mod storage: TemporaryProbe = TemporaryProbe(1);
+        let mut storage: TemporaryProbe = TemporaryProbe(1);
         // Retain the typed storage address while storage is still Active.
-        let slot: mod TemporaryProbe* = &storage;
+        let slot: mut TemporaryProbe* = &storage;
         let original: TemporaryProbe = storage;
         // storage is now Inactive; taking &storage again would be rejected.
         // slot still addresses the storage, but no live value may be read there.
 
-        let initialized: mod TemporaryProbe* = construct_at(slot, TemporaryProbe(2));
-        let mod extracted: TemporaryProbe = *initialized;
+        let initialized: mut TemporaryProbe* = construct_at(slot, TemporaryProbe(2));
+        let mut extracted: TemporaryProbe = *initialized;
         construct_at(slot, extracted); // extracted becomes Inactive
         destruct_at(slot); // drops 2; does not free the stack storage
         // No automatic cleanup was registered for storage's manually built value.
@@ -235,8 +235,8 @@ fn demonstrate_manual_lifetimes() -> void {
 
     temporary_drop_order = 0;
     {
-        let mod automatic: TemporaryProbe = TemporaryProbe(3);
-        let slot: mod TemporaryProbe* = &automatic;
+        let mut automatic: TemporaryProbe = TemporaryProbe(3);
+        let slot: mut TemporaryProbe* = &automatic;
         destruct_at(slot); // drops 3; automatic's tracked state is unchanged
         construct_at(slot, TemporaryProbe(4)); // restore the slot before cleanup
     } // the still-scheduled automatic cleanup drops 4

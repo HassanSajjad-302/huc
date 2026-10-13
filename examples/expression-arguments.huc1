@@ -2,15 +2,15 @@ module examples.expression_arguments;
 
 import1 compiler;
 
-let mod calls: i32 = 0;
-let mod drops: i32 = 0;
+let mut calls: i32 = 0;
+let mut drops: i32 = 0;
 
 fn next(previous: i32) -> i32 {
     calls = previous + 1;
     return calls;
 }
 
-fn identity<T: auto>(mod value: T) -> T {
+fn identity<T: auto>(mut value: T) -> T {
     return value;
 }
 
@@ -20,7 +20,7 @@ struct Token {
     fn init(value: i32) : value(value) {
     }
 
-    fn drop() mod -> void {
+    fn drop() mut -> void {
         drops += 1;
     }
 }
@@ -39,7 +39,7 @@ fn expression_text<T: auto>(value: T) -> compiler::Text {
 
 fn with_owned<T: auto>(value: T) -> compiler::Code {
     return compiler::around(
-        "{ let mod owned: auto = " + compiler::expr(value) + ";",
+        "{ let mut owned: auto = " + compiler::expr(value) + ";",
         "}",
     );
 }

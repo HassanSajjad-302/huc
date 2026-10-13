@@ -7,7 +7,7 @@ import std.io as io;
 // platform or standard-library resource API.
 struct Widget {
     let value: i32;
-    let mod native_handle: i32;
+    let mut native_handle: i32;
 
     fn init(value: i32)
         : value(value),
@@ -21,7 +21,7 @@ struct Widget {
     }
 
     // This customizes destruction. Fields are cleaned after drop returns.
-    fn drop() mod -> void {
+    fn drop() mut -> void {
         if (this->native_handle >= 0) {
             probable_close_widget(this->native_handle);
             this->native_handle = -1;
@@ -38,13 +38,13 @@ fn consume(widget: Widget) -> void {
 } // widget calls Widget.drop here
 
 fn main() -> i32 {
-    let mod first: Widget = Widget(42);
+    let mut first: Widget = Widget(42);
     inspect(&first);
     inspect(&first);
 
     // Relocation transfers the representation and cleanup responsibility.
     // first and its fields become inactive; no source cleanup runs.
-    let mod second: Widget = first;
+    let mut second: Widget = first;
     let independent: Widget = copy second; // clone opens a separate handle
 
     let observer: Widget* = &second;

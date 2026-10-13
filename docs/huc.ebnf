@@ -21,25 +21,34 @@
    defined by the language specification, not by this grammar alone. *)
 
 huc0-compilation-unit
-                  = module-section-0, { module-section-0 } ;
+                  = module-decl, { runtime-import }, { module-item-0 },
+                    { module-section-0 } ;
 
 huc1-compilation-unit
-                  = module-section-1, { module-section-1 } ;
+                  = module-decl, { import-decl-1 }, { module-item-1 },
+                    { module-section-1 } ;
 
-module-section-0 = module-decl, { runtime-import }, { module-item-0 } ;
-module-section-1 = module-decl, { import-decl-1 }, { module-item-1 } ;
+module-section-0 = module-decl, { module-item-0 } ;
+module-section-1 = module-decl, { module-item-1 } ;
 
-(* Imports process source once in the same translation unit, preserving lexical
-   namespaces. A repeated module declaration selects or reopens a namespace;
-   it does not create a compilation boundary. Flattened HUC0 has no imports:
-   namespace sections and canonical qualified names preserve source order. *)
+(* All imports form one block directly after the file's first module
+   declaration; later sections have none. Imports process source once in the
+   same translation unit, preserving lexical namespaces. A later module
+   declaration opens a namespace section: the file's own namespace, or a
+   visible module's namespace for specializations only. It does not create a
+   compilation boundary. Flattened HUC0 has no imports: namespace sections and
+   canonical qualified names preserve source order. *)
 
 module-decl       = "module", qualified-module-name, ";" ;
-runtime-import    = "import", qualified-module-name,
+runtime-import    = [ "pub" ], "import", qualified-module-name,
                     [ "as", identifier ], ";" ;
 compiler-import   = "import1", qualified-module-name,
                     [ "as", identifier ], ";" ;
 import-decl-1     = runtime-import | compiler-import ;
+
+(* "pub import" also re-exports the module; there is no "pub import1".
+   "as _" binds no alias. Importing one module twice in a file, by any import
+   form or alias, is a semantic error. *)
 
 qualified-module-name
                   = identifier, { ".", identifier } ;
@@ -47,7 +56,11 @@ symbol-path       = identifier, { "::", identifier } ;
 
 (* ---------- HUC0 module and type declarations ---------- *)
 
-module-item-0     = runtime-declaration-0 ;
+module-item-0     = [ "pub" ], runtime-declaration-0 ;
+
+(* A top-level declaration is private to its file unless marked "pub".
+   Structure members are always public and take no "pub". Specializations
+   take no "pub"; that is a semantic error, not a grammar rule. *)
 
 runtime-declaration-0
                   = function-decl-0
@@ -59,7 +72,7 @@ runtime-declaration-0
 function-decl-0   = function-signature-0, ( block-0 | ";" ) ;
 function-signature-0
                   = "fn", identifier, parameter-list-0,
-                    [ "mod" ], "->", type-0 ;
+                    [ "mut" ], "->", type-0 ;
 
 constructor-decl-0
                   = "fn", "init", parameter-list-0,
@@ -77,7 +90,7 @@ struct-member-0   = field-decl-0
                   | function-decl-0
                   | constructor-decl-0 ;
 
-field-decl-0      = "let", [ "mod" ], identifier, ":", type-0,
+field-decl-0      = "let", [ "mut" ], identifier, ":", type-0,
                     [ "=", expression-0 ], ";" ;
 global-let-decl-0 = field-decl-0 ;
 
@@ -89,9 +102,9 @@ extern-function-decl-0
 
 (* ---------- HUC1 module and type declarations ---------- *)
 
-module-item-1     = runtime-declaration-1
-                  | generic-family-decl
-                  | global-let1-decl
+module-item-1     = [ "pub" ], ( runtime-declaration-1
+                               | generic-family-decl
+                               | global-let1-decl )
                   | phase-control-item
                   | phase-expression-item
                   | insertion-item ;
@@ -106,7 +119,7 @@ runtime-declaration-1
 function-decl-1   = function-signature-1, ( block-1 | ";" ) ;
 function-signature-1
                   = "fn", identifier, parameter-list-1,
-                    [ "mod" ], "->", type-1 ;
+                    [ "mut" ], "->", type-1 ;
 
 constructor-decl-1
                   = "fn", "init", parameter-list-1,
@@ -128,7 +141,7 @@ struct-member-1   = field-decl-1
                   | phase-expression-item
                   | insertion-item ;
 
-field-decl-1      = "let", [ "mod" ], identifier, ":", type-1,
+field-decl-1      = "let", [ "mut" ], identifier, ":", type-1,
                     [ "=", expression-1 ], ";" ;
 global-let-decl-1 = field-decl-1 ;
 type-alias-decl-1 = "type", identifier, "=", type-1, ";" ;
@@ -146,7 +159,7 @@ generic-family-decl
 
 generic-function-decl
                   = "fn", identifier, generic-header,
-                    parameter-list-1, [ "mod" ], "->", type-1,
+                    parameter-list-1, [ "mut" ], "->", type-1,
                     deferred-body ;
 
 generic-struct-decl
@@ -181,7 +194,7 @@ phase-argument-list
                     { ",", phase-argument }, [ "," ] ], ">" ;
 phase-argument    = type-pattern | expression-1 ;
 
-type-pattern      = [ "mod" ], type-pattern-primary, { "*" } ;
+type-pattern      = [ "mut" ], type-pattern-primary, { "*" } ;
 type-pattern-primary
                   = builtin-type
                   | raw-storage-pattern
@@ -205,10 +218,15 @@ raw-storage-pattern
    fn1 and struct1 are not declaration keywords. Fields and working locals
    use let; let1 explicitly declares storage used during preparation. *)
 
-let1-binding      = "let1", [ "mod" ], identifier, ":", ( type-1 | "auto" ),
+let1-binding      = "let1", [ "mut" ], identifier, ":", ( type-1 | "auto" ),
                     [ "=", expression-1 ] ;
 let1-decl         = let1-binding, ";" ;
 global-let1-decl  = let1-decl ;
+
+(* Module-level let1 objects have stable identities and per-module compiler
+   state. Imports merge completed states in source order; later object values
+   win. Ordinary assignments and pointer writes affect only the active state.
+   No separate configuration keyword or declaration form is needed. *)
 
 (* ---------- Phase control and erased expression items ---------- *)
 
@@ -282,13 +300,13 @@ compiler-for-statement-1
 
 (* ---------- Types ---------- *)
 
-type-0            = [ "mod" ], type-primary-0, { "*" } ;
+type-0            = [ "mut" ], type-primary-0, { "*" } ;
 type-primary-0    = builtin-type | symbol-path | raw-storage-type-0 ;
 raw-storage-type-0
                   = "raw_storage", "<", type-0, ",", integer-literal,
                     [ "," ], ">" ;
 
-type-1            = [ "mod" ], type-primary-1, { "*" } ;
+type-1            = [ "mut" ], type-primary-1, { "*" } ;
 type-primary-1    = builtin-type
                   | raw-storage-type-1
                   | symbol-path, [ phase-argument-list ] ;
@@ -313,16 +331,16 @@ builtin-type      = "bool" | "c8"
 
 parameter-list-0  = "(", [ parameter-0,
                     { ",", parameter-0 }, [ "," ] ], ")" ;
-parameter-0       = [ "mod" ], identifier, ":", type-0 ;
+parameter-0       = [ "mut" ], identifier, ":", type-0 ;
 
 parameter-list-1  = "(", [ parameter-1,
                     { ",", parameter-1 }, [ "," ] ], ")" ;
-parameter-1       = [ "mod" ], identifier, ":", type-1 ;
+parameter-1       = [ "mut" ], identifier, ":", type-1 ;
 
 (* No parameter marker distinguishes values from expressions. In compiler
    calls, arguments determine the binding kind under specification 9.7.1.
    A plain let in an executing compiler function holds an actual value.
-   An expression binding has no value slot even if its parameter spells mod.
+   An expression binding has no value slot even if its parameter spells mut.
    compiler::is_expr_param(parameter) queries the per-call binding metadata;
    it is available to if1 without reading the argument. In runtime preparation
    it is false for ordinary parameters. compiler::expr(parameter) extracts
@@ -330,7 +348,7 @@ parameter-1       = [ "mod" ], identifier, ":", type-1 ;
    Both accept a parameter name, optionally parenthesized; neither is a
    first-class function. HUC0 has neither expression bindings nor these queries. *)
 
-(* A slot's mod precedes its name; a pointee's mod stays inside the type.
+(* A slot's mut precedes its name; a pointee's mut stays inside the type.
    Variables and parameters always spell name: type. Inference uses : auto
    only where the language specification permits it, not an omitted type.
    Comma-separated lists allow one optional final comma after an item.
@@ -350,7 +368,7 @@ statement-0       = block-0
                   | expression-statement-0 ;
 
 local-let-binding-0
-                  = "let", [ "mod" ], identifier, ":", ( type-0 | "auto" ),
+                  = "let", [ "mut" ], identifier, ":", ( type-0 | "auto" ),
                     [ "=", expression-0 ] ;
 local-let-decl-0  = local-let-binding-0, ";" ;
 if-statement-0    = "if", "(", expression-0, ")", block-0,
@@ -383,7 +401,7 @@ statement-1       = block-1
                   | expression-statement-1 ;
 
 local-let-binding-1
-                  = "let", [ "mod" ], identifier, ":", ( type-1 | "auto" ),
+                  = "let", [ "mut" ], identifier, ":", ( type-1 | "auto" ),
                     [ "=", expression-1 ] ;
 local-let-decl-1  = local-let-binding-1, ";" ;
 if-statement-1    = "if", "(", expression-1, ")", block-1,
@@ -506,8 +524,8 @@ binary-op         = "||" | "&&"
    construct_at(pointer, value) and destruct_at(pointer)
    are compiler-known, non-overloadable ordinary call forms with unqualified
    names. Semantic analysis checks their arity and operands. construct_at
-   infers T from mod T*, treats value as an initializer for that slot rather
-   than a by-value parameter, and returns mod T*. destruct_at requires mod T*
+   infers T from mut T*, treats value as an initializer for that slot rather
+   than a by-value parameter, and returns mut T*. destruct_at requires mut T*
    and returns void. They have no angle-delimited type operand.
    ptr_as has exactly one value operand. It permits raw-pointer to raw-pointer,
    raw-pointer to usize, and usize to raw-pointer casts; other pairs are rejected.

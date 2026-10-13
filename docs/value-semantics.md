@@ -43,9 +43,9 @@ let observer: Widget* = &value;
 Pointer chains such as `T**` are ordinary HUC0 raw-pointer types. Each `*`
 adds another non-owning level; no level adds ownership or lifetime tracking.
 Unary `&` accepts an addressable place: it returns
-`T*` for a fixed place and `mod T*` for a writable place. Applying it to a
+`T*` for a fixed place and `mut T*` for a writable place. Applying it to a
 pointer slot adds one pointer level, so `&p` where `p` has type `T*` produces
-`T**` (or `mod T**` for a writable slot). Its operand is evaluated once
+`T**` (or `mut T**` for a writable slot). Its operand is evaluated once
 without transferring a value, creating a temporary, extending storage
 lifetime, or changing cleanup state. Binary `&` remains bitwise AND.
 
@@ -65,14 +65,14 @@ result is cast to an integer. Manual-storage code can retain a pointer before
 transferring the value or use `raw_storage`; taking a pointer does not keep
 the old value alive. Section 7.5 defines the checked-use boundary.
 
-Declarations use `name: Type`. `mod` before the name controls the slot;
-`mod` inside a pointer type controls the pointee:
+Declarations use `name: Type`. `mut` before the name controls the slot;
+`mut` inside a pointer type controls the pointee:
 
 ```huc
 let observer: T*; // fixed field; constructor obligation
-let observer: mod T*; // fixed field; writable T; constructor obligation
-let mod observer: T*; // reseatable field; defaults to null
-let mod observer: mod T*; // reseatable field; writable T; defaults to null
+let observer: mut T*; // fixed field; writable T; constructor obligation
+let mut observer: T*; // reseatable field; defaults to null
+let mut observer: mut T*; // reseatable field; writable T; defaults to null
 ```
 
 These are field forms. A fixed local requires an explicit initializer. Each
@@ -80,13 +80,13 @@ constructor must initialize fixed fields that lack declaration initializers.
 Omitted mutable pointer fields default to null. HUC0 globals are restricted
 to drop-free Basic scalars and raw pointers.
 
-A fixed structure prevents assignment to its inline fields. A `mod T*`
+A fixed structure prevents assignment to its inline fields. A `mut T*`
 field still allows mutation of the separate pointee, but not replacement of
 the pointer stored in that field. Each layer keeps its own permissions.
 
 Relocating a named Advanced value or assigning to a named slot requires
-binding `mod`. Compiler-inserted destruction does not. Fresh unnamed results
-need no binding `mod`: there is no source declaration on which to write it.
+binding `mut`. Compiler-inserted destruction does not. Fresh unnamed results
+need no binding `mut`: there is no source declaration on which to write it.
 
 ```huc
 let file: File = open_file("input.dat");
@@ -141,7 +141,7 @@ struct Ticket {
     }
 }
 
-let mod original: Ticket = Ticket(100);
+let mut original: Ticket = Ticket(100);
 let moved: Ticket = original; // destructive relocation; clone is not called
 let copied: Ticket = copy moved; // calls Ticket.clone
 ```
@@ -159,7 +159,7 @@ struct UniqueTicket {
     fn init(value: u64) : value(value) {
     }
 
-    fn drop() mod -> void {
+    fn drop() mut -> void {
         // No external cleanup; this lifecycle declaration makes the type Advanced.
     }
 }
@@ -182,7 +182,7 @@ fn clone() -> T {
     // return an independent logical duplicate
 }
 
-fn drop() mod -> void {
+fn drop() mut -> void {
     // release non-field resources
 }
 ```
@@ -197,7 +197,7 @@ Their roles are:
 | Logical copy of an Advanced array | None | `copy` applies logical copy to each element |
 | Destructive relocation initialization | None | Ordinary binding of an Advanced value |
 | Destructive relocation assignment | None | Ordinary assignment of an Advanced value |
-| Destruction | `fn drop() mod -> void` | Inserted by the compiler |
+| Destruction | `fn drop() mut -> void` | Inserted by the compiler |
 | Field destruction | None | Inserted after `drop`, in reverse field order |
 
 This is deliberately smaller than C++'s special-member system. In particular,
@@ -319,12 +319,12 @@ void copy_values() {
 
 The C++ example uses `const` because it is C++ source. HUC source has no
 `const` keyword; HUC declarations are fixed unless a relevant layer has
-`mod`.
+`mut`.
 
 Writable Basic assignment is also direct:
 
 ```huc
-let mod current: Point = Point(1, 2);
+let mut current: Point = Point(1, 2);
 let replacement: Point = Point(8, 9);
 
 current = replacement; // fieldwise copy of a Basic value
@@ -352,7 +352,7 @@ Rules:
 
 - it is an ordinary runtime `fn`, without an angle header;
 - it has no explicit parameters;
-- its receiver is read-only because it has no trailing `mod`;
+- its receiver is read-only because it has no trailing `mut`;
 - it returns the same structure type in which it is declared;
 - it must not modify the source object's own storage or leave the source invalid;
 - it cannot be called directly or have its address taken;
@@ -390,7 +390,7 @@ custom copy-construction and copy-assignment hooks. Copy assignment is built
 from `clone`, destruction of the old destination, and destructive relocation:
 
 ```huc
-let mod destination: Text = Text("old");
+let mut destination: Text = Text("old");
 let source: Text = Text("new");
 
 destination = copy source;
@@ -419,7 +419,7 @@ import std.memory as memory;
 import std.text as text;
 
 struct HeapText {
-    let mod data: mod u8*;
+    let mut data: mut u8*;
     let size: usize;
 
     fn init(source: text::View)
@@ -437,7 +437,7 @@ struct HeapText {
         return HeapText(this->view());
     }
 
-    fn drop() mod -> void {
+    fn drop() mut -> void {
         if (this->data) {
             memory::free_raw_bytes(this->data, this->size);
             this->data = null;
@@ -446,7 +446,7 @@ struct HeapText {
 }
 
 fn demonstrate() -> void {
-    let mod first: HeapText = HeapText("alpha");
+    let mut first: HeapText = HeapText("alpha");
     let second: HeapText = copy first; // independent allocation
     let third: HeapText = first; // relocate; first becomes inactive
 }
@@ -551,13 +551,13 @@ uses a clearly named writable method:
 struct ReusableBuffer {
     // fields, init, clone, and drop omitted
 
-    fn assign_from(source: ReusableBuffer*) mod -> void {
+    fn assign_from(source: ReusableBuffer*) mut -> void {
         probable_resize_in_place(this, source->size());
         probable_copy_payload(this, source);
     }
 }
 
-let mod buffer: ReusableBuffer = ReusableBuffer(...);
+let mut buffer: ReusableBuffer = ReusableBuffer(...);
 let other: ReusableBuffer = ReusableBuffer(...);
 buffer.assign_from(&other);
 ```
@@ -582,14 +582,14 @@ struct Packet {
     let tag: i32;
     let payload: HeapText;
 
-    fn init(tag: i32, mod payload: HeapText)
+    fn init(tag: i32, mut payload: HeapText)
         : tag(tag),
           payload(payload),
     {
     }
 }
 
-let mod source: Packet = Packet(1, HeapText("payload"));
+let mut source: Packet = Packet(1, HeapText("payload"));
 let destination: Packet = source; // destructive relocation
 ```
 
@@ -688,8 +688,8 @@ example:
 
 ```huc
 struct SelfIndexed {
-    let mod payload: i32;
-    let mod self: SelfIndexed*;
+    let mut payload: i32;
+    let mut self: SelfIndexed*;
 
     fn init(payload: i32)
         : payload(payload),
@@ -702,12 +702,12 @@ struct SelfIndexed {
         return this->self == this;
     }
 
-    fn drop() mod -> void {
+    fn drop() mut -> void {
         // Empty: this opts the scalar-only structure into Advanced.
     }
 }
 
-let mod first: SelfIndexed = SelfIndexed(10);
+let mut first: SelfIndexed = SelfIndexed(10);
 let second: SelfIndexed = first; // bitwise relocation; first becomes inactive
 
 // second.self still contains the old inline address. Relying on the broken
@@ -749,8 +749,8 @@ An Advanced value can be transferred from either kind of source:
 
 | Source | Who prevents later cleanup of the old value? |
 |---|---|
-| A whole local or parameter with binding `mod`, or a fresh temporary/result | The compiler updates that place's active state. |
-| `*pointer` through `mod T*` | The programmer manages cleanup of the old slot. |
+| A whole local or parameter with binding `mut`, or a fresh temporary/result | The compiler updates that place's active state. |
+| `*pointer` through `mut T*` | The programmer manages cleanup of the old slot. |
 
 Both forms transfer the whole value, including its fields. The source becomes
 inactive, the destination takes responsibility for cleanup, and no source
@@ -760,7 +760,7 @@ does not change the pointer's address value. Its binding can be fixed, but its
 pointee must be writable, live, and correctly aligned.
 
 ```huc
-// file_pointer has type mod File* and points to a live, manually managed File.
+// file_pointer has type mut File* and points to a live, manually managed File.
 let value: File = *file_pointer; // allowed; the old slot is now inactive
 // The storage manager must exclude that slot from cleanup.
 ```
@@ -770,12 +770,12 @@ does not cancel cleanup of an aliased local or enclosing object, even when the
 pointer was obtained with `&`. For example:
 
 ```huc
-fn extract(file_pointer: mod File*) -> File {
+fn extract(file_pointer: mut File*) -> File {
     return *file_pointer;
 }
 
 fn incorrect() -> void {
-    let mod file: File = File(probable_os_open("input.dat"));
+    let mut file: File = File(probable_os_open("input.dat"));
     let value: File = extract(&file);
     // Incorrect: file's automatic cleanup has not been cancelled.
 } // Reaching cleanup of the inactive file is undefined behavior.
@@ -790,7 +790,7 @@ runtime ownership lookup are required.
 
 The programmer must recognize this operation in every value-binding context:
 `return *p`, `consume(*p)`, and `construct_at(q, *p)` extract an Advanced
-pointee just as `let result: T = *p` does. A function taking `mod T*` can do
+pointee just as `let result: T = *p` does. A function taking `mut T*` can do
 this, but must document the resulting lifetime obligation. For ordinary
 in-place changes, call a method through the pointer. For an independent value,
 use `copy *p` if cloning is supported. To consume an automatic local, prefer
@@ -815,7 +815,7 @@ try to destroy that inactive slot. Taking a pointer is not a way to cancel
 automatic field cleanup.
 
 Basic pointees are still copied, not consumed. `copy *file_pointer` clones a
-live, copyable pointee and leaves it active; it does not require pointee `mod`.
+live, copyable pointee and leaves it active; it does not require pointee `mut`.
 Either eligible source form may replace a valid indirect destination. Exact
 self-assignment remains a no-op; when source and destination can alias, the
 backend compares their storage addresses before destroying the destination.
@@ -826,13 +826,13 @@ backend compares their storage addresses before destroying the destination.
 module examples.file_value;
 
 struct File {
-    let mod handle: i32;
+    let mut handle: i32;
 
     fn init(handle: i32)
         : handle(handle) {
     }
 
-    fn drop() mod -> void {
+    fn drop() mut -> void {
         if (this->handle >= 0) {
             probable_os_close(this->handle);
             this->handle = -1;
@@ -841,7 +841,7 @@ struct File {
 }
 
 fn transfer() -> void {
-    let mod input: File = File(probable_os_open("input.dat"));
+    let mut input: File = File(probable_os_open("input.dat"));
     let output: File = input; // destructive relocation; input is inactive
 } // output.drop closes the handle exactly once
 ```
@@ -927,7 +927,7 @@ because they declare `drop`:
 
 ```huc
 fn submit_if(ready: bool) -> void {
-    let mod job: Job = Job(7);
+    let mut job: Job = Job(7);
 
     if (ready) {
         submit(job); // job is Inactive on this path
@@ -943,7 +943,7 @@ make that visible to the compiler:
 
 ```huc
 fn submit_if(ready: bool) -> void {
-    let mod job: Job = Job(7);
+    let mut job: Job = Job(7);
 
     if (ready) {
         submit(job);
@@ -986,7 +986,7 @@ and pass that saved number to `merge`. For `compare_versions`, clone the
 first argument before transferring the original into the second.
 
 The check does not prove pointer lifetimes. An existing raw observer is not
-updated when a value moves. Extraction through `mod T*` also leaves an
+updated when a value moves. Extraction through `mut T*` also leaves an
 aliased local's tracked state unchanged, so a later invalid use by name can
 escape the check as well (section 7.3). See
 [language specification section 6.12](language-specification.md#612-checked-use-of-relocated-roots)
@@ -998,8 +998,8 @@ A writable destination can be replaced by destructively relocating another
 value:
 
 ```huc
-let mod current: File = File(probable_os_open("old.dat"));
-let mod replacement: File = File(probable_os_open("new.dat"));
+let mut current: File = File(probable_os_open("old.dat"));
+let mut replacement: File = File(probable_os_open("new.dat"));
 
 current = replacement;
 ```
@@ -1027,8 +1027,8 @@ Assignment to a destination the compiler tracks as inactive skips destination
 destruction and begins a new active lifetime:
 
 ```huc
-let mod first: File = File(probable_os_open("a.dat"));
-let mod second: File = first; // destructive relocation; first inactive
+let mut first: File = File(probable_os_open("a.dat"));
+let mut second: File = first; // destructive relocation; first inactive
 
 first = File(probable_os_open("b.dat")); // first active again
 ```
@@ -1050,7 +1050,7 @@ pending automatic cleanup reaches the slot.
 A structure may declare at most one destructor body:
 
 ```huc
-fn drop() mod -> void;
+fn drop() mut -> void;
 ```
 
 It must:
@@ -1077,16 +1077,16 @@ After `drop` returns, fields are destroyed in reverse declaration order.
 struct Session {
     let log: Logger;
     let socket: Socket;
-    let mod native_transaction: i64;
+    let mut native_transaction: i64;
 
-    fn init(mod log: Logger, mod socket: Socket, native_transaction: i64)
+    fn init(mut log: Logger, mut socket: Socket, native_transaction: i64)
         : log(log),
           socket(socket),
           native_transaction(native_transaction),
     {
     }
 
-    fn drop() mod -> void {
+    fn drop() mut -> void {
         if (this->native_transaction != 0) {
             probable_abort_transaction(this->native_transaction);
             this->native_transaction = 0;
@@ -1196,18 +1196,18 @@ construct_at(slot, File(handle)); // inactive slot becomes a live File
 destruct_at(slot); // close the File; its slot becomes inactive again
 ```
 
-`slot` has type `mod File*`. It must point to valid, writable storage of the
+`slot` has type `mut File*`. It must point to valid, writable storage of the
 right size and alignment. Neither operation allocates or frees that storage,
 nulls the pointer, or registers automatic cleanup. Constructors and `drop`
 methods still perform whatever resource operations their bodies specify.
 
-`construct_at(pointer, value)` infers the type from `mod T*` and returns
+`construct_at(pointer, value)` infers the type from `mut T*` and returns
 the same pointer. It evaluates the pointer once, then initializes that slot
 from the value expression. This follows ordinary initialization:
 
 - Basic values copy.
 - Advanced values transfer from an eligible source, leaving that source
-  inactive. A named source needs binding `mod`.
+  inactive. A named source needs binding `mut`.
 - `copy value` explicitly clones when supported.
 - `T(arguments)` constructs directly in the slot; it does not first create
   and move a temporary. This also preserves the final `this` address.
@@ -1232,8 +1232,8 @@ replace a live value; use `construct_at` to initialize an inactive slot.
 **Automatic cleanup is not changed through aliases.** For example:
 
 ```huc
-let mod file: File = File(first_handle);
-let slot: mod File* = &file;
+let mut file: File = File(first_handle);
+let slot: mut File* = &file;
 
 destruct_at(slot); // file's tracked state is unchanged, but its old value is gone
 construct_at(slot, File(second_handle)); // restore a live File before scope exit
@@ -1259,8 +1259,8 @@ library family. HUC0 uses a concrete type and positive literal count; HUC1
 can resolve a type parameter and compile-time count into that form.
 
 ```huc
-let mod storage: raw_storage<File, 2> = raw_storage<File, 2>();
-let slots: mod File* = storage_ptr(&storage);
+let mut storage: raw_storage<File, 2> = raw_storage<File, 2>();
+let slots: mut File* = storage_ptr(&storage);
 construct_at(slots, File(first_handle));
 construct_at(slots + 1, File(second_handle));
 
@@ -1270,7 +1270,7 @@ destruct_at(slots); // close the first File
 ```
 
 `storage_ptr` evaluates its storage-pointer operand once. A writable storage
-pointer gives `mod T*`; a read-only one gives `T*`. Obtaining the pointer does
+pointer gives `mut T*`; a read-only one gives `T*`. Obtaining the pointer does
 not read or initialize the element region. `size_of<T>()` and `align_of<T>()`
 return target layout constants of type `usize`; the region occupies
 `N * size_of<T>()` bytes aligned for `T`. Reject zero counts, incomplete
@@ -1312,7 +1312,7 @@ fn inspect(document: Document*) -> void {
     // raw observation; caller retains the value
 }
 
-fn revise(document: mod Document*) -> void {
+fn revise(document: mut Document*) -> void {
     // writable observation; caller retains the value
 }
 
@@ -1324,7 +1324,7 @@ fn consume(document: Document) -> void {
     // consumes when Document is Advanced; destroys it on return
 }
 
-fn relay(mod document: Document) -> void {
+fn relay(mut document: Document) -> void {
     probable_send(document); // transfers the Advanced parameter onward
 }
 ```
@@ -1332,7 +1332,7 @@ fn relay(mod document: Document) -> void {
 For an Advanced `Document`:
 
 ```huc
-let mod document: Document = Document(...);
+let mut document: Document = Document(...);
 
 inspect(&document); // observation; no relocation
 revise(&document); // writable observation
@@ -1347,7 +1347,7 @@ gives the section 7.5 check one fixed order to follow.
 ```huc
 fn compare_versions(left: Document, right: Document) -> i32;
 
-let mod document: Document = Document(...);
+let mut document: Document = Document(...);
 let ordering: i32 = compare_versions(copy document, document);
 ```
 
@@ -1396,7 +1396,7 @@ Returning an Advanced value destructively relocates it:
 
 ```huc
 fn open_file(path: text::View) -> File {
-    let mod result: File = File(probable_os_open(path));
+    let mut result: File = File(probable_os_open(path));
     return result; // relocation; result becomes inactive
 }
 ```
@@ -1442,7 +1442,7 @@ import std.collections as collections;
 // Point, HeapText, and Widget refer to the example types defined above.
 
 fn point_values() -> void {
-    let mod points: collections::Vector<Point> =
+    let mut points: collections::Vector<Point> =
         collections::Vector<Point>();
     let point: Point = Point(3, 4);
 
@@ -1451,9 +1451,9 @@ fn point_values() -> void {
 }
 
 fn text_values() -> void {
-    let mod texts: collections::Vector<HeapText> =
+    let mut texts: collections::Vector<HeapText> =
         collections::Vector<HeapText>();
-    let mod text: HeapText = HeapText("first");
+    let mut text: HeapText = HeapText("first");
 
     texts.push(text); // destructive relocation; text becomes inactive
     text = HeapText("second");
@@ -1480,9 +1480,9 @@ transfer itself. For example, with the `File` type above:
 // Preconditions: storage holds *length live Files, *length > 0,
 // and length points to separate writable container bookkeeping.
 // The container, not automatic element cleanup, manages these slots.
-fn pop_file(storage: mod File*, length: mod usize*) -> File {
+fn pop_file(storage: mut File*, length: mut usize*) -> File {
     let last: usize = *length - 1;
-    let mod result: File = *(storage + last);
+    let mut result: File = *(storage + last);
     *length = last; // exclude the inactive slot from later element cleanup
     return result; // direct local transfer; result's cleanup is suppressed
 }
@@ -1501,13 +1501,13 @@ Extraction needs no separate intrinsic. For example, alongside `pop_file`:
 ```huc
 // The live prefix has *length elements; storage has spare capacity for one more.
 // length points to separate bookkeeping, not into the element storage.
-fn push_file(storage: mod File*, length: mod usize*, mod file: File) -> void {
+fn push_file(storage: mut File*, length: mut usize*, mut file: File) -> void {
     construct_at(storage + *length, file);
     *length += 1; // publish the slot only after construction succeeds
 }
 
 // The container owns cleanup of exactly the live prefix.
-fn clear_files(storage: mod File*, length: mod usize*) -> void {
+fn clear_files(storage: mut File*, length: mut usize*) -> void {
     while (*length > 0) {
         *length -= 1;
         destruct_at(storage + *length);
@@ -1558,7 +1558,7 @@ import std.io as io;
 import std.memory as memory;
 
 struct Image {
-    let mod pixels: mod u8*;
+    let mut pixels: mut u8*;
     let width: usize;
     let height: usize;
     let stride: usize;
@@ -1575,12 +1575,12 @@ struct Image {
         return this->stride * this->height;
     }
 
-    fn fill(value: u8) mod -> void {
+    fn fill(value: u8) mut -> void {
         memory::fill_bytes(this->pixels, value, this->byte_count());
     }
 
     fn clone() -> Image {
-        let mod result: Image = Image(this->width, this->height);
+        let mut result: Image = Image(this->width, this->height);
         memory::copy_bytes(
             result.pixels,
             this->pixels,
@@ -1589,7 +1589,7 @@ struct Image {
         return result;
     }
 
-    fn drop() mod -> void {
+    fn drop() mut -> void {
         if (this->pixels) {
             memory::free_raw_bytes(this->pixels, this->byte_count());
             this->pixels = null;
@@ -1601,7 +1601,7 @@ fn print_shape(image: Image*) -> void {
     io::println(image->width, "x", image->height);
 }
 
-fn invert(image: mod Image*) -> void {
+fn invert(image: mut Image*) -> void {
     probable_invert_bytes(image->pixels, image->byte_count());
 }
 
@@ -1610,7 +1610,7 @@ fn upload(image: Image) -> void {
 } // image is destroyed here
 
 fn main() -> i32 {
-    let mod working: Image = Image(1920, 1080);
+    let mut working: Image = Image(1920, 1080);
     working.fill(0);
 
     print_shape(&working); // observe
@@ -1618,7 +1618,7 @@ fn main() -> i32 {
 
     let snapshot: Image = copy working; // logical copy through Image.clone
 
-    let mod outgoing: Image = working; // working becomes inactive
+    let mut outgoing: Image = working; // working becomes inactive
     print_shape(&outgoing);
     upload(outgoing); // outgoing becomes inactive
 
@@ -1716,18 +1716,18 @@ relocation behavior, C++ references, or C++ value-category overloads.
 | HUC operation | Closest C++20 operation | Important difference |
 |---|---|---|
 | `let value: T = T(...)` | `const T value(...)` | HUC is fixed by default |
-| `let mod value: T = T(...)` | `T value(...)` | HUC spells writable storage explicitly |
+| `let mut value: T = T(...)` | `T value(...)` | HUC spells writable storage explicitly |
 | `let b: T = a` for Basic `T` | `T b = a` | Both copy |
 | `let b: T = a` for Advanced `T` | `T b = std::move(a)` | HUC destructively relocates and ends the source lifetime |
 | `copy a` for Advanced `T` | Copy construction | HUC makes a potentially expensive copy explicit |
 | `destination = copy source` | Copy assignment | HUC composes clone plus replace |
 | `destination = source` for Advanced `T` | Move assignment | HUC drops the destination, then performs non-overridable relocation |
 | `T*` | `const T*` by default | HUC pointer is always raw and unchecked |
-| `mod T*` | `T*` | Writable pointee |
+| `mut T*` | `T*` | Writable pointee |
 | `T**` and longer chains | Nested raw pointers with corresponding access permissions | HUC permits chains, including through aliases; none of the levels owns its pointee |
 | `&value`, including a pointer slot | `std::addressof(value)` | HUC accepts addressable data places and cannot overload `&`; it does not materialize a temporary |
 | `fn clone() -> T` | Copy constructor, often clone function | Invoked only by explicit logical copying |
-| `fn drop() mod -> void` | Destructor body | Both run the body before reverse member cleanup; HUC has no inheritance cleanup or exception unwinding |
+| `fn drop() mut -> void` | Destructor body | Both run the body before reverse member cleanup; HUC has no inheritance cleanup or exception unwinding |
 | Fixed HUC destructive relocation | Move constructor/assignment | HUC ends the source lifetime and has no user hook |
 | Inactive source storage after relocation | Source remains alive after move construction | HUC source has no live object until reinitialized; C++ moved-from guarantees depend on the type, with standard-library types generally valid but unspecified |
 | Advanced binding from `*p`, including arguments and returns | Move construction from `std::move(*p)` | HUC ends the source lifetime without drop or source clearing; the programmer must prevent later source cleanup. Plain `T v = *p` in C++ normally copies instead |
@@ -1848,5 +1848,5 @@ WG21's relocation work:
   deliberately defers.
 
 These papers do not define HUC semantics. In particular, HUC's bitwise
-relocation rule, `mod` requirement, and
+relocation rule, `mut` requirement, and
 unchecked address-dependence contract are HUC decisions.

@@ -32,11 +32,18 @@ specialization pattern: `<T: auto><T*>` is partial; `<><i32>` is complete.
 Function calls may omit angles when arguments are deduced, defaulted, or absent:
 `choose(a, b)` and `@helper()`.
 `let1` and `import1` retain compiler-only bindings and imports. A module-level
-`let1` behaves like a typed, scoped macro: importers see it, a `let1 mod` value
-can change, and declaring the same name twice is an error. `if1`, `for1`,
+`let1` is typed compiler storage. Each module has its own state, so changing
+an imported `let1 mut` does not change the dependency or a sibling module.
+Imports merge completed states in source order: the later value wins for the
+same object, even if unchanged. Pointers, structures, and allocations follow
+the same rule. Declaring the same name twice is still an error. `if1`, `for1`,
 and `while1` decide which code is prepared. Fields and working locals use `let`.
 Compiler-only types and operations are accepted for compiler use, but cannot
 survive in runtime storage, signatures, or executable code.
+
+Compiler calls use the caller's active state; retained runtime definitions and
+type layouts use their defining module's state. See the
+[module-state walkthrough](docs/compilation-model.md#87-one-walkthrough-values-objects-and-pointers).
 
 Specializations are selected by structural patterns, without declaration-level
 conditions. Use `if1` inside a selected body to choose code or report an invalid
@@ -45,10 +52,15 @@ A failed body does not cause another specialization to be tried. Patterns cover
 C++'s structural forms, including repeated binders such as `<T, T>` and family
 binders such as `<C<T>>`, so traits like `is_same` are library code.
 
-`module` provides a namespace. `import` processes source once as part of the
-same translation unit, preserving the imported code's lexical scope. Generics
-can accept caller-defined types without reverse imports. Staging writes one
-flattened HUC0 file, using `module name;` sections to preserve namespaces.
+Each file is a module with its own namespace. `import` processes source once
+as part of the same translation unit, preserving the imported code's lexical
+scope. A file may name only the modules it imports, plus modules they
+re-export with `pub import`. Declarations are private to their file unless
+marked `pub`. A specialization lives in the file that declares its family or
+one of its types. Generics can accept caller-defined types without reverse
+imports. Staging writes one flattened HUC0 file, using `module name;` sections
+to preserve namespaces. The [compilation model](docs/compilation-model.md)
+explains these rules.
 
 Generated code is a value. Compile-time functions return `compiler::Code`,
 built with `compiler::local`, `compiler::module`, or `compiler::around`, and
@@ -113,7 +125,7 @@ the semicolon. A temporary used by `print(make_text().view())` stays alive
 through the call; saving only its view does not extend its lifetime. See
 [temporary lifetimes](docs/value-semantics.md#91-when-temporary-values-are-destroyed).
 
-Declarations use `name: Type`, with `mod` before a writable name. Conditions
+Declarations use `name: Type`, with `mut` before a writable name. Conditions
 stay parenthesized, control-flow bodies require braces, and returning a value
 uses explicit `return`. Digit separators and trailing commas are optional. A small
 [formatting guide](docs/formatting.md) gives a default style without making
@@ -144,10 +156,10 @@ fn consume(widget: Widget) -> void {
 } // destroys the transferred value unless it was transferred onward
 
 fn main() -> i32 {
-    let mod first: Widget = Widget(42);
+    let mut first: Widget = Widget(42);
     inspect(&first); // observes; first is unchanged
 
-    let mod second: Widget = first; // transfers; first is inactive
+    let mut second: Widget = first; // transfers; first is inactive
     let third: Widget = copy second; // explicit logical duplication
     consume(second); // transfers; second becomes inactive
     inspect(&third);
@@ -187,7 +199,7 @@ source and destination are distinct slots:
 `&value` returns a raw pointer and does not extend the value's lifetime.
 To bind a pointee into an inline `T`, use `*pointer`. This copies a Basic
 value or transfers an Advanced value. An Advanced transfer requires a
-`mod T*` and leaves the old slot inactive without clearing its bytes.
+`mut T*` and leaves the old slot inactive without clearing its bytes.
 The programmer must prevent cleanup of that old slot; the compiler does not
 cancel automatic cleanup through pointer aliases. For example, a container
 can remove the extracted slot from its initialized range.
@@ -198,11 +210,11 @@ leaving it active. The pointee must be live and accessible in either case.
 ### Permissions and cleanup
 
 - Relocating a named Advanced value requires a writable source slot
-  (`mod` before its name). The compiler manages source cleanup for whole
+  (`mut` before its name). The compiler manages source cleanup for whole
   locals, parameters, and fresh results. Extraction through `*pointer` uses
   programmer-managed source cleanup instead. Direct field and array-element
   moves remain rejected; HUC does not track partially inactive objects.
-- Copying a raw pointer does not clear it. Pointee `mod` may be dropped but
+- Copying a raw pointer does not clear it. Pointee `mut` may be dropped but
   never gained by ordinary pointer conversion.
 - Replacing an existing value requires a writable destination. An active
   Advanced destination is cleaned up before replacement. Replacing a raw
@@ -223,7 +235,7 @@ pointer. Basic values copy, Advanced values transfer, and `T(arguments)`
 constructs directly in that slot. `destruct_at(pointer)` destroys a live value
 and its fields without freeing the slot's storage.
 
-Both infer the type from `mod T*`. Neither changes automatic cleanup state
+Both infer the type from `mut T*`. Neither changes automatic cleanup state
 through aliases. The programmer supplies valid storage and tracks which
 slots are live. See [manual storage lifetimes](docs/value-semantics.md#92-constructing-and-destroying-values-in-manual-storage).
 
@@ -267,7 +279,8 @@ it is not a prerequisite for the first implementation slice.
 - [Value semantics and special operations](docs/value-semantics.md)
 - [Detailed use cases and examples](docs/use-cases-and-examples.md)
 - [HUC language specification](docs/language-specification.md)
-- [Compiler architecture](docs/transpiler-architecture.md)
+- [Compilation model: modules, visibility, and packages](docs/compilation-model.md)
+- [Compiler architecture](docs/compiler-architecture.md)
 - [Language grammar](docs/huc.ebnf)
 - [Default formatting guide](docs/formatting.md)
 - [Resource-transfer example](examples/ownership.huc0)
