@@ -69,6 +69,13 @@ as `let x: i32 = @compute();` never inserts code into its caller. Inside an `@`
 or `#` operand, and in code already running in the compiler, compiler calls
 need no further `@`.
 
+Built-in [attributes](docs/language-specification.md#49-attributes) use one
+bracket syntax right after the keyword: `struct [align(64)] Slot`,
+`struct [pack(1)] Header`, `let [bits(3)] mut mode: u32;`,
+`fn [inline] add(...)`, and `if [unlikely] (err)`. A generic family's list is
+deferred with its body, so it can use the family's parameters, and `#` can
+generate attributes. HUC has no user-defined attributes.
+
 Compiler calls use ordinary parameters: the argument decides whether each
 receives a **value binding** or an **expression binding**. A `let1` or actual
 compiler local supplies a value; a runtime `let` supplies an unevaluated

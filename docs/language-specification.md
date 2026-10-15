@@ -231,6 +231,10 @@ identifier := [_A-Za-z][_A-Za-z0-9]*
 Later revisions may adopt Unicode identifier classes without changing program
 semantics.
 
+A lone `_` is not a usable name. It marks a place where no name is bound:
+`import a.b as _;` (section 2.1) and an unnamed padding field (section 4.9.9).
+It can never be referred to, so one scope may contain several of them.
+
 Whitespace separates tokens but is otherwise insignificant. A line comment
 starts with `//`. A block comment starts with `/*` and ends at the next `*/`;
 block comments do not nest.
@@ -507,7 +511,8 @@ Nullability is intentionally not tracked in the type system.
 ### 4.6 Structures
 
 `struct` declares a nominal runtime type. Fields are laid out in declaration
-order, subject to target ABI alignment and padding.
+order, subject to target ABI alignment and padding and to the layout
+attributes `align`, `pack`, and `bits` (section 4.9).
 
 ```huc
 struct Pair {
@@ -591,6 +596,429 @@ type Size = usize;
 ```
 
 An alias is another name for the same type, not a new type.
+
+### 4.9 Attributes
+
+An attribute tells the compiler something about a declaration or a statement:
+its layout, how to optimize it, or how to call it. Attributes use one syntax
+everywhere. Only the built-in attributes of section 4.9.4 exist; HUC has no
+user-defined attributes (section 15).
+
+#### 4.9.1 Syntax
+
+An attribute list is written in brackets directly after a declaration or
+statement keyword:
+
+```huc
+struct [align(64)] Cat { ... }
+struct [pack(1)] Header { ... }
+pub struct [align(64)] Slot { ... }         // pub stays first
+
+fn [inline] add(a: i32, b: i32) -> i32 { ... }
+fn [cold] fail(code: i32) -> never { ... }
+fn [callconv(gpu_kernel), launch_bounds(256)] saxpy(...) -> void { ... }
+
+let [align(64)] mut counter: u64;           // a global, field, or local
+
+if [unlikely] (err != 0) { ... } else { ... }
+while [likely] (more) { ... }
+for [unroll(4)] (let mut i: usize = 0; i < n; i += 1) { ... }
+```
+
+These keywords take a list: `struct`, `fn`, and `let` for declarations, and
+`if`, `else`, `while`, and `for` for statements. A constructor takes it after
+`fn`: `fn [inline] init(...)`. A foreign declaration is written with `fn`, so
+it takes a list in the same place: `extern "C" fn [cold] abort() -> never;`.
+
+A parameter has no keyword, so its list comes before the parameter:
+
+```huc
+fn copy([noalias] dst: mut u8*, [noalias] src: u8*, count: usize) -> void;
+```
+
+`module`, `import`, `let1`, `type`, and `return` take no list, and neither do
+`if1`, `for1`, and `while1`. The numbered forms run during preparation and
+leave no runtime branch or loop for a hint to apply to.
+
+An attribute is a name, such as `inline`, or a name with arguments, such as
+`align(64)`. The list is never empty. Attribute names form their own small
+namespace and are recognized only inside an attribute list, so a function
+named `inline` or `cold` does not clash with them.
+
+The list sits after the keyword so that every attribute has one position, and
+the keyword already says what kind of declaration or statement it modifies.
+Brackets keep it apart from the parentheses of a condition or a parameter list.
+
+#### 4.9.2 Arguments
+
+Each attribute defines the kind of each argument:
+
+- **Integer.** In HUC0, the argument is an integer literal. In HUC1, it may be
+  any compiler expression of integer type; expansion replaces it with a
+  literal.
+- **Option.** The argument is one name from a fixed list that the attribute
+  defines, such as `gpu_kernel` in `callconv(gpu_kernel)`. It is not looked up
+  as a variable or type, and it is spelled the same in HUC0 and HUC1. To choose
+  an option at compile time, generate the attribute with `#` (section 4.9.6).
+
+```huc
+struct [align(target.cache_line)] Slot { ... }   // HUC1
+struct [align(64)] Slot { ... }                  // after expansion
+```
+
+An integer argument may have any integer type. Its value is checked against
+the attribute's range, in HUC, before anything reaches LLVM. A value outside
+the range is a diagnostic:
+
+| Attribute | Valid values |
+|---|---|
+| `align(N)` | A power of two, at least the natural alignment, and at most the target's largest supported alignment |
+| `pack(N)` | A power of two, at least 1; a value at or above every field's alignment has no effect |
+| `bits(N)` | For a named integer field, 1 through the field type's width in bits; for a named `bool` field, exactly 1; for an unnamed field, 0 through the field type's width |
+| `unroll(N)` | At least 1, and at most `2^32 - 1`; `unroll(1)` means "do not unroll" |
+| `launch_bounds(N, M, K)` | `N` at least 1, and at most the target's largest GPU block size; `M` and `K` 0 or more, where 0 means no hint, as if the argument were left out. `launch_bounds(256, 0, 4)` sets only `N` and `K`. |
+
+#### 4.9.3 Rules
+
+- **Unknown names are errors.** A misspelled attribute is a diagnostic. It is
+  never ignored.
+- **Placement is checked.** Each attribute states what it may apply to.
+  `if [align(8)] (x)` is a diagnostic.
+- **Conflicts are checked.** `fn [inline, noinline]` is a diagnostic, and so is
+  the same attribute given twice.
+- **Hints are hints.** `cold`, `likely`, `unlikely`, and `unroll` never change
+  what a program means. `align`, `pack`, `bits`, and `callconv` do, so they are
+  part of the declaration's type or signature.
+
+#### 4.9.4 Built-in attributes
+
+| Attribute | Applies to | Meaning | LLVM mapping |
+|---|---|---|---|
+| `align(N)` | `struct`, `let` | Raise alignment to `N` (section 4.9.8) | Type layout; `align` on globals, allocas, and fields |
+| `pack(N)` | `struct` | Cap field alignment at `N`, like C's `#pragma pack(N)` (section 4.9.8) | Explicit field offsets in a packed struct type |
+| `bits(N)` | Field | Store an integer field in `N` bits, like C's `: N` (section 4.9.9) | Shifts and masks on the shared storage unit |
+| `inline` | `fn` | Inline every direct call (section 4.9.10) | `alwaysinline` |
+| `noinline` | `fn` | Never inline | `noinline` |
+| `cold` | `fn` | Rarely called | `cold` |
+| `likely`, `unlikely` | `if`, `else`, `while`, `for` | Branch probability | `llvm.expect` or branch weights |
+| `unroll(N)` | `while`, `for` | Unroll the loop `N` times | `llvm.loop.unroll.count` |
+| `noalias` | Pointer parameter | Memory reached through the pointer is not reached through other pointers during the call (section 4.9.10) | `noalias` |
+| `callconv(option)` | `fn` | Calling convention; the only option is `gpu_kernel` (section 4.9.10) | `ptx_kernel` or `amdgpu_kernel` |
+| `launch_bounds(N)`, `launch_bounds(N, M)`, `launch_bounds(N, M, K)` | `fn` with `callconv(gpu_kernel)` | As in CUDA's `__launch_bounds__` (section 4.9.10) | NVPTX `maxntid`, `minctasm`, `maxclusterrank`; AMDGPU `amdgpu-flat-work-group-size` of `1,N` |
+
+`if [likely] (c)` means `c` is expected to be true, and `if [unlikely] (c)`
+means it is expected to be false. A hint on the other branch is written on
+`else`: `else [likely] { ... }`. For `while` and `for`, the hint applies to the
+loop condition.
+
+There is no `callconv(c)`. A HUC function needs the C convention only when C
+code calls it, through a callback or an exported name. The
+[C interop design](c-interop.md) generates a C-convention entry point for each
+callback and export, so the HUC function keeps HUC's convention.
+
+#### 4.9.5 Generic families
+
+A generic family's attribute list is deferred, like its body (section 9.5).
+The parser decides whether a declaration is a family by skipping the balanced
+`[ ... ]`, reading the name, and checking for `<`:
+
+- **Not a family.** The list is parsed at once, like the rest of the
+  declaration.
+- **A family.** The list is kept as an opaque span. It is parsed only when a
+  specialization is selected and prepared, together with that
+  specialization's body.
+
+When the list is parsed, the family's binders are already bound, so its
+arguments may use them, even though the binders appear later in the source:
+
+```huc
+struct [align(Alignment)] Aligned<T: auto, Alignment: usize> {
+    let mut value: T;
+}
+
+fn example() -> void {
+    let mut a: Aligned<f32, 64>;   // prepared with [align(64)]
+    let mut b: Aligned<f32, 16>;   // a different type, with [align(16)]
+}
+```
+
+- **Errors are per specialization.** `Aligned<f32, 3>` is a diagnostic because
+  3 is not a power of two. `Aligned<f64, 2>` is a diagnostic because 2 is below
+  `f64`'s natural alignment. Errors in the list of a family that is never used
+  are not reported, as with its body.
+- **Each specialization has its own list.** A partial or full specialization,
+  such as `struct [align(8)] Aligned<T: auto><T*, 8>`, carries its own list,
+  parsed only when that specialization is selected. Specializations do not
+  inherit attributes from the primary declaration, just as they do not
+  inherit its body.
+- **Statement attributes need nothing extra.** An `unroll(Lanes)` inside a
+  generic function's body is deferred with the body.
+- **Variable families.** A generic `let` header's attributes apply to the
+  runtime variable produced by its selected body. They combine with that
+  variable's own attributes under section 9.4.
+
+#### 4.9.6 Generated attributes
+
+In HUC1, an attribute list entry may be a `#` insertion. The entry is `#`
+followed by one complete expression of type `compiler::Code`. The parser reads
+the longest expression it can, and the token after it must be `,` or `]`.
+Commas and brackets that belong to the expression, as in `#make<T, U>()` or
+`#codes[index]`, do not end the entry. Generated and written entries can be
+mixed.
+
+```huc
+module gpu_attrs;
+import1 compiler;
+
+pub fn kernel<>(gpu: bool) -> compiler::Code {
+    if (gpu) {
+        return compiler::local("callconv(gpu_kernel), launch_bounds(256)");
+    }
+    return compiler::local("");   // no attributes on the CPU
+}
+```
+
+```huc
+module app;
+import1 gpu_attrs;
+
+fn [#gpu_attrs::kernel(Gpu)] saxpy<Gpu: bool>(...) -> void { ... }
+```
+
+`saxpy<true>` is prepared with `[callconv(gpu_kernel), launch_bounds(256)]`.
+`saxpy<false>` is prepared with no attributes and appears in HUC0 as
+`fn saxpy(...)`.
+
+- **Result.** The inserted text must parse as zero or more attributes
+  separated by commas. The code value must be local code; module parts and
+  holes are diagnostics here.
+- **Empty results.** The attributes from all entries form one list. An empty
+  result contributes nothing, and its separator is dropped. If no attributes
+  remain, the brackets are dropped too. HUC0 never contains `[]`.
+- **Checks after insertion.** Unknown names, placement, conflicts, and ranges
+  are checked on the full list. Generated entries get no exemption.
+- **Order.** Entries are processed from left to right. Each entry is finished,
+  including evaluating its arguments, before the next one starts. In
+  `[align(current), #change_alignment()]`, `align` reads `current` before the
+  builder runs.
+- **HUC0 stays literal.** `#` disappears during expansion, so every HUC0
+  attribute list contains only built-in attributes with literal arguments.
+
+#### 4.9.7 When arguments are evaluated
+
+A compiler expression or `#` entry in an attribute list is evaluated when its
+declaration or statement is prepared, in the state that preparation uses
+(sections 9.8 and 12.2).
+
+**Once: types and program definitions.** The canonical layout of each struct
+type, including its struct and field attributes, is prepared once. So is each
+retained program definition: a runtime function or a `let` global. For an
+ordinary declaration, this uses the declaring module's state. For a
+specialization, it happens when the specialization is first prepared, in the
+defining module's state or the fresh private view of a late preparation. It
+never uses the state of the importer that requested it. A generic type's
+layout therefore depends only on its definition and its generic arguments.
+
+**Every time: compiler calls.** A compiler call behaves as if the callee were
+freshly prepared in evaluation mode, in the active requesting state. That
+preparation includes the callee's attribute list and the statement attributes
+in its body. Their expressions and builders run again on every call, with any
+changes to compiler state they make. Two identical calls run a builder twice.
+In evaluation mode, function and statement attributes are evaluated and
+checked, but they do not change what the call computes. Struct layout always
+comes from the canonical type.
+
+#### 4.9.8 Alignment and packing
+
+**`align(N)`.** `N` must not be smaller than the natural alignment; `align`
+never lowers alignment.
+
+- On a `struct`, it changes the type. Every value of the type is aligned to
+  `N`, wherever it is stored, and the type's size is rounded up to a multiple
+  of `N`. `align_of` and `size_of` report the new values.
+- On a `let` global or local, it changes only that variable's storage. The
+  type does not change.
+- On a field, it changes only that field's offset. Because the field's
+  alignment rises, the containing struct's alignment rises with it.
+
+**`pack(N)`.** A field's *required alignment* is the larger of its type's
+alignment and the field's own `align` value, if it has one. Its alignment in
+the packed struct is the smaller of its required alignment and `N`. Fields are
+laid out in declaration order using those alignments. The struct's alignment
+is the largest field alignment after the cap, and its size is rounded up to
+that. In `struct [pack(8)] R { let tag: u8; let [align(8)] value: u8; }`,
+`value` is at offset 8. When `pack` and `align` both appear on a struct, the
+cap is applied first, and then `align` raises the struct's own alignment.
+
+`pack` never lowers an alignment that `align` asked for, even through nesting.
+A type's *explicit alignment* is the largest of:
+
+- the `align` value on the type itself;
+- the `align` value on any of its fields;
+- the explicit alignment of the type of any inline field, including the
+  element type of `raw_storage`.
+
+Pointer fields do not count, because the pointee is not stored inline. If a
+field's own `align` value or its type's explicit alignment is larger than `N`,
+that is a diagnostic:
+
+```huc
+struct [align(64)] Value {
+    let number: u64;
+}
+
+struct Wrapper {
+    let value: Value;     // Wrapper's explicit alignment is 64
+}
+
+struct [pack(1)] Record {
+    let tag: u8;
+    let direct: Value;    // diagnostic: Value would sit at offset 1
+    let wrapped: Wrapper; // diagnostic: the Value inside would too
+}
+```
+
+Ordinary natural alignment is not protected. A plain `u64` field in a
+`pack(1)` struct is allowed and becomes under-aligned.
+
+A field is *under-aligned* when its alignment after the cap is smaller than its
+type's alignment. Reading and writing an under-aligned field by name is
+allowed; the compiler emits unaligned loads and stores. Forming its address is
+a diagnostic. That includes `&` on the field or on anything inside it, and
+calling a method on it. Copy the value into a local first.
+
+The compiler would also need the field's address to run a constructor or a
+destructor on it, so two more rules apply:
+
+- **The field's type must be Basic.** An Advanced type is a diagnostic. A Basic
+  type has no `drop`, so no destructor needs the field's address.
+- **No `init` may run on the field.** Guaranteed destination construction
+  (section 4.6) lets `init` observe its final `this` address, and an
+  under-aligned field cannot provide an aligned one. Any construction of the
+  field that runs an `init` is a diagnostic. That includes a constructor
+  expression in its initializer entry, default initialization that calls
+  `init`, and an `init` of any struct nested inside the field. Construct the
+  value in an aligned local, then copy it in:
+
+```huc
+struct [pack(1)] Record {
+    let tag: u8;
+    let point: Point;              // under-aligned; Point has an init
+
+    fn init(tag: u8, point: Point) : tag(tag), point(point) {}
+}
+
+fn make_record() -> Record {
+    let p: Point = Point(1, 2);    // init runs at an aligned address
+    return Record(7, p);           // plain field-by-field copy into point
+}
+```
+
+There is no file-wide packing setting. Each struct states its own `pack`.
+
+#### 4.9.9 Bit-fields
+
+`bits(N)` applies to a field. The field stores only `N` bits, and neighboring
+bit-fields share storage units, as in C:
+
+```huc
+struct Flags {
+    let [bits(3)] mut mode: u32;
+    let [bits(1)] mut ready: bool;
+    let [bits(4)] _: u32;          // unnamed padding
+    let [bits(6)] mut count: i32;
+}
+```
+
+- **Types.** The field's type must be a built-in signed or unsigned integer
+  type, or `bool`. Character types, pointers, floating-point types, and
+  structures are diagnostics. The field's type stays `u32`; `bits` does not
+  create a 3-bit type.
+- **Unnamed fields.** A field named `_` is padding. It introduces no name and
+  is never initialized, read, or assigned, so a fixed `_` field needs no
+  initializer. Its bits have no promised value. One structure may have several
+  `_` fields (section 3). `[bits(0)] _` moves the next field to a new storage
+  unit, using the target's C rule for where that unit starts.
+- **Reading.** A read produces a value of the field's type. An unsigned field
+  is zero-extended, and a signed field is sign-extended.
+- **Writing.** The value must first be valid for the field's type under the
+  normal assignment rules. Then its low `N` bits are stored. Storing `10` in an
+  unsigned 3-bit field gives `2`; storing `7` in a signed 3-bit field gives
+  `-1`. C++ leaves this result implementation-defined; HUC defines it, and it
+  matches what GCC and Clang do. Compound assignment computes in the field's
+  type, then stores the low `N` bits. Constructors and default initialization
+  use the same store rule.
+- **No address.** `&flags->mode` is a diagnostic, even when `N` equals the
+  type's full width. Copy the value into a local, pass the local's address, and
+  write the result back. The compiler never inserts that copy silently.
+- **Not atomic.** A store reads and rewrites the shared storage unit and keeps
+  the neighboring fields. Two threads that write different bit-fields in the
+  same unit race (section 8.3). Bit-fields are not a safe way to access device
+  registers.
+- **Other attributes.** `align` on a bit-field is a diagnostic, as `alignas` on
+  a bit-field is in C++.
+- **Layout.** Bit-fields are placed in storage units by the target's C rules,
+  including in structures with `pack`. A HUC structure with bit-fields can
+  therefore mirror a C structure on the same target. The layout is not a
+  portable wire format: it depends on the target and its byte order.
+
+The compiler does not reimplement each target's bit-field rules. For a
+structure with any `bits` field, it builds a layout-only record in Clang and
+reads Clang's record layout. A bit-field uses its corresponding C integer
+type, because that type affects placement. Other built-in fields use their
+corresponding target C types where available. Concrete HUC structures and
+`raw_storage` use record or array descriptions of their layout; their methods,
+construction, and cleanup are not translated to C.
+
+These descriptions must preserve natural type alignment separately from
+explicit alignment on types and fields, including through nested records.
+Replacing every ordinary field with an explicitly aligned byte array is not
+valid: on the Microsoft ABI, explicit alignment can survive a packing cap
+that would lower natural alignment. Matching a field's size and alignment
+before packing is therefore not enough.
+
+Apply `pack(N)` as Clang's maximum field alignment, and add an explicit
+alignment only where the HUC layout has one. The record description must
+preserve field offsets, bit positions, size, alignment, and the way the type
+is aligned when nested in another record. An implementation that cannot
+represent a layout exactly must diagnose that unsupported case, not silently
+approximate it. Structures without `bits` use section 4.9.8. Reusing Clang
+does not bypass HUC's alignment and under-aligned-field checks.
+
+#### 4.9.10 Function and parameter attributes
+
+**`inline`.** Every direct call to the function is inlined. A call that cannot
+be inlined is a diagnostic, not a silent fallback. Examples are a call cycle
+made only of `inline` functions and a declaration with no body.
+
+**`noalias`.** Applies to a pointer parameter. While the call runs, memory that
+is read or written through this parameter, or through a pointer derived from
+it, is not also accessed through a pointer that was not derived from it. The
+rule covers only memory that is modified during the call, by any means; memory
+that nothing modifies may be read through any pointer. Breaking the rule is
+undefined behavior. This is LLVM's `noalias` rule, and it is close to C's
+`restrict`.
+
+**`callconv(gpu_kernel)`.** A function without `callconv` uses HUC's own calling
+convention. `gpu_kernel` marks a GPU entry point. It lowers to `ptx_kernel` on
+NVPTX and `amdgpu_kernel` on AMDGPU, and it is a diagnostic on any other
+target. A `gpu_kernel` function returns `void` and cannot be called directly
+from HUC code; it is started through the GPU library's launch call.
+
+**`launch_bounds`.** Its arguments follow CUDA's `__launch_bounds__` and are of
+two kinds:
+
+- **`N` and `K` are limits.** The compiler may optimize on the promise that no
+  launch uses more than `N` threads per block, or more than `K` blocks per
+  thread-block cluster. A launch that breaks either limit fails, and the GPU
+  library reports the error.
+- **`M` is a hint.** It asks the compiler to allow at least `M` blocks to run
+  at once on each multiprocessor, which guides NVIDIA's register allocation.
+  AMDGPU has no equivalent, so it has no effect there.
+
+Thread-block clusters exist only on NVIDIA Hopper (`sm_90`) and later. On a
+target without clusters, no launch can exceed `K`, so a positive `K` has no
+effect. LLVM's `maxclusterrank` is emitted only for targets with clusters.
 
 ## 5. Expressions and execution order
 
@@ -1182,7 +1610,8 @@ are rejected. Pointer types, including pointer chains, are complete even when
 their ultimate pointee's layout is not yet known.
 
 Size includes padding and is the stride of contiguous `T` slots. Alignment is
-the byte alignment required for a `T` address. Both queries take no runtime
+the byte alignment required for a `T` address. Both include the effect of
+layout attributes on `T` (section 4.9.8). Both queries take no runtime
 arguments, evaluate no values, and start or end no lifetimes. A pointer's size
 is its own representation size, not its pointee's size. Layout arithmetic for
 allocations must be checked for overflow before allocation or pointer use.
@@ -1586,7 +2015,9 @@ explicit compile-time diagnostics.
 ### 7.3 Conditions and loops
 
 `if`, `for`, and `while` are ordinary control flow in a runtime function.
-Their compile-time forms are specified in section 9.
+Their compile-time forms are specified in section 9. `if`, `else`, `while`,
+and `for` may carry branch and loop hints, such as `if [unlikely] (err)`
+(section 4.9).
 
 Conditions and loop headers require parentheses. Every `if`, `else`, `while`,
 and `for` body requires braces, even for one statement or an empty body.
@@ -2098,6 +2529,38 @@ initializers, inline values versus raw-pointer forms, pointee permissions,
 and slot mutability. The family name is not itself a runtime variable; only a concrete
 request such as `counter<true>` denotes one.
 
+**Attributes.** A selected family header may carry an attribute list, and so
+may the ordinary `let` produced by its body. Both lists apply to that one
+runtime variable, not to two separate storage objects:
+
+```huc
+let [align(Alignment)] counter<Alignment: usize> {
+    let mut counter: u64 = 0;
+}
+```
+
+Preparing `counter<64>` puts `[align(64)]` on the emitted runtime declaration.
+The compiler processes the selected header's list first, after binding its
+generic arguments and before preparing its body. It processes the inner
+declaration's list when that declaration is reached. The header cannot name
+compiler locals declared inside the body.
+
+Append the inner list to the header list and check the combined list against
+the resulting runtime variable. Attribute expressions and builders are not
+evaluated again when the lists combine. The usual duplicate rule applies,
+even if both occurrences have the same argument; neither list overrides the
+other. For example, requesting this family is a diagnostic:
+
+```huc
+let [align(64)] duplicate_alignment<> {
+    let [align(16)] mut duplicate_alignment: u64 = 0;
+}
+```
+
+The error is two `align` attributes on one variable. No attributes from an
+unselected declaration or branch contribute to the result. This rule does
+not relax the restriction on `#` inside a generic `let` selection body.
+
 Generic `let` is permitted at module scope and at function or nested-block scope. It
 is not permitted as an instance field. Every statically requested
 specialization is emitted at the family declaration site. Consequently, a
@@ -2119,13 +2582,16 @@ only what is necessary to avoid false brace matches:
 - line comments;
 - block comments.
 
-The following bodies remain opaque until selected:
+The same scanner finds the closing `]` of a family declaration's attribute
+list. The following bodies remain opaque until selected:
 
 - every unchosen primary, partial, or full family body;
 - every unrequested zero-binder body, including the methods and constructors
   inside an unrequested deferred type;
 - the unselected branch of an `if1`;
-- the body of a zero-iteration `for1` or `while1`.
+- the body of a zero-iteration `for1` or `while1`;
+- the attribute list of every unchosen family declaration, which is deferred
+  with its body (section 4.9.5).
 
 No token, parse, name, type, ownership, or phase diagnostic may originate
 inside such a skipped body. A skipped body is explicitly not required to be
@@ -3280,6 +3746,8 @@ A `#` statement inserts a code value:
 `#` begins an insertion statement; it is not an expression operator. Its
 operand is compiler code (section 9.9) and must have type `compiler::Code`.
 The statement is legal at module, type-body, function, and nested-block scope.
+In HUC1, `#expression` without `;` may also be an entry of an attribute list,
+where it inserts attributes (section 4.9.6).
 It runs while the enclosing body or module is prepared, once per occurrence,
 and is then erased. A `#` inside a runtime loop therefore inserts its code once,
 into the loop body. Phase loops prepare their bodies once per iteration, so a
@@ -3900,11 +4368,24 @@ HUC's first stable interoperation boundary is C:
 extern "C" fn huc_write_bytes(data: u8*, size: usize) -> isize;
 ```
 
+A foreign declaration may carry attributes after `fn`, and its parameters may
+carry `noalias` (section 4.9): `extern "C" fn [cold] abort() -> never;`.
+
 An `extern "C"` function may use:
 
 - built-in arithmetic types with documented target mappings;
-- `void` as a return type;
+- `void` or `never` as a return type;
 - raw pointers, including pointer chains, to built-in types.
+
+`never` is allowed only as a result, not as a parameter or stored value. An
+`extern "C"` function returning `never` has the target C ABI signature of a
+function returning `void`, plus a promise that it never returns normally.
+For example, the `abort` declaration above matches C's non-returning
+`void abort(void)`. The compiler marks the foreign function and its calls as
+non-returning; a call has no normal successor in HUC control flow. If the
+foreign function returns normally despite this declaration, behavior is
+undefined. `cold` alone makes no such promise. This does not permit foreign
+exceptions to unwind through HUC frames.
 
 It must not expose HUC Advanced values with `drop`, unresolved generic types,
 compiler-only types, or compiler metadata. Resource management across C boundaries is expressed by
@@ -3918,9 +4399,12 @@ files may name it, not its link name. Only `main` and functions exported to C
 need link names visible outside the program; other HUC definitions may stay
 internal to it.
 
-C-layout structure attributes, opaque foreign handle declarations, and C
-variadics are deferred pending separate designs. A small C shim can flatten
-such an interface to the supported scalar and pointer boundary.
+Opaque foreign handle declarations, structures passed by value, and C
+variadics are deferred pending separate designs. The layout attributes of
+section 4.9 let a HUC structure match a C structure's layout on the same
+target, but such a structure does not yet cross this boundary by value. A
+small C shim can flatten such an interface to the supported scalar and
+pointer boundary.
 
 The planned HUC0 compiler lowers directly to LLVM IR, with explicit HUC
 construction, relocation, and cleanup. This does not define a stable HUC binary
@@ -3949,6 +4433,8 @@ The following list is representative rather than exhaustive:
 - writing actually fixed storage through a cast pointer or integer-address round trip;
 - raw slot manipulation that violates ownership or cleanup obligations;
 - `construct_at` into a live slot, or `destruct_at` on an inactive slot;
+- breaking a `noalias` parameter's rule (section 4.9.10);
+- a foreign function declared with result `never` returning normally;
 - reading uninitialized storage;
 - returning or storing an observer and later using it after its pointee dies.
 
@@ -3971,6 +4457,8 @@ design, not the complete set of features that release 0.1 might leave unimplemen
 - arbitrary implicit conversions;
 - user-defined operator overloading;
 - dynamic runtime reflection;
+- user-defined attributes. Reflection plus `#` insertion covers their uses:
+  code that reads a declaration and generates more code next to it;
 - a stable HUC-to-HUC binary ABI;
 - separately compiled HUC packages, whose required rules are set in the
   [compilation model](compilation-model.md), section 13;
@@ -3996,6 +4484,12 @@ The closest C++ equivalents are conceptual, not the backend representation:
 | `construct_at(p, value)` / `destruct_at(p)` | `std::construct_at` / `std::destroy_at`, with HUC initialization and cleanup rules |
 | `raw_storage<T, N>` | Typed, aligned storage with manually managed element lifetimes; no implicit element cleanup |
 | `size_of<T>()` / `align_of<T>()` | `sizeof(T)` / `alignof(T)` |
+| `struct [align(64)] S` / `let [align(64)] x: T` | `struct alignas(64) S` / `alignas(64) T x` |
+| `struct [pack(1)] S` | `#pragma pack(1)` around one structure |
+| `let [bits(3)] mut mode: u32;` | `unsigned mode : 3;`, with a defined result for out-of-range stores |
+| `if [likely] (c)` | `if (c) [[likely]]` |
+| `fn [inline]` / `fn [noinline]` | `[[gnu::always_inline]]` / `[[gnu::noinline]]` |
+| `[noalias]` parameter | `restrict` in C |
 | generic `fn` | a subset spanning templates and `constexpr` |
 | `fn helper<>()` used only through `@` | Deferred compiler use, without a `consteval`-only guarantee |
 | `if1` | roughly `if constexpr` |

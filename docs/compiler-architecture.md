@@ -400,6 +400,17 @@ list as a loop AST field, not a comma-expression node. A header binding has a
 loop scope with a nested body scope. `for1` requires compiler-only clauses and
 retains a deferred body. There is no range-based loop production.
 
+Parse an optional attribute list directly after `struct`, `fn` (including
+`init` and foreign declarations), `let`, `if`, `else`, `while`, and `for`, and
+before a parameter. Keep the attributes as an AST field of the declaration or
+statement; attribute names are not keywords and are resolved against the
+built-in list, not the symbol table. In HUC0, an argument is an integer
+literal or an option name. In HUC1, it is an expression, and an entry may be
+`#expression`, ended by the first top-level `,` or `]` after a complete
+expression. After `fn`, `struct`, or `let`, skip a balanced list to find the
+name and check for `<`. A family keeps its list as an opaque span next to its
+deferred body.
+
 Use a shared list parser that accepts one optional trailing comma, including
 for constructor initializer entries and loop updates. Do not make acceptance
 depend on whether the list spans several lines. Empty items remain errors. Ordinary control
@@ -505,7 +516,13 @@ Ordinary HUC0 code selected for output is kept by the translation-unit residuali
 The HUC0 translator checks it again after it has been written to a file.
 
 Generic structures, functions, and variables use distinct indexed declaration nodes even
-though they share binder, pattern, and deferred-body components.
+though they share binder, pattern, and deferred-body components. A family
+declaration's attribute list is also an opaque span. Parse it only with the
+selected body, after the binders are bound, so its arguments may name them.
+Prepare an attribute list with its declaration or statement: evaluate integer
+expressions and run `#` entries left to right in the preparation's state,
+merge the results, check names, placement, conflicts, and ranges, and print
+literal arguments in HUC0. Omit a list that ends up empty.
 The syntax tree also has a phase-expression item node for standalone
 `@expression;` and an insertion item node for `#expression;`, both at module,
 type-body, function, or block scope. A phase-expression item must evaluate to
@@ -671,7 +688,9 @@ that the field points to.
 
 Each concrete type records:
 
-- size and alignment;
+- size and alignment, including the effect of `align`, `pack`, and `bits`;
+- its explicit alignment from `align`, including through inline fields, so
+  `pack` can reject a cap below it;
 - type category (Basic or Advanced);
 - whether it requires drop;
 - field layout;
@@ -697,6 +716,26 @@ Advanced, without `clone` or implicit element drop. Empty-storage creation
 establishes the wrapper without initializing its payload. `storage_ptr` accepts
 one pointer to that wrapper and produces the element pointer with matching
 access permissions; it does not load an element or register cleanup.
+
+Compute a structure's layout from declaration order, natural alignments, and
+its `align` and `pack` attributes (specification section 4.9.8). For a
+structure with a `bits` field, build an equivalent C record in Clang, with
+each bit-field typed as its C integer type. Use corresponding target C types
+for other built-ins and layout-only record/array descriptions for concrete
+HUC structures and `raw_storage`. Do not translate their lifecycle methods.
+Preserve natural alignment and explicit alignment separately, including
+through nested types; size and alignment alone are not a sufficient layout
+description. An aligned byte-array replacement can wrongly introduce
+packing-resistant alignment on the Microsoft ABI. Apply maximum field
+alignment for `pack`, and explicit alignment only where HUC has it.
+
+Read Clang's record layout for offsets, bit positions, size, and alignment.
+Validate that each layout description also preserves embedding behavior under
+packing. Diagnose an unsupported representation rather than approximate it.
+Test against independently declared C records on each supported ABI, including
+packed records nested in other records. Mark fields that `pack` leaves
+under-aligned, and reject `&`, method calls, Advanced types, and `init` on
+them. Reject `&` on bit-fields.
 
 Fold `size_of<T>()` and `align_of<T>()` to target `usize`, and `is_basic<T>()`
 to `bool`, with no runtime operands. HUC1 evaluation and HUC0 lowering must
@@ -767,11 +806,12 @@ candidate.
 
 An `extern "C"` signature is accepted only when every parameter and result
 lowers through the target's documented C ABI mapping. HUC0 permits built-in
-arithmetic scalars, `void` results, and raw pointers, including pointer chains,
-to built-in types. It rejects structures, fixed arrays, Advanced/drop types, phase
-types, compiler metadata, opaque foreign handles, and
-variadics. Aliases are checked after canonicalization so they cannot hide a
-forbidden boundary type.
+arithmetic scalars, `void` or `never` results, and raw pointers, including
+pointer chains, to built-in types. A `never` result maps to a C `void` result
+with a non-returning contract; `never` parameters remain invalid. It rejects
+structures, fixed arrays, Advanced/drop types, phase types, compiler metadata,
+opaque foreign handles, and variadics. Aliases are checked after
+canonicalization so they cannot hide a forbidden boundary type.
 
 ## 7. Typed HIR
 
@@ -1263,6 +1303,14 @@ with the family name and no other residual statement. Text generation remains
 forbidden inside a generic `let` selection body as a separate language restriction.
 Generic `let` is permitted at module and function/block scope, but never as an
 instance field.
+
+For a selected generic `let`, prepare the header's attributes before its body,
+with the binders available but no body-local names. Prepare the sole residual
+`let` and its attributes in body order, then append its attributes to the
+header's already prepared list. Validate the combined list on the runtime
+variable, rejecting duplicates even when their arguments agree. Print one
+list on the emitted variable and do not rerun argument evaluation or builders
+during the merge. The ban on `#` in the selection body is unchanged.
 
 ## 9. Specialization engine
 
@@ -1967,6 +2015,12 @@ library's responsibility, not an LLVM array operation.
 | Destruction | Explicit user `drop` followed by reverse field cleanup for active values |
 | `T(arguments)` initializing a final place | Initializer call with the final destination address |
 | Layout and category queries | Constants from the shared target/type model |
+| Under-aligned packed field access | Loads and stores with the field's actual alignment |
+| Bit-field read or write | Load the storage unit, then shift and mask; a write keeps neighboring bits |
+| `inline`, `noinline`, `cold` | `alwaysinline`, `noinline`, `cold`; report a call that cannot be inlined |
+| `likely`, `unlikely`, `unroll(N)` | Branch weights or `llvm.expect`; `llvm.loop.unroll.count` loop metadata |
+| `noalias` parameter | LLVM `noalias` |
+| `callconv(gpu_kernel)`, `launch_bounds` | `ptx_kernel` or `amdgpu_kernel`; `maxntid`, `minctasm`, `maxclusterrank`, or AMDGPU flat work-group size |
 
 Use loads/stores or memory-transfer intrinsics only where their alignment,
 overlap, and initialization requirements fit the HUC operation. Check exact
@@ -2003,6 +2057,13 @@ separate, target-correct ABI lowering, including extension and parameter/result
 attributes when required. The current scalar/pointer C boundary is the initial
 scope; choosing LLVM does not adopt the separate broader Clang/header proposal.
 Foreign code must not unwind across HUC frames while exceptions are unsupported.
+
+Lower an `extern "C"` result of `never` as LLVM `void` using the target's C
+ABI, with `noreturn` on the declaration and call. End the call's block with
+`unreachable`; do not synthesize a result value or a normal cleanup/return
+edge after the call. A foreign implementation that returns violates the
+source contract. `noreturn` does not imply `nounwind`; the separate ban on
+foreign unwinding still applies.
 
 Narrow signed/unsigned integers and booleans may require `signext` or `zeroext`
 on parameters and results. The details are target ABI rules, not a universal

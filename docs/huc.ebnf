@@ -9,6 +9,8 @@
    brace. The scanner accounts for nested braces, literals, and comments; it
    does not turn the body into tokens. If selected, the body is parsed later
    using the grammar for its enclosing module, type, function, or block.
+   A family declaration's attribute list is scanned the same way, to its
+   matching outer bracket, and parsed only with the selected body.
 
    HUC1 parses inserted text using the applicable HUC0 productions: generated
    text cannot contain numbered constructs, @, or #. When an insertion-item's
@@ -71,11 +73,11 @@ runtime-declaration-0
 
 function-decl-0   = function-signature-0, ( block-0 | ";" ) ;
 function-signature-0
-                  = "fn", identifier, parameter-list-0,
+                  = "fn", [ attribute-list-0 ], identifier, parameter-list-0,
                     [ "mut" ], "->", type-0 ;
 
 constructor-decl-0
-                  = "fn", "init", parameter-list-0,
+                  = "fn", [ attribute-list-0 ], "init", parameter-list-0,
                     [ constructor-initializer-list-0 ], block-0 ;
 
 constructor-initializer-list-0
@@ -84,13 +86,14 @@ constructor-initializer-list-0
 field-initializer-0
                   = identifier, argument-list-0 ;
 
-struct-decl-0     = "struct", identifier, "{",
+struct-decl-0     = "struct", [ attribute-list-0 ], identifier, "{",
                     { struct-member-0 }, "}", [ ";" ] ;
 struct-member-0   = field-decl-0
                   | function-decl-0
                   | constructor-decl-0 ;
 
-field-decl-0      = "let", [ "mut" ], identifier, ":", type-0,
+field-decl-0      = "let", [ attribute-list-0 ], [ "mut" ], identifier,
+                    ":", type-0,
                     [ "=", expression-0 ], ";" ;
 global-let-decl-0 = field-decl-0 ;
 
@@ -119,11 +122,11 @@ runtime-declaration-1
 
 function-decl-1   = function-signature-1, ( block-1 | ";" ) ;
 function-signature-1
-                  = "fn", identifier, parameter-list-1,
+                  = "fn", [ attribute-list-1 ], identifier, parameter-list-1,
                     [ "mut" ], "->", type-1 ;
 
 constructor-decl-1
-                  = "fn", "init", parameter-list-1,
+                  = "fn", [ attribute-list-1 ], "init", parameter-list-1,
                     [ constructor-initializer-list-1 ], block-1 ;
 
 constructor-initializer-list-1
@@ -132,7 +135,7 @@ constructor-initializer-list-1
 field-initializer-1
                   = identifier, argument-list-1 ;
 
-struct-decl-1     = "struct", identifier, "{",
+struct-decl-1     = "struct", [ attribute-list-1 ], identifier, "{",
                     { struct-member-1 }, "}", [ ";" ] ;
 struct-member-1   = field-decl-1
                   | function-decl-1
@@ -143,7 +146,8 @@ struct-member-1   = field-decl-1
                   | compiler-assignment-item
                   | insertion-item ;
 
-field-decl-1      = "let", [ "mut" ], identifier, ":", type-1,
+field-decl-1      = "let", [ attribute-list-1 ], [ "mut" ], identifier,
+                    ":", type-1,
                     [ "=", expression-1 ], ";" ;
 global-let-decl-1 = field-decl-1 ;
 type-alias-decl-1 = "type", identifier, "=", type-1, ";" ;
@@ -160,16 +164,25 @@ generic-family-decl
                   | generic-let-decl ;
 
 generic-function-decl
-                  = "fn", identifier, generic-header,
+                  = "fn", [ deferred-attribute-list ], identifier,
+                    generic-header,
                     parameter-list-1, [ "mut" ], "->", type-1,
                     deferred-body ;
 
 generic-struct-decl
-                  = "struct", identifier, generic-header,
+                  = "struct", [ deferred-attribute-list ], identifier,
+                    generic-header,
                     deferred-body ;
 
-generic-let-decl  = "let", identifier, generic-header,
+generic-let-decl  = "let", [ deferred-attribute-list ], identifier,
+                    generic-header,
                     deferred-body ;
+
+(* A selected generic-let header's attributes precede those of the single
+   ordinary let produced by its body. Check the combined list on that runtime
+   variable, including duplicates; neither list overrides the other.
+   Evaluate the header list before the body, and do not evaluate either list
+   again when combining them (specification 9.4). *)
 
 generic-header   = phase-binder-list, [ phase-pattern-list ] ;
 
@@ -339,15 +352,52 @@ builtin-type      = "bool" | "c8"
    literal in HUC0; HUC1 resolves its compile-time count to such a literal.
    Parse its count with the same angle-delimiter handling as phase arguments. *)
 
+(* ---------- Attributes ---------- *)
+
+attribute-list-0  = "[", attribute-0, { ",", attribute-0 }, [ "," ], "]" ;
+attribute-0       = identifier, [ "(", [ attribute-argument-0,
+                    { ",", attribute-argument-0 }, [ "," ] ], ")" ] ;
+attribute-argument-0
+                  = integer-literal | identifier ;
+
+attribute-list-1  = "[", attribute-entry-1, { ",", attribute-entry-1 },
+                    [ "," ], "]" ;
+attribute-entry-1 = attribute-1
+                  | "#", expression-1 ;
+attribute-1       = identifier, [ "(", [ expression-1,
+                    { ",", expression-1 }, [ "," ] ], ")" ] ;
+
+deferred-attribute-list
+                  = "[", ? scanner-delimited opaque source span ?, "]" ;
+
+(* An attribute list directly follows its keyword: struct, fn (including
+   init and foreign declarations), let, if, else, while, or for. A parameter's
+   list precedes the parameter. Attribute names are recognized only inside a
+   list and are not reserved words. Each built-in attribute defines whether an
+   argument is an integer or an option name; an identifier argument in HUC0 is
+   an option name, never a variable. In HUC1 an integer argument may be any
+   compiler expression; expansion writes a literal.
+
+   A "#" entry is one complete expression-1 of type compiler::Code; the token
+   after it must be "," or "]". Commas and brackets inside the expression do
+   not end the entry. Its text must parse as zero or more attribute-0 items.
+   Empty results drop their separators; a list left empty is omitted, so
+   HUC0 never contains "[]".
+
+   To tell a family from an ordinary declaration, skip a balanced attribute
+   list after fn, struct, or let and check for "<" after the name. A family
+   keeps its list as a deferred-attribute-list. Unknown names, placement,
+   conflicts, and argument ranges are semantic checks (specification 4.9). *)
+
 (* ---------- Parameters and blocks ---------- *)
 
 parameter-list-0  = "(", [ parameter-0,
                     { ",", parameter-0 }, [ "," ] ], ")" ;
-parameter-0       = [ "mut" ], identifier, ":", type-0 ;
+parameter-0       = [ attribute-list-0 ], [ "mut" ], identifier, ":", type-0 ;
 
 parameter-list-1  = "(", [ parameter-1,
                     { ",", parameter-1 }, [ "," ] ], ")" ;
-parameter-1       = [ "mut" ], identifier, ":", type-1 ;
+parameter-1       = [ attribute-list-1 ], [ "mut" ], identifier, ":", type-1 ;
 
 (* No parameter marker distinguishes values from expressions. In compiler
    calls, arguments determine the binding kind under specification 9.7.1.
@@ -380,13 +430,17 @@ statement-0       = block-0
                   | expression-statement-0 ;
 
 local-let-binding-0
-                  = "let", [ "mut" ], identifier, ":", ( type-0 | "auto" ),
+                  = "let", [ attribute-list-0 ], [ "mut" ], identifier,
+                    ":", ( type-0 | "auto" ),
                     [ "=", expression-0 ] ;
 local-let-decl-0  = local-let-binding-0, ";" ;
-if-statement-0    = "if", "(", expression-0, ")", block-0,
-                    [ "else", ( block-0 | if-statement-0 ) ] ;
-while-statement-0 = "while", "(", expression-0, ")", block-0 ;
-for-header-0      = "for", "(", [ for-init-0 ], ";",
+if-statement-0    = "if", [ attribute-list-0 ], "(", expression-0, ")",
+                    block-0,
+                    [ "else", [ attribute-list-0 ],
+                      ( block-0 | if-statement-0 ) ] ;
+while-statement-0 = "while", [ attribute-list-0 ], "(", expression-0, ")",
+                    block-0 ;
+for-header-0      = "for", [ attribute-list-0 ], "(", [ for-init-0 ], ";",
                     [ expression-0 ], ";", [ for-updates-0 ], ")" ;
 for-init-0        = local-let-binding-0 | expression-0 ;
 for-updates-0     = expression-0, { ",", expression-0 }, [ "," ] ;
@@ -413,13 +467,17 @@ statement-1       = block-1
                   | expression-statement-1 ;
 
 local-let-binding-1
-                  = "let", [ "mut" ], identifier, ":", ( type-1 | "auto" ),
+                  = "let", [ attribute-list-1 ], [ "mut" ], identifier,
+                    ":", ( type-1 | "auto" ),
                     [ "=", expression-1 ] ;
 local-let-decl-1  = local-let-binding-1, ";" ;
-if-statement-1    = "if", "(", expression-1, ")", block-1,
-                    [ "else", ( block-1 | if-statement-1 ) ] ;
-while-statement-1 = "while", "(", expression-1, ")", block-1 ;
-for-header-1      = "for", "(", [ for-init-1 ], ";",
+if-statement-1    = "if", [ attribute-list-1 ], "(", expression-1, ")",
+                    block-1,
+                    [ "else", [ attribute-list-1 ],
+                      ( block-1 | if-statement-1 ) ] ;
+while-statement-1 = "while", [ attribute-list-1 ], "(", expression-1, ")",
+                    block-1 ;
+for-header-1      = "for", [ attribute-list-1 ], "(", [ for-init-1 ], ";",
                     [ expression-1 ], ";", [ for-updates-1 ], ")" ;
 for-init-1        = local-let-binding-1 | expression-1 ;
 for-updates-1     = expression-1, { ",", expression-1 }, [ "," ] ;

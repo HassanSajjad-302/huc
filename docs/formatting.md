@@ -46,6 +46,10 @@ the others.
 - Put a space after a control-flow keyword: `if (ready)`.
 - Keep type suffixes attached: `Widget*`.
 - Put binding `mut` before the name and pointee `mut` inside the type.
+- Put one space before and after an attribute list, with no spaces inside
+  the brackets: `struct [align(64)] Cat`, `if [unlikely] (err)`. Separate
+  attributes with a comma and one space: `[inline, cold]`. Write a generated
+  entry without a space after `#`: `[#gpu_attrs::kernel(Gpu)]`.
 
 ```huc
 let mut widget: Widget = Widget(42);

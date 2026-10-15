@@ -167,7 +167,9 @@ HUC0 contains:
   `align_of`, and `is_basic` queries;
 - constructors, methods, `clone`, and `drop`;
 - runtime expressions and control flow;
-- local `let name: auto` inference.
+- local `let name: auto` inference;
+- built-in attribute lists with literal arguments, such as
+  `struct [align(64)] Slot` and `if [unlikely] (err)`.
 
 HUC0 does not contain:
 
@@ -1500,6 +1502,9 @@ Cover:
 - `raw_storage<T, N>` type and zero-argument construction syntax, including
   nesting and aliases, plus the layout/category query type operands;
 - local `let name: auto`;
+- attribute lists after `struct`, `fn`, `let`, `if`, `else`, `while`, and
+  `for`, and before parameters, with integer-literal and option-name
+  arguments;
 - error recovery at declaration and statement boundaries.
 
 The lexer emits individual `<` and `>` tokens and indivisible numbered keyword
@@ -1539,11 +1544,17 @@ Implement:
   invalid types and value operands; permission-preserving `storage_ptr`;
 - method receiver permissions;
 - constructor obligation checking;
-- `extern "C"` signatures limited to built-in scalars, `void` returns, and
-  raw pointers, including pointer chains, to built-in types, with no structure, array,
-  phase type, or variadic boundary;
+- `extern "C"` signatures limited to built-in scalars, `void` or `never`
+  returns, and raw pointers, including pointer chains, to built-in types,
+  with no structure, array, phase type, or variadic boundary;
 - overload resolution using only specified built-in conversions;
-- no user-defined implicit conversions.
+- no user-defined implicit conversions;
+- built-in attribute checks: unknown names, placement, conflicts, and
+  argument ranges;
+- structure layout with `align` and `pack`, explicit alignment through
+  inline fields, and under-aligned field rules; bit-field layout from
+  Clang records that preserve natural versus explicit alignment, including
+  nested layout descriptions, rather than aligned byte-array replacements.
 
 Acceptance:
 
@@ -1608,6 +1619,10 @@ Emit:
   environment; relaxed flags require an explicit HUC mode;
 - initialization, clone, and drop functions with explicit receivers and final
   destinations where needed;
+- attribute lowering: unaligned accesses for packed fields, shift-and-mask
+  bit-field access, `alwaysinline`, `noinline`, `cold`, branch weights, loop
+  unroll metadata, `noalias` only where the source wrote `[noalias]`, and GPU
+  kernel conventions with launch bounds;
 - source-origin sidecars and LLVM debug information as support is added.
 
 HUC permissions, ownership, and lifetime checks happen before LLVM emission.
@@ -1641,6 +1656,8 @@ do not silently fall back to excess-precision x87 arithmetic or relaxed math.
 
 The C boundary needs target-correct lowering even for scalars: small integers
 and booleans can need sign/zero extension and parameter/result attributes.
+Lower `never` results as C `void` results with LLVM `noreturn`; the call has
+no normal successor and ends with `unreachable`. Reject `never` parameters.
 Test calls and returns in both directions against independently compiled C
 fixtures. Clang's `CodeGenABITypes` is a possible later reuse path, not a
 standalone replacement for this work: it requires Clang AST types and a
@@ -1653,6 +1670,9 @@ Acceptance:
 - execute tests match expected output and side-effect order;
 - C ABI tests cover booleans, narrow signed/unsigned integers, pointers, and
   floating-point arguments and results at unoptimized and optimized settings;
+- foreign `never` calls use `void` plus `noreturn` and `unreachable`, and have
+  no normal fallthrough or cleanup edge; an independently compiled C fixture
+  terminates in a child process with the expected status;
 - strict floating-point tests include a case that would change under fused
   multiply-add and a case that would change under reassociation;
 - generated output is stable across repeated builds.
@@ -1872,6 +1892,11 @@ Implement:
 - primary, partial, and full patterns;
 - pattern forms: pointers with `mut`, family applications, `raw_storage`,
   repeated binders, and family binders;
+- deferred family attribute lists, parsed with the selected body so their
+  arguments can use the binders, and checked per specialization;
+- generic `let` attributes combined from its selected header and residual
+  declaration, with header-first evaluation, no repeated evaluation on merge,
+  and duplicate checking on the final list;
 - structural partial ordering;
 - errors for a specialization declared after a request whose selection it
   would change;
@@ -1921,6 +1946,9 @@ Implement:
 
 - compile-time evaluation islands;
 - erased module/type/function/block phase-expression items;
+- attribute arguments evaluated as compiler expressions, and `#` entries in
+  attribute lists, run left to right and merged, with empty lists omitted
+  from HUC0;
 - erased module- and type-body-level assignment items that change compiler
   storage, such as `defaults::checks = false;`, rejecting runtime fields,
   runtime `let` targets, and `pub`;
@@ -2108,6 +2136,19 @@ Check exact:
 - diagnostic text and source spans;
 - stable generated names.
 
+Include generic-variable attributes supplied by the header alone, the inner
+declaration alone, and an empty generated header list. Check that header
+builders run before body preparation and are not rerun during the merge.
+
+Compare HUC layout descriptions against independent C records on each
+supported target ABI. Include ordinary naturally aligned fields beside
+bit-fields, explicit field/type alignment, nested records, and packing caps.
+Keep a Windows x64 regression for `pack(1)` with an unsigned 3-bit field, an
+ordinary `i32` field, and another unsigned 3-bit field: the equivalent C
+record has size 12 and alignment 1. Replacing the integer with an explicitly
+4-byte-aligned byte array wrongly raises its alignment to 4. Also compare the
+offset and size when each record is nested after a one-byte field.
+
 Golden tests must normalize platform-specific paths without hiding differences
 in ordering that affect program behavior.
 
@@ -2116,6 +2157,10 @@ in ordering that affect program behavior.
 Include:
 
 - import cycles;
+- an unknown, misplaced, conflicting, or out-of-range attribute, including
+  one produced by a `#` entry; `&` on a bit-field or an under-aligned packed
+  field; `pack` below an explicit alignment, directly or through a wrapper;
+  an Advanced type or an `init` on an under-aligned field;
 - an import after a declaration or a later `module` line, and a module
   imported twice in one file;
 - naming a loaded but invisible module, another file's private declaration,
@@ -2168,6 +2213,9 @@ Include:
 - a reached `compiler::error`, including in a selected specialization with an
   otherwise valid primary fallback;
 - multiple residual declarations from generic `let`;
+- duplicate attributes between a generic `let` header and its residual
+  declaration, including equal arguments and attributes generated in the
+  header; a header attribute naming a body-local compiler variable;
 - compile-time undefined behavior: null, dangling, out-of-bounds,
   uninitialized, and inactive-slot access, constructing over a live value,
   and destroying an inactive slot;
@@ -2181,7 +2229,7 @@ Include:
 - resource-limit exhaustion;
 - numbered syntax emitted into HUC0.
 - invalid C-linkage structures, arrays, and phase types,
-  opaque handles, or variadics.
+  opaque handles, variadics, or `never` parameters.
 
 ### 13.4 Execute tests
 
