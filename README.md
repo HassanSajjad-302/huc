@@ -31,6 +31,9 @@ families: `fn choose<T: auto>(left: T, right: T)`. A second list supplies a
 specialization pattern: `<T: auto><T*>` is partial; `<><i32>` is complete.
 Function calls may omit angles when arguments are deduced, defaulted, or absent:
 `choose(a, b)` and `@helper()`.
+Generic variables always use a block: `let value<T: auto> { let value: T = T(); }`.
+The outer header has no attributes or binding `mut`; the same-name inner
+declaration supplies the variable's attributes, mutability, type, and initializer.
 `let1` and `import1` retain compiler-only bindings and imports. A module-level
 `let1` is typed compiler storage. Each module has its own state, so changing
 an imported `let1 mut` does not change the dependency or a sibling module.
@@ -72,9 +75,11 @@ need no further `@`.
 Built-in [attributes](docs/language-specification.md#49-attributes) use one
 bracket syntax right after the keyword: `struct [align(64)] Slot`,
 `struct [pack(1)] Header`, `let [bits(3)] mut mode: u32;`,
-`fn [inline] add(...)`, and `if [unlikely] (err)`. A generic family's list is
-deferred with its body, so it can use the family's parameters, and `#` can
-generate attributes. HUC has no user-defined attributes.
+`fn [inline] add(...)`, and `if [unlikely] (err)`. A generic `fn` or `struct`
+header's list is deferred with its body, so it can use the family's parameters.
+Generic `let` puts its attributes only on the inner declaration. Outside a
+generic variable's selection body, `#` can generate attributes. HUC has no
+user-defined attributes.
 
 Compiler calls use ordinary parameters: the argument decides whether each
 receives a **value binding** or an **expression binding**. A `let1` or actual

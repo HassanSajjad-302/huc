@@ -625,10 +625,12 @@ while [likely] (more) { ... }
 for [unroll(4)] (let mut i: usize = 0; i < n; i += 1) { ... }
 ```
 
-These keywords take a list: `struct`, `fn`, and `let` for declarations, and
-`if`, `else`, `while`, and `for` for statements. A constructor takes it after
-`fn`: `fn [inline] init(...)`. A foreign declaration is written with `fn`, so
-it takes a list in the same place: `extern "C" fn [cold] abort() -> never;`.
+These keywords take a list: `struct`, `fn`, and ordinary `let` for declarations,
+and `if`, `else`, `while`, and `for` for statements. A generic `let` header
+takes no list; attributes belong to its inner declaration (section 9.4).
+A constructor takes it after `fn`: `fn [inline] init(...)`. A foreign
+declaration is written with `fn`, so it takes a list in the same place:
+`extern "C" fn [cold] abort() -> never;`.
 
 A parameter has no keyword, so its list comes before the parameter:
 
@@ -718,9 +720,10 @@ callback and export, so the HUC function keeps HUC's convention.
 
 #### 4.9.5 Generic families
 
-A generic family's attribute list is deferred, like its body (section 9.5).
-The parser decides whether a declaration is a family by skipping the balanced
-`[ ... ]`, reading the name, and checking for `<`:
+A generic `fn` or `struct` header's attribute list is deferred, like its body
+(section 9.5). After `fn` or `struct`, the parser decides whether a declaration
+is a family by skipping the balanced `[ ... ]`, reading the name, and checking
+for `<`:
 
 - **Not a family.** The list is parsed at once, like the rest of the
   declaration.
@@ -753,9 +756,10 @@ fn example() -> void {
   inherit its body.
 - **Statement attributes need nothing extra.** An `unroll(Lanes)` inside a
   generic function's body is deferred with the body.
-- **Variable families.** A generic `let` header's attributes apply to the
-  runtime variable produced by its selected body. They combine with that
-  variable's own attributes under section 9.4.
+- **Variable families.** A generic `let` header cannot carry attributes or
+  binding `mut`. Attributes belong only to the inner ordinary `let` and are
+  deferred with the selection body. They are checked when that declaration
+  is reached (section 9.4).
 
 #### 4.9.6 Generated attributes
 
@@ -2500,8 +2504,20 @@ A non-generic `let` declares runtime storage. `let1` declares compiler-only
 storage. A `let name<...>` family declares neither directly: its selected body
 must produce one runtime variable.
 
-A generic variable header has no result type because the chosen specialization
-determines the complete runtime declaration:
+Every generic variable uses a braced selection body. This includes a primary
+with empty `<>`, a primary with parameters, and partial or full specializations
+with two angle lists. The outer header contains only `let`, the family name,
+the binder list, and an optional specialization pattern. It cannot carry
+attributes, binding `mut`, a type, or an initializer. A module-scope primary
+may still be marked `pub` under section 2.1.
+
+Outer attributes and binding `mut` are rejected when the header is parsed,
+even if the family is never requested. Their attribute expressions are not
+evaluated. This does not change the rule that an unselected enclosing body
+is skipped (section 9.5).
+
+The selected inner declaration has the same name and supplies all the
+variable's properties:
 
 ```huc
 let counter<Writable: bool> {
@@ -2519,6 +2535,17 @@ Every selected path must leave:
 2. whose source-level identifier is the generic `let` family identifier;
 3. and no other residual runtime declaration or statement.
 
+There is no direct-declaration or implicit-name shorthand. For example, these
+forms are rejected:
+
+```huc
+let mut counter<> { let mut counter: u64 = 0; } // mut belongs inside
+let [align(64)] counter<> { let counter: u64 = 0; } // attributes belong inside
+let counter<>: u64 = 0;                       // the block is required
+let counter<> { let mut: u64 = 0; }           // the inner name is required
+let counter { let counter: u64 = 0; }         // the generic header is required
+```
+
 Compiler-only setup, `let1`, and phase control are permitted in the selection
 body because they disappear. A `#` insertion remains prohibited within a
 generic `let` selection body. Parsing generated text does not relax this
@@ -2529,37 +2556,21 @@ initializers, inline values versus raw-pointer forms, pointee permissions,
 and slot mutability. The family name is not itself a runtime variable; only a concrete
 request such as `counter<true>` denotes one.
 
-**Attributes.** A selected family header may carry an attribute list, and so
-may the ordinary `let` produced by its body. Both lists apply to that one
-runtime variable, not to two separate storage objects:
+**Attributes.** Only the inner ordinary `let` carries attributes:
 
 ```huc
-let [align(Alignment)] counter<Alignment: usize> {
-    let mut counter: u64 = 0;
+let counter<Alignment: usize> {
+    let [align(Alignment)] mut counter: u64 = 0;
 }
 ```
 
 Preparing `counter<64>` puts `[align(64)]` on the emitted runtime declaration.
-The compiler processes the selected header's list first, after binding its
-generic arguments and before preparing its body. It processes the inner
-declaration's list when that declaration is reached. The header cannot name
-compiler locals declared inside the body.
-
-Append the inner list to the header list and check the combined list against
-the resulting runtime variable. Attribute expressions and builders are not
-evaluated again when the lists combine. The usual duplicate rule applies,
-even if both occurrences have the same argument; neither list overrides the
-other. For example, requesting this family is a diagnostic:
-
-```huc
-let [align(64)] duplicate_alignment<> {
-    let [align(16)] mut duplicate_alignment: u64 = 0;
-}
-```
-
-The error is two `align` attributes on one variable. No attributes from an
-unselected declaration or branch contribute to the result. This rule does
-not relax the restriction on `#` inside a generic `let` selection body.
+Evaluate and check the list when the inner declaration is reached. Its
+arguments may use the selected family's binders and compiler locals already
+available there. The usual duplicate-attribute rule applies within that list;
+there is no outer list to merge or override. No attributes from an unselected
+declaration or branch contribute to the result. The existing restriction on
+`#` inside a generic `let` selection body also applies to its attribute lists.
 
 Generic `let` is permitted at module scope and at function or nested-block scope. It
 is not permitted as an instance field. Every statically requested
@@ -2582,16 +2593,16 @@ only what is necessary to avoid false brace matches:
 - line comments;
 - block comments.
 
-The same scanner finds the closing `]` of a family declaration's attribute
-list. The following bodies remain opaque until selected:
+The same scanner finds the closing `]` of a generic `fn` or `struct` header's
+attribute list. The following bodies remain opaque until selected:
 
 - every unchosen primary, partial, or full family body;
 - every unrequested zero-binder body, including the methods and constructors
   inside an unrequested deferred type;
 - the unselected branch of an `if1`;
 - the body of a zero-iteration `for1` or `while1`;
-- the attribute list of every unchosen family declaration, which is deferred
-  with its body (section 4.9.5).
+- the header attribute list of every unchosen function or structure family
+  declaration, which is deferred with its body (section 4.9.5).
 
 No token, parse, name, type, ownership, or phase diagnostic may originate
 inside such a skipped body. A skipped body is explicitly not required to be

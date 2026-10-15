@@ -1504,7 +1504,7 @@ fn run() -> i32 {
     }
 
     let slot<><Widget> {
-        let mut slot: Widget = Widget(99);
+        let [align(16)] mut slot: Widget = Widget(99);
     }
 
     let first: i32 = slot<i32>;
@@ -1524,7 +1524,7 @@ Illustrative HUC0 at the family declaration site:
 ```huc
 let __huc_slot_i32: i32 = i32();
 let mut __huc_slot_Widget_ptr: Widget* = null;
-let mut __huc_slot_Widget: Widget = Widget(99);
+let [align(16)] mut __huc_slot_Widget: Widget = Widget(99);
 
 let first: i32 = __huc_slot_i32;
 let second: Widget* = __huc_slot_Widget_ptr;
@@ -1536,6 +1536,22 @@ The same family name can produce:
 - an inline `i32`;
 - a raw `Widget*`;
 - a writable inline `Widget`.
+
+Every primary, partial specialization, and full specialization uses the same
+block form. The outer header names the family and its parameters or pattern;
+it has no attributes or binding `mut`. The same-name inner declaration supplies
+all variable properties, including the `Widget` instance's alignment above.
+An empty-binder primary also keeps the block:
+
+```huc
+let counter<> {
+    let [align(64)] mut counter: u64 = 0;
+}
+
+fn increment() -> void {
+    counter<> += 1;
+}
+```
 
 This is one of HUC’s most unusual direct facilities. C++ variable templates can
 also be explicitly/partially specialized, but HUC integrates the selected

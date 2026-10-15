@@ -147,7 +147,8 @@ fn main() -> i32 {
     buffer.value = left + right;
     io::println(buffer.capacity());
 
-    // One variable family can produce different runtime let declarations.
+    // Every variable family uses a block and repeats its name inside.
+    // Binding mut and attributes belong only to the inner declaration.
     let slot<T: auto> {
         let slot: T = T();
     }
@@ -157,7 +158,7 @@ fn main() -> i32 {
     }
 
     let slot<><bool> {
-        let mut slot: bool = false;
+        let [align(16)] mut slot: bool = false;
     }
 
     io::println(slot<i32>);

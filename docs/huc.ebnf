@@ -9,8 +9,8 @@
    brace. The scanner accounts for nested braces, literals, and comments; it
    does not turn the body into tokens. If selected, the body is parsed later
    using the grammar for its enclosing module, type, function, or block.
-   A family declaration's attribute list is scanned the same way, to its
-   matching outer bracket, and parsed only with the selected body.
+   A generic fn or struct declaration's attribute list is scanned the same
+   way, to its matching outer bracket, and parsed only with the selected body.
 
    HUC1 parses inserted text using the applicable HUC0 productions: generated
    text cannot contain numbered constructs, @, or #. When an insertion-item's
@@ -174,15 +174,15 @@ generic-struct-decl
                     generic-header,
                     deferred-body ;
 
-generic-let-decl  = "let", [ deferred-attribute-list ], identifier,
-                    generic-header,
+generic-let-decl  = "let", identifier, generic-header,
                     deferred-body ;
 
-(* A selected generic-let header's attributes precede those of the single
-   ordinary let produced by its body. Check the combined list on that runtime
-   variable, including duplicates; neither list overrides the other.
-   Evaluate the header list before the body, and do not evaluate either list
-   again when combining them (specification 9.4). *)
+(* Generic let always has a block, including zero-binder primaries and
+   partial/full specializations. Its outer header has no attributes, binding
+   mut, type, or initializer. The selected body must produce exactly one
+   ordinary let with the family's name; that inner declaration supplies its
+   attributes, mutability, type, and initializer (specification 9.4).
+   There is no direct-declaration or implicit-name shorthand. *)
 
 generic-header   = phase-binder-list, [ phase-pattern-list ] ;
 
@@ -384,10 +384,12 @@ deferred-attribute-list
    Empty results drop their separators; a list left empty is omitted, so
    HUC0 never contains "[]".
 
-   To tell a family from an ordinary declaration, skip a balanced attribute
-   list after fn, struct, or let and check for "<" after the name. A family
-   keeps its list as a deferred-attribute-list. Unknown names, placement,
-   conflicts, and argument ranges are semantic checks (specification 4.9). *)
+   To tell a function or structure family from an ordinary declaration, skip
+   a balanced attribute list after fn or struct and check for "<" after the
+   name. Such a family keeps its list as a deferred-attribute-list. A generic
+   let header accepts no list; attributes belong to its inner ordinary let.
+   Unknown names, placement, conflicts, and argument ranges are semantic
+   checks (specification 4.9). *)
 
 (* ---------- Parameters and blocks ---------- *)
 

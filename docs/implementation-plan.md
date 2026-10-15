@@ -863,7 +863,11 @@ If a body is selected, it is then lexed and parsed normally.
 
 ### 6.6 Generic variable families
 
-A generic `let` header has no result type. Every selected path must leave:
+A generic `let` always has a selection block, for primaries (including `<>`)
+and partial/full specializations alike. The outer header has only the family
+name and angle lists after `let`: no attributes, binding `mut`, type, or
+initializer. There is no direct-declaration or implicit-name shorthand.
+Every selected path must leave:
 
 - exactly one ordinary runtime `let`;
 - with the same identifier as the family;
@@ -873,12 +877,18 @@ Compiler-only setup and `if1`/`for1`/`while1` are permitted. Text generation
 is not permitted inside a generic `let` selection body because it would obscure the
 rule that exactly one variable must remain.
 
+Attributes belong only to that inner ordinary `let`. Evaluate and check them
+when it is reached, with the family binders and earlier compiler locals in
+scope. The ban on text generation also covers `#` in its attribute list.
+There is no outer list to merge.
+
 Different specializations may choose different:
 
 - value types;
 - inline values versus raw-pointer forms;
 - pointee permissions;
 - slot mutability;
+- attributes;
 - initializers.
 
 Generic `let` is permitted at module and function/block scope but not as an instance
@@ -1892,11 +1902,10 @@ Implement:
 - primary, partial, and full patterns;
 - pattern forms: pointers with `mut`, family applications, `raw_storage`,
   repeated binders, and family binders;
-- deferred family attribute lists, parsed with the selected body so their
-  arguments can use the binders, and checked per specialization;
-- generic `let` attributes combined from its selected header and residual
-  declaration, with header-first evaluation, no repeated evaluation on merge,
-  and duplicate checking on the final list;
+- deferred `fn` and `struct` header attribute lists, parsed with the selected
+  body so their arguments can use the binders, and checked per specialization;
+- block-only generic `let`, with attributes and binding `mut` accepted only
+  on its same-name inner declaration, never on the outer header;
 - structural partial ordering;
 - errors for a specialization declared after a request whose selection it
   would change;
@@ -2136,9 +2145,11 @@ Check exact:
 - diagnostic text and source spans;
 - stable generated names.
 
-Include generic-variable attributes supplied by the header alone, the inner
-declaration alone, and an empty generated header list. Check that header
-builders run before body preparation and are not rerun during the merge.
+Include generic variables with attributes on the inner declaration, using
+family binders and earlier compiler locals. Cover zero-binder primaries,
+partial/full specializations, and `if1` selecting different complete
+declarations. Check that only selected inner attributes are evaluated and that
+ordinary variable initialization and storage identity remain unchanged.
 
 Compare HUC layout descriptions against independent C records on each
 supported target ABI. Include ordinary naturally aligned fields beside
@@ -2212,10 +2223,14 @@ Include:
 - declaration-level specialization conditions;
 - a reached `compiler::error`, including in a selected specialization with an
   otherwise valid primary fallback;
-- multiple residual declarations from generic `let`;
-- duplicate attributes between a generic `let` header and its residual
-  declaration, including equal arguments and attributes generated in the
-  header; a header attribute naming a body-local compiler variable;
+- zero or multiple residual declarations from generic `let`, or an inner
+  declaration with a missing or different name;
+- generic `let` outer attributes or binding `mut`, even on an unrequested
+  family; reject these headers without evaluating their attribute expressions;
+- direct-form generic variables without a selection block, or a selection
+  block without an angle header;
+- duplicate attributes on an inner `let`, including equal arguments, and
+  `#` insertion in a generic variable's selection body or inner attribute list;
 - compile-time undefined behavior: null, dangling, out-of-bounds,
   uninitialized, and inactive-slot access, constructing over a live value,
   and destroying an inactive slot;

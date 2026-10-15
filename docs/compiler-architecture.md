@@ -401,15 +401,18 @@ loop scope with a nested body scope. `for1` requires compiler-only clauses and
 retains a deferred body. There is no range-based loop production.
 
 Parse an optional attribute list directly after `struct`, `fn` (including
-`init` and foreign declarations), `let`, `if`, `else`, `while`, and `for`, and
-before a parameter. Keep the attributes as an AST field of the declaration or
-statement; attribute names are not keywords and are resolved against the
-built-in list, not the symbol table. In HUC0, an argument is an integer
+`init` and foreign declarations), ordinary `let`, `if`, `else`, `while`, and
+`for`, and before a parameter. Keep the attributes as an AST field of the
+declaration or statement; attribute names are not keywords and are resolved
+against the built-in list, not the symbol table. In HUC0, an argument is an integer
 literal or an option name. In HUC1, it is an expression, and an entry may be
 `#expression`, ended by the first top-level `,` or `]` after a complete
-expression. After `fn`, `struct`, or `let`, skip a balanced list to find the
-name and check for `<`. A family keeps its list as an opaque span next to its
-deferred body.
+expression. After `fn` or `struct`, skip a balanced list to find the name and
+check for `<`. Such a family keeps its list as an opaque span next to its
+deferred body. A generic `let` has only its name and angle header before the
+required block. Reject attributes and binding `mut` on that outer header;
+they belong to the inner ordinary declaration. Do not evaluate an invalid
+outer attribute list or defer its rejection until the family is requested.
 
 Use a shared list parser that accepts one optional trailing comma, including
 for constructor initializer entries and loop updates. Do not make acceptance
@@ -1304,13 +1307,14 @@ forbidden inside a generic `let` selection body as a separate language restricti
 Generic `let` is permitted at module and function/block scope, but never as an
 instance field.
 
-For a selected generic `let`, prepare the header's attributes before its body,
-with the binders available but no body-local names. Prepare the sole residual
-`let` and its attributes in body order, then append its attributes to the
-header's already prepared list. Validate the combined list on the runtime
-variable, rejecting duplicates even when their arguments agree. Print one
-list on the emitted variable and do not rerun argument evaluation or builders
-during the merge. The ban on `#` in the selection body is unchanged.
+Every generic `let` uses a selection block, including empty-binder primaries
+and partial/full specializations. Reject direct-declaration shorthand and
+require the family's name on the inner `let`. The outer header has no
+attributes, binding `mut`, type, or initializer. Prepare the inner ordinary
+`let` and its attributes when reached, using the bound parameters and compiler
+locals available there. Apply the normal attribute checks to that one list;
+no header/inner merging is needed. The ban on `#` in the selection body also
+covers attribute entries there.
 
 ## 9. Specialization engine
 

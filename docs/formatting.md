@@ -135,6 +135,23 @@ A full specialization has an empty first list: `fn identity<><i32>(value: i32) -
 Calls use at most one angle list, and omit it when arguments are deduced or
 defaulted: `identity(42)`, `identity<i32>(42)`, and `@build_limit()`.
 
+Generic variables always have a block. Repeat the family name on the inner
+ordinary `let`; put attributes, binding `mut`, the type, and the initializer
+there, never on the outer header:
+
+```huc
+let counter<Alignment: usize> {
+    let [align(Alignment)] mut counter: u64 = 0;
+}
+
+let value<T: auto><T*> {
+    let mut value: T* = null;
+}
+```
+
+An empty `<>` still requires the block. There is no direct-declaration or
+implicit-name shorthand; these are grammar rules, not formatting preferences.
+
 Attach `@` and `#` to what follows, without a space: `@build_limit()`,
 `#counter_decl();`. When inserted code has a hole, put the block that fills it
 on the same line, as with a control-flow body:
