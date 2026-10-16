@@ -1,0 +1,118 @@
+// Self-contained runtime checks; main returns 0 on success.
+// Run at -O0 and optimized settings. No undefined-behavior cases execute.
+module examples.assignment_order;
+
+let mut events: u64 = 0;
+let mut last_constructed: usize = 0;
+
+fn record(event: u64) -> void {
+    events = events * 10 + event;
+}
+
+// Events: 1 = argument, 2 = drop, 3 = factory, 4 = init, 5 = clone.
+struct Probe {
+    let value: i32;
+
+    fn [noinline] init(value: i32) : value(value) {
+        last_constructed = ptr_as<usize>(this);
+        record(4);
+    }
+
+    fn [noinline] clone() -> Probe {
+        record(5);
+        return Probe(this->value);
+    }
+
+    fn drop() mut -> void {
+        record(2);
+    }
+}
+
+fn argument(value: i32) -> i32 {
+    record(1);
+    return value;
+}
+
+fn [noinline] make(value: i32) -> Probe {
+    record(3);
+    return Probe(value);
+}
+
+fn [noinline] nested_make(value: i32) -> Probe {
+    return make(value);
+}
+
+fn [noinline] identity(mut value: Probe) -> Probe {
+    return value; // An explicit parameter is relocated, not direct construction.
+}
+
+fn main() -> i32 {
+    let mut current: Probe = nested_make(argument(7));
+    if (events != 134 || last_constructed != ptr_as<usize>(&current)) {
+        return 1;
+    }
+
+    events = 0;
+    current = Probe(argument(8));
+    if (events != 124 || last_constructed != ptr_as<usize>(&current)) {
+        return 2;
+    }
+
+    events = 0;
+    current = nested_make(argument(9));
+    if (events != 1234 || last_constructed != ptr_as<usize>(&current)) {
+        return 3;
+    }
+
+    let source: Probe = Probe(10);
+    events = 0;
+    current = copy source;
+    if (events != 254 || last_constructed != ptr_as<usize>(&current)) {
+        return 4;
+    }
+
+    events = 0;
+    let duplicate: Probe = copy source;
+    if (events != 54 || last_constructed != ptr_as<usize>(&duplicate)) {
+        return 5;
+    }
+
+    events = 0;
+    current = identity(copy source); // Inner clone completes before old drop.
+    if (events != 542 || current.value != 10) {
+        return 6;
+    }
+
+    events = 0;
+    current = true ? copy source : copy duplicate;
+    if (events != 542 || current.value != 10) {
+        return 7;
+    }
+
+    events = 0;
+    current = copy make(11); // Source temporary survives through clone, then drops.
+    if (events != 342542 || last_constructed != ptr_as<usize>(&current)) {
+        return 8;
+    }
+
+    events = 0;
+    current = identity(current); // Parameter binding moves current before drop.
+    if (events != 0 || current.value != 11) {
+        return 9;
+    }
+
+    // Prepare the complete clone before replacing its source.
+    events = 0;
+    let mut replacement: Probe = copy current;
+    current = replacement;
+    if (events != 542 || current.value != 11) {
+        return 10;
+    }
+
+    let mut number: i32 = 12;
+    number = number; // Basic self-assignment remains defined.
+    if (number != 12) {
+        return 11;
+    }
+    return 0;
+}

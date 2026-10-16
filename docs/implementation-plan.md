@@ -302,8 +302,8 @@ Relocating a named Advanced root requires binding `mut`. Extraction through
 `*pointer` requires pointee `mut` and programmer-managed source cleanup;
 the pointer binding itself can be fixed. Fresh unnamed
 function results, evaluated `copy` results, and other temporary Advanced
-values can transfer without it. Direct `T(arguments)` construction in the
-destination has no temporary source place.
+values can transfer without it. Direct constructors, calls, and Advanced
+`copy` initializers use their final destination under specification section 6.2.
 
 ### 5.4 Basic and Advanced classification
 
@@ -364,7 +364,7 @@ cleanup skips inactive values. `&` is a checked use, including inside `ptr_as`.
 The checker follows operations inside conditions without predicting their
 results: every runtime branch outcome counts as possible. It follows
 left-to-right argument binding, rejecting `f(x, x.size())`. A field store is
-checked both before and after its right-hand side, rejecting
+checked before and after RHS preparation, rejecting
 `x.count = consume_and_count(x)`.
 
 Two additional checks recognize direct receiver and pointer-argument forms.
@@ -394,7 +394,27 @@ shared external state may remain shared.
 
 Relocation cannot be overloaded. There is no HUC move constructor: one is not
 needed to restore a destructible moved-from state because no source
-object remains alive. Exact self-relocation assignment is a no-op.
+object remains alive. Advanced assignment follows a destroy-first order:
+
+1. Retain the destination, then prepare RHS arguments or source places.
+2. Drop the old destination if it remains active after preparation.
+3. Run the outer constructor, call, or clone directly in its slot, or relocate
+   the retained source. Other expressions, including `?:`, finish first and
+   then relocate their prepared result.
+4. Record source transfer before making the destination Active.
+
+Same-storage or overlapping Advanced assignment is undefined behavior, even
+when directly written. No assignment-specific diagnostic or runtime alias
+check is required. Optional warnings may help, but must not turn these
+otherwise well-typed forms into required errors. Basic assignment remains
+unchanged, including self-assignment. Delayed operations and cleanup must not
+use resources invalidated by destination destruction.
+
+Flow bookkeeping leaves `x = x` Active, although its execution is undefined.
+Relocation from a tracked root into an indirect destination makes that source
+Inactive; possible self-aliasing adds no defined no-op path. Keep existing
+within-call relocation and containing-root checks. They follow already tracked
+transfers, not dependencies through assignment destruction.
 
 An inline value that needs its address to stay unchanged cannot be safely
 relocated bitwise. HUC0 does not repair self-pointers. Such a value must be
@@ -432,9 +452,9 @@ cleanup and does not disable automatic enclosing-object cleanup.
 
 Copying/cloning an indirectly reached value remains valid when it is live
 and supports logical copying. Either eligible source form may replace a valid
-indirect destination; if the two can alias, exact storage identity is checked
-before destination destruction. Basic pointee binding still copies, leaving
-the source active.
+indirect destination, with distinct and non-overlapping storage as unchecked
+preconditions. No implicit identity check is emitted. Basic pointee binding
+still copies, leaving the source active.
 
 Container implementations manage backing storage and initialized element
 ranges. For example, a pop implementation extracts its last element through
@@ -463,10 +483,10 @@ lifetime without user code.
 The caller supplies valid storage with sufficient size and alignment and
 manages its live/inactive state. Null pointers, construction over a live value,
 overlapping source/destination storage, and destruction of an inactive value
-violate unchecked preconditions. No self-relocation no-op applies to
-construction. Neither intrinsic deallocates destination storage, nulls the
-pointer, or registers automatic cleanup. User constructors/destructors may
-manage their own resources.
+violate unchecked preconditions. Neither construction nor Advanced assignment
+has a self-relocation no-op. Neither intrinsic deallocates destination storage,
+nulls the pointer, or registers automatic cleanup. User constructors/destructors
+may manage their own resources.
 
 Do not update an aliased root's drop flags, even for `&local`. A directly
 named Advanced source transferred into `construct_at` still becomes Inactive
@@ -517,6 +537,13 @@ When `T(arguments)` directly initializes a local, field initializer, by-value
 parameter, or `return` result, it constructs in that destination storage.
 These forms have no intermediate `T` and perform no relocation; this is guaranteed
 HUC behavior rather than optional backend copy elision.
+
+Direct function and Advanced `copy` results use the same final slot. Forward
+it through `return T(...)`, `return call()`, and `return copy source`, including
+nested factories or clones at `-O0` and without inlining. Returning an explicit
+Advanced local still relocates it; conditionals prepare a value and then
+transfer it. Advanced assignment supplies its inactive destination after
+input preparation and old-value cleanup. Basic assignment is not changed.
 
 A constructor is named `init`:
 
@@ -588,10 +615,10 @@ fn clone() -> T {
 
 Only an evaluated `copy` expression selects `clone`; ordinary binding never
 does, and source code cannot call `clone` directly or take its address. Copy
-assignment of an Advanced type is expressed as `destination = copy source`, which
-clones to a temporary, destroys the old destination, and relocates the
-temporary into place. Users cannot customize relocation initialization or
-relocation assignment.
+assignment of an Advanced type is expressed as `destination = copy source`:
+retain the source, destroy the old destination, and clone into its final slot.
+The source and resources needed by the clone must survive that destruction.
+Users cannot customize relocation initialization or relocation assignment.
 
 The complete rules, diagnostics, and side-by-side C++20 examples are in
 [Value Semantics and Special Operations](value-semantics.md).
@@ -1699,9 +1726,9 @@ cleanup of the old slot. LLVM supplies no automatic HUC destruction.
 Implement:
 
 - structural Basic/Advanced classification, including `clone` opting into Advanced;
-- exact self-relocation as a no-op;
 - `copy` and `clone`;
-- clone-then-replace assignment;
+- destroy-first Advanced assignment with a retained RHS preparation plan;
+- final result-slot forwarding through direct constructors, calls, and clones;
 - fixed bitwise relocation of Advanced values with no user transfer hook;
 - user `drop`;
 - reverse field cleanup;
@@ -1732,6 +1759,22 @@ Acceptance:
 - manual destruction performs full drop/field cleanup without deallocation;
 - neither intrinsic updates automatic cleanup state through aliases;
 - ordinary binding never invokes `clone`;
+- constructor and factory arguments bind before destination drop; the outer
+  operation runs afterward in the final slot;
+- direct copy assignment drops before cloning, while nested copy arguments
+  and conditional results are prepared before drop;
+- `copy make_source()` keeps its separate source alive through the clone;
+- `x = wrap(x)` uses post-preparation state and skips old-value destruction;
+- explicit replacement temporaries support valid self-cloning and factories
+  that need the old destination;
+- Basic self-assignment works without an identity branch;
+- otherwise well-typed Advanced self-assignment and dependent arguments have
+  no required errors; optional warnings are allowed. Do not execute these
+  invalid cases expecting a particular crash or output;
+- self-relocation records source Inactive before destination Active; relocation
+  into an indirect destination leaves its named source Inactive, not MaybeActive;
+- ordinary lowering emits no implicit same-storage comparison or fallback;
+- existing receiver/earlier-address relocation checks remain required errors;
 - cleanup counters and, where enabled, instrumented runtime tests find no
   backend double destruction;
 - optimized operation counts match equivalent explicit C resource-management code.
@@ -2276,9 +2319,12 @@ Verify LLVM IR, compile to objects, link, and test the implemented subset:
 - slot-address round trips and byte access without extra ownership operations;
 - conditional relocations;
 - Basic-value binding and assignment;
-- explicit copy/clone and clone-then-replace assignment;
+- explicit copy/clone and destroy-first assignment, including the documented
+  nested-expression sequencing differences;
 - copying null raw pointers;
-- bitwise relocation, whole-source deactivation, and self-relocation;
+- bitwise relocation and whole-source deactivation;
+- Basic self-assignment, explicit preparation for self-cloning, and compile-only
+  acceptance tests for unchecked Advanced self-assignment;
 - relocation of nested Advanced aggregates with exactly-once destination
   cleanup and no inactive-source cleanup;
 - extraction from manually managed slots with initialized-range bookkeeping,

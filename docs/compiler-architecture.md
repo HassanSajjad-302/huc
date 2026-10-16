@@ -865,14 +865,26 @@ ConstructInPlace(destination, constructor, arguments)
 InitializeAt(pointer, initializer)
 DestructAt(pointer)
 Call(function, arguments)
+Replace(destination, rhs_preparation_plan)
 ```
 
 `ConstructInPlace` is not shorthand for “construct a temporary, then
 relocate.” When `T(arguments)` initializes a local, field, by-value parameter,
 or return result, HIR names that final place as the constructor destination.
 This preserves the final `this` address for constructors and avoids an observable
-relocation. A call that returns a structure uses an explicit result place so
-the callee can construct directly there.
+relocation. Direct calls and Advanced clones likewise use the final result
+place, forwarding it through nested direct returns even without inlining.
+An explicit named local or conditional result still has a separate place
+and is relocated; no named-return optimization is guaranteed.
+
+`Replace` retains the RHS form rather than first materializing a complete
+replacement. Bind callee/receiver and arguments, or retain the copy/relocation
+source, before dropping the destination. Only then run the outer call,
+constructor, or clone into its slot, or relocate the retained source.
+Other expressions, including conditionals, are fully evaluated first. Preserve
+this distinction through inlining. Track ordinary source uses during
+preparation; the later operation uses retained operands with unchecked lifetime
+preconditions, not a new required alias/dependency check.
 
 HIR records whether a source is a tracked root, a pointer dereference, or a
 direct subobject. Transferring from a named root requires `mut` before its
@@ -1719,16 +1731,27 @@ objects. This needs no ownership registry, hidden pointer metadata, or
 per-element flags. The destination is active in either case. Backend
 temporaries for the source address must not create a second owning value.
 
-The two-place MIR operations require different source and destination storage.
-Relocation assignment emits a static no-op or a runtime address-equality
-branch before reaching `Relocate` when source and destination might alias.
+`Relocate` and Advanced `Clone` require different, non-overlapping source and
+destination storage. Basic `Copy` retains read-then-store self-alias behavior.
+Advanced assignment adds no identity comparison or no-op
+branch. Even direct self-assignment is accepted under the normal static rules,
+but has undefined execution. Optional warnings or sanitizer instrumentation
+are separate from ordinary lowering.
 
 `ConstructInPlace` makes an inactive final destination active only after its
 constructor obligations succeed. `Call` consumes already bound parameter
 places in declaration order; its result destination is the caller's final
 return place, so a structure result is constructed there rather than returned
-through an observable temporary. `Drop` makes its place inactive. These state transitions are MIR semantics, not optional annotations
-for the backend.
+through an observable temporary. `Drop` makes its place inactive. These state
+transitions are MIR semantics, not optional annotations for the backend.
+
+Lower the retained assignment plan in order: prepare inputs, drop the old
+destination according to its post-preparation state, then `ConstructInPlace`,
+`Call`, `Clone`, or `Relocate` into that destination. A source temporary for
+`copy make_source()` survives through the clone. A nested clone argument or
+conditional result is prepared before drop. Source deactivation is recorded
+before destination activation, so a self-relocation root ends Active in the
+flow model without giving its undefined execution a meaning.
 
 Lower `InitializeAt` to initialization in the retained indirect destination,
 using the existing value operations but without registering automatic cleanup
@@ -1768,17 +1791,26 @@ cleanup of an inactive extracted slot is undefined behavior, not a request
 to discover and suppress that cleanup at runtime.
 
 The same state drives the required relocation-state check (language
-specification section 6.12). Any MIR use of a tracked root that is `Inactive`
-or `MaybeActive` at that point is a diagnostic in every compilation mode. A
-use is any `Copy`, `Clone`, `Relocate`, `AddressOf`, field projection,
-method-receiver formation, or store into a field of the root. A field store
-is checked both when its destination is formed and when the store occurs,
-after evaluation of its source operand. Storing a whole new value, scope-exit
+specification section 6.12). Any source-level use of a tracked root that is
+`Inactive` or `MaybeActive` at that point is a diagnostic in every compilation
+mode. HIR carries those uses into MIR: copying, relocating, taking an address,
+field projection, method-receiver formation, or storing into a field of the
+root. A field's root is checked when its destination is formed and after RHS
+preparation, before replacement. Storing a whole new value, scope-exit
 `Drop`, and `SlotAddress` are not uses of the old value. Computing their
 operands may still read values and must be checked. Field projections used
 only to form `SlotAddress` through inline fields do not read the root.
 MIR is already sequenced in HUC evaluation order, so later arguments are
 checked against the state left by earlier parameter bindings.
+
+Compiler-inserted destruction during replacement does not add a second
+source-use check on already retained operands. Otherwise `x = copy x` would
+become a required error instead of an unchecked precondition violation.
+On a normal completion edge, record a tracked source's transfer before
+marking the destination Active. This leaves `x = x` and `x = copy x` Active
+in the flow model without validating their executions. Relocation into an
+indirect destination makes the tracked source Inactive; possible aliasing
+does not add a no-op edge that would produce MaybeActive.
 
 The pass also rejects a `Relocate` from a root that happens during a call's
 argument evaluation, including in a nested expression, in two cases. The
@@ -1792,6 +1824,11 @@ describes.
 HIR records the source spellings needed for this: parentheses, field
 projections, `(&r)->f`, `*&r`, `ptr_as`, and either arm of `?:`. That
 recognition does not change the cleanup mode of `*&r` (section 7).
+
+These checks concern relocations already tracked during argument binding.
+Following dependencies through later assignment destruction would require
+new analysis, which is not required. Keep those existing checks without
+turning `x = make_replacement(&x)` or `x = x.rebuilt()` into new required errors.
 
 The pass reports each diagnostic at the HIR source origin of the offending
 use, together with the relocation that made the root inactive.
@@ -1869,9 +1906,8 @@ Elaboration handles the operations as follows:
 
 - same-type Basic binding becomes fieldwise `Copy`;
 - `copy` of an Advanced structure with the required protocol becomes `Clone` into
-  the copy expression's result place; lacking `clone` is a diagnostic, and
-  copy assignment specifically uses a fresh result before destination
-  destruction;
+  the copy expression's result place; lacking `clone` is a diagnostic. Direct
+  copy assignment uses the destination slot after old-value destruction;
 - copying `T*` copies only the observer address and permits null;
 - binding from an Advanced value becomes one fixed representation-transfer
   `Relocate`, which intrinsically makes the source and all subobjects inactive
@@ -1881,11 +1917,12 @@ Elaboration handles the operations as follows:
   relocation from named root storage requires `mut` before its name;
 - extraction through `*pointer` requires `mut T*`, not a writable pointer
   binding, and does not modify the pointer's address value;
-- relocation assignment first proves distinctness or compares source and
-  destination storage addresses at runtime when aliasing is possible; exact
-  self-relocation is a no-op, while a distinct active destination is dropped
-  before the fixed relocation;
-- `destination = copy source` completes `Clone` before dropping destination;
+- Advanced assignment retains a preparation plan, drops the old destination
+  if it remains active, then performs the outer operation in its slot;
+- `destination = copy source` retains source, drops destination, then runs
+  `Clone` there. `destination = make(args)` binds args, drops destination,
+  then runs the factory into that result slot;
+- Basic assignment keeps its ordinary copy behavior, including self-aliasing;
 - destruction calls user `drop`, then drops fields in reverse order.
 
 `Clone` means an independent logical duplicate whose two active values can be
@@ -2027,9 +2064,11 @@ library's responsibility, not an LLVM array operation.
 | `callconv(gpu_kernel)`, `launch_bounds` | `ptx_kernel` or `amdgpu_kernel`; `maxntid`, `minctasm`, `maxclusterrank`, or AMDGPU flat work-group size |
 
 Use loads/stores or memory-transfer intrinsics only where their alignment,
-overlap, and initialization requirements fit the HUC operation. Check exact
-self-relocation before dropping a possibly aliased destination. Neither a raw
-write nor a lifetime intrinsic performs HUC destruction or updates ownership.
+overlap, and initialization requirements fit the HUC operation. Advanced
+assignment's distinct-source precondition needs no implicit address check.
+Do not generalize it into a no-alias promise for all function parameters or
+reachable resources. Neither a raw write nor a lifetime intrinsic performs
+HUC destruction or updates ownership.
 
 Methods and lifecycle helpers become concrete functions with explicit receiver
 and destination parameters where needed. Allocation and release still follow
@@ -2398,6 +2437,22 @@ symbol hashes must be identical across processes for identical inputs.
   loops, later arguments of the same call, and receiver or `&` arguments
   followed by relocation of the same root.
 
+Compile-only assignment tests must accept otherwise well-typed `x = x`,
+`x = copy x`, overlapping source paths, and destination-dependent pointer or
+wrapper arguments without required errors; optional warnings are allowed.
+Check that self-assignment leaves the named root Active in the flow model,
+and that a tracked source relocated into an indirect destination becomes
+Inactive. Preserve errors for already Inactive/MaybeActive sources,
+incompatible types, missing clone, fixed sources, and containing-root
+relocations such as `packet.field = make_field(packet)`.
+
+Do not run undefined-behavior cases expecting a particular crash or output.
+Ordinary lowering tests should use possibly aliasing parameters to check the
+absence of an implicit comparison or fallback; optimizers need not preserve
+a particular instruction sequence after establishing undefined behavior.
+The evaluator keeps its general invalid-access checks to protect the compiler
+host, without adding special assignment alias analysis or runtime guarantees.
+
 ### 17.2 Golden tests
 
 Store input plus expected:
@@ -2413,10 +2468,13 @@ pinned toolchain; normalize only documented nonsemantic toolchain metadata.
 
 Relocation goldens must show whole-value `Relocate`, including for nested
 Advanced aggregates, with no recursive source-field transfers or null stores.
-Replacement goldens must check exact self-relocation before destination
-cleanup. Address-taking goldens include `&place` for pointer slots and
-`ptr_as<usize>(&place)` for integer conversion. The latter must reuse the
-ordinary address calculation and its permission and activation checks.
+Replacement goldens must show input preparation, destination cleanup, and
+the delayed outer operation in that order, with no implicit alias comparison.
+Check nested-copy and conditional RHS cases that finish values before cleanup,
+and post-preparation drop flags for `x = wrap(x)`. Address-taking goldens include
+`&place` for pointer slots and `ptr_as<usize>(&place)` for integer conversion.
+The latter must reuse the ordinary address calculation and its permission
+and activation checks.
 Pointer-extraction goldens must evaluate the source address once, create an
 active destination, and emit no source clearing, alias-driven flag updates,
 or runtime ownership lookup. Inlining must preserve the source cleanup mode.
@@ -2434,6 +2492,11 @@ per-element flags. Test payload transfer inside a relocated container and
 `storage_ptr` on empty storage without reading uninitialized bytes.
 
 ### 17.3 Execute tests
+
+Use [the standalone assignment example](../examples/assignment-order.huc0)
+for initial sequencing and placement checks; it returns a nonzero code on
+failure. Run it without optimization and with optimization, retaining its
+`noinline` boundaries. It contains no executed self-aliasing violations.
 
 Compile and run small programs that record:
 
@@ -2466,7 +2529,10 @@ Compile and run small programs that record:
   manual reverse field cleanup, and reuse of the allocation afterward;
 - unchanged root cleanup state when either intrinsic operates through an alias;
 
-- exact self-relocation behavior;
+- Basic self-assignment and explicit library guards for equal slots;
+- destroy-first constructor, factory, and clone order, including final result
+  addresses through nested factories and clones at `-O0` and without inlining;
+- explicit temporary preparation for intentional self-cloning;
 - destruction order;
 - early-return cleanup;
 - conditional relocation;

@@ -531,11 +531,14 @@ inheritance, or virtual dispatch.
 Construction selects an unnumbered `fn init(...)`. A constructor expression
 `T(arguments)` constructs directly in the destination when it directly
 initializes a local, a constructor field entry, a by-value parameter, or a
-`return` result, or is the value operand of `construct_at`. No temporary `T`
-exists and no destructive relocation occurs in these contexts. This
-guaranteed destination construction lets `init` observe
-the final `this` address; it is not optional backend copy elision. The LLVM
-backend may use explicit destination pointers to preserve this guarantee.
+`return` result, is the value operand of `construct_at`, or supplies the
+replacement in Advanced assignment. No temporary `T` exists and no destructive
+relocation occurs between that constructor and its destination. This guaranteed
+destination construction lets `init` observe the final `this` address; it is
+not optional backend copy elision. Direct calls and Advanced `copy` results
+also use the final result slot, as specified in section 6.2. Advanced assignment
+prepares inputs and destroys the old value first (section 6.3). The LLVM backend
+may use explicit destination pointers to preserve these guarantees.
 
 `init` has an implicit `this: mut T*` receiver. Constructor initializer entries
 and default initialization establish every field before the body begins; the
@@ -1055,6 +1058,12 @@ Operands, function arguments, constructor arguments, and initializer elements
 are evaluated from left to right. Side effects of an earlier operand are
 complete before evaluation of the next operand begins.
 
+Assignment evaluates its destination first. For Advanced `=`, it then
+prepares the RHS inputs, destroys the old value, and performs the outer
+replacement operation as specified in section 6.3. It does not necessarily
+evaluate the whole RHS before destruction. Basic and compound assignment
+keep their ordinary evaluation rules.
+
 For example, `combine(first(), second())` finishes evaluating and binding
 `first()` before evaluating `second()`. Passing the same Advanced local by
 value twice is therefore ill-formed. The first binding relocates the local,
@@ -1183,10 +1192,10 @@ Whenever relocation from a named root is otherwise permitted, its source
 storage must be writable, expressed by `mut` before the binding name.
 Relocation through `*pointer` instead requires `mut T*`; the pointer binding
 itself need not be writable. Section 6.4 defines the source cleanup rules and
-further restricts direct subobject sources. Fresh unnamed results can
-be transferred directly: function results, evaluated `copy` results, and
-other temporary Advanced values need no binding `mut`. Direct
-`T(arguments)` destination construction has no temporary source place.
+further restricts direct subobject sources. Fresh unnamed results need no
+binding `mut`. Direct constructors, calls, and Advanced `copy` results use
+the supplied final destination under section 6.2; other temporary Advanced
+values are relocated into it.
 
 ### 6.2 Destructive-relocation initialization
 
@@ -1200,21 +1209,122 @@ The source must be eligible under section 6.4. Its representation transfers
 to the new destination, and the source becomes inactive without cleanup.
 No user function is called by the transfer.
 
-### 6.3 Destructive-relocation assignment
+#### Direct result construction
 
-For an Advanced `T`, `destination = source`:
+A same-type direct constructor, function/method call, or Advanced `copy`
+initializer builds its result in the supplied final destination. Parentheses
+preserve this classification. This applies to local and field initialization,
+by-value parameter initialization, direct return results, `construct_at`, and
+the replacement phase of Advanced assignment. No intermediate result object
+is introduced between that operation and its destination.
 
-1. evaluates and retains the destination slot;
-2. evaluates the source slot;
-3. does nothing if both slots are identical;
-4. destroys the destination's old value if it is active;
-5. transfers the source representation and makes the source inactive.
+`return T(...)`, `return make(...)`, and `return copy source` forward the
+caller's result slot through direct calls and clones. A constructor reached
+through that chain observes the final destination address, even without
+inlining or optimization. The language does not require a particular ABI.
 
-Exact self-relocation is a defined no-op. Assignment cannot be overloaded.
-An assignment to an Advanced destination has type `void`, so it cannot be
-used as an operand or argument.
-Named methods express domain-specific operations such as merge, append, swap,
-or replace.
+An explicit Advanced local is different: `return local` relocates it. Named
+return optimization is not guaranteed, and may only remove that transfer
+when observable behavior is preserved. `?:` is still value-producing: its
+selected arm is evaluated completely and the resulting value is transferred.
+Source and argument temporaries retain their normal lifetimes (section 6.5.1).
+
+### 6.3 Destroy-first Advanced assignment
+
+For an Advanced `T`, `destination = expression`:
+
+1. Evaluate the destination place once and retain its address.
+2. Prepare the RHS inputs using the table below. Bind each argument before
+   starting the next, in the ordinary left-to-right order.
+3. Destroy the old destination if it is still active after preparation. The
+   destination becomes inactive before the replacement operation begins.
+4. Run the prepared constructor, call, or clone into the final destination,
+   or relocate the retained source/prepared value there. Record a tracked
+   source's transfer before recording the new destination state.
+5. Mark the destination Active on normal completion, then perform the normal
+   full-expression temporary cleanup.
+
+Ignore parentheses around the RHS when selecting its form:
+
+| RHS form | Preparation before destruction | Operation after destruction |
+|---|---|---|
+| `T(args)` | Evaluate and bind arguments | Construct in the destination |
+| Call returning `T` | Evaluate callee/receiver and bind arguments | Run call into final slot |
+| `copy expression` | Evaluate or retain the source, without the outer clone | Clone into final slot |
+| Eligible existing Advanced place | Retain source location, without transferring | Relocate into final slot |
+| Other Advanced expression, including `?:` | Evaluate completely | Relocate the prepared value |
+
+This does not delay nested operations. `dst = identity(copy src)` clones
+while binding `identity`'s parameter, then destroys `dst`, then runs `identity`.
+`dst = flag ? copy a : copy b` finishes the selected clone before destroying
+`dst`. In `dst = copy make_source()`, the factory first creates a separate
+source that remains alive through the delayed clone. Inlining cannot change
+these orders.
+
+An existing source place is retained, not snapshotted. If destination cleanup
+legally modifies a distinct live source, the delayed operation observes the
+changed source. Each operand is evaluated once.
+
+A tracked Inactive destination skips destruction. A MaybeActive destination
+uses its existing drop flag. A field's containing root must remain active
+through RHS preparation. An indirect destination requires a live pointee and
+does not discover cleanup state through aliases; use `construct_at` for an
+inactive slot. The retained destination storage must remain valid and suitably
+aligned throughout preparation and replacement.
+
+A retained copy or relocation source must be live, distinct from the
+destination, non-overlapping with it, and survive destination destruction.
+The delayed operation and subsequent cleanup must not use values or resources
+invalidated by that destruction. Violations are undefined behavior, whether
+written directly or hidden through pointers or wrappers:
+
+```huc
+text = text;                  // Undefined behavior for Advanced Text.
+text = copy text;             // Undefined behavior for Advanced Text.
+*destination = copy *source;  // Undefined if both name the same Advanced object.
+text = Text(text.view());     // Undefined if construction reads freed characters.
+text = make_replacement(&text); // Must not read the old text after destruction.
+text = text.rebuilt();        // Calls a method on the now-inactive receiver.
+```
+
+No assignment-specific diagnostic is required. Implementations may warn under
+section 8.4, but must not reject an otherwise well-typed program solely for
+these unchecked preconditions. There is no implicit identity check, no-op,
+clone-first fallback, or required runtime trap. Optional sanitizers remain
+separate from the language contract. Undefined behavior need not crash.
+This is a static acceptance rule for runtime code, not permission for compiler
+evaluation to corrupt its host. The evaluator's existing general invalid-access
+checks still apply when it executes code.
+
+The usual source eligibility, mutation permissions, clone availability, and
+section 6.12 checks remain. Source use is checked during preparation; its
+survival through destination destruction is not an additional required check.
+For bookkeeping, `text = text` records source transfer before destination
+activation, leaving the tracked root Active. This does not make execution
+defined or revive a source that was already inactive before preparation.
+
+Inputs may observe the old value during preparation: `text = Text(text.size())`
+can bind a scalar before destruction. A prepared pointer or structure result
+is also permitted if its actual use and cleanup remain valid. In
+`text = wrap(text)`, binding the by-value parameter transfers `text` first,
+so no old destination remains to destroy. To finish a replacement while the
+old value is alive, use a separate statement:
+
+```huc
+let mut replacement: Text = copy text;
+text = replacement;
+```
+
+This also supports factories that need the old destination. Saving only an
+observer does not preserve its pointee. Libraries that allow equal source
+and destination slots must guard them explicitly if needed.
+
+Basic assignment is unchanged, including self-assignment and aliases. It
+evaluates its RHS value before storing; it does not gain destroy-first
+semantics. Compound assignments are unchanged. Advanced assignment has type
+`void` and cannot be overloaded. Named methods express specialized operations
+such as buffer-reusing assignment, merge, or swap. If the delayed operation
+terminates after destruction, no rollback is promised.
 
 ### 6.4 Bitwise relocation of Advanced values
 
@@ -1241,10 +1351,9 @@ cleared or replaced with a valid “empty” value. Constructing a new value in
 the source storage starts a new lifetime there. Ordinary assignment can do
 this for a root tracked as inactive, but not for an inactive indirect slot.
 
-For relocation assignment, the compiler first checks for exact
-self-relocation. If source and destination are the same storage, the operation
-is a no-op. Otherwise it destroys the old active destination and then performs
-the representation transfer above.
+Relocation assignment follows section 6.3: destroy the old active destination,
+then transfer the retained source. Same-storage and overlapping assignment
+are undefined behavior, with no implicit identity check.
 
 This algorithm cannot be overloaded. HUC has no move constructor,
 relocation constructor, relocation method, or move-assignment hook. Bitwise
@@ -1301,10 +1410,10 @@ rule above, not automatic partial-lifetime tracking. `copy *pointer` remains
 valid for a live pointee that supports cloning and leaves it active; ordinary
 binding of a Basic pointee copies it instead of ending its lifetime.
 
-Either eligible source form may replace a valid indirect destination. If
-source and destination may alias, exact storage identity is checked before
-destruction; exact self-relocation remains a no-op. `construct_at` initializes
-inactive storage and `destruct_at` destroys a live value there (section 6.7).
+Either eligible source form may replace a valid indirect destination. Source
+and destination must be distinct and non-overlapping; this is unchecked.
+`construct_at` initializes inactive storage and `destruct_at` destroys a live
+value there (section 6.7).
 Pointer extraction uses ordinary dereference syntax and needs no separate
 intrinsic.
 
@@ -1455,7 +1564,7 @@ explicit syntax exposes that logical copying may allocate or execute arbitrary
 code.
 Source code cannot call `clone` directly or take its address; it requests the
 operation with `copy`. Destructive relocation itself remains fixed,
-non-overloadable, and non-failing. Full assignment, exact self-relocation, and
+non-overloadable, and non-failing. Full assignment, unchecked self-aliasing, and
 backend rules are specified in
 [Value Semantics and Special Operations](value-semantics.md).
 
@@ -1470,6 +1579,12 @@ Deliberately shared or interned state may remain shared.
 It may allocate and update external bookkeeping, such as a reference count,
 through an explicitly writable observer. The compiler does not prove that
 custom code follows these rules.
+
+For `let b: T = copy a`, the clone result is built in `b` under section 6.2.
+For Advanced `b = copy a`, retain the source, destroy old `b`, then clone into
+its slot under section 6.3. Every valid evaluated Advanced `copy` calls
+`clone`; there is no same-storage exception that skips it. Self-copy assignment
+is undefined behavior, not an exception to the clone contract.
 
 ### 6.7 Manually managed storage
 
@@ -1514,11 +1629,11 @@ Type checking and initialization follow the same rules as `let local: T = value`
 
 - a Basic value is copied and its source remains active;
 - an eligible Advanced source is relocated, with the usual `mut` and source
-  cleanup rules; `copy source` explicitly requests cloning;
+  cleanup rules; `copy source` explicitly requests cloning into the slot;
 - a direct `T(arguments)` expression constructs in the supplied slot, so
   `init` observes its final address. A direct function-result initializer
-  likewise uses that slot as its result destination under the existing
-  result-placement rules.
+  likewise uses that slot as its result destination under section 6.2,
+  including through nested direct return calls or clones without inlining.
 
 No old value is destroyed. The slot must be inactive when initialization
 begins and is live after initialization completes normally. The intrinsic
@@ -1541,8 +1656,8 @@ structure constructor, or a value such as `0` for a scalar. There is no
 one-operand default-construction form or constructor-argument pack overload.
 
 Constructing over a live value is undefined behavior, not replacement.
-Unlike assignment, construction has no self-relocation no-op: the source
-must be live and the destination inactive, so they cannot be the same slot.
+The source must be live and the destination inactive, so they cannot be the
+same slot. Neither construction nor Advanced assignment has a self-alias no-op.
 Overlapping source and destination storage is also invalid.
 
 #### 6.7.2 Destruction without deallocation
@@ -1595,9 +1710,9 @@ destruct_at(slot); // close its resource; keep the backing storage
 construct_at(slot, File(new_handle)); // create a new File in that storage
 ```
 
-This is not clone-then-replace assignment: the old value is destroyed before
-the initializer in the second statement runs. HUC has no exception unwinding;
-a terminating panic need not perform pending cleanup.
+Unlike assignment, this explicit pair destroys the old value before even
+preparing the initializer's inputs in the second statement. HUC has no
+exception unwinding; a terminating panic need not perform pending cleanup.
 
 Incorrect runtime lifetime, alignment, and storage conditions are unchecked
 preconditions, not mandatory runtime tests. Static errors such as a read-only
@@ -1745,11 +1860,17 @@ It can also extract the pointee. Such a function must document that it leaves
 the slot inactive and requires the caller to manage source cleanup; the
 pointer parameter does not carry the caller's automatic cleanup state.
 
+A direct constructor, call, or Advanced `copy` argument uses the parameter's
+storage as its final result slot (section 6.2). Parameter binding is completed
+before evaluation of the next argument begins.
+
 ### 6.10 Return values
 
 Returning an Advanced local destructively relocates it into the caller's
-result location and makes the source inactive. Direct constructor results
-instead use guaranteed destination construction. Returning a Basic value
+result location and makes the source inactive. Direct constructors, calls,
+and Advanced `copy` results instead forward the caller's result slot through
+the chain of direct returns (section 6.2). This guarantee needs no inlining;
+it does not apply to an explicitly created named local. Returning a Basic value
 copies it. Returning `T*` never transfers or extends the pointee's lifetime.
 The return value is bound before return-expression temporaries and active
 locals are destroyed (section 6.5.1). Returning an observer into either does
@@ -1785,19 +1906,22 @@ one of these states:
 - **MaybeActive**: some paths leave the value live and others transfer it away.
 
 Initialization, parameter binding, and assignment of a whole new value make
-the place Active. Direct relocation from the place makes it Inactive. If the
-destination of that relocation is indirect and may be the place's own
-storage, the identity check of section 6.3 can skip the transfer at run
-time, so the place is MaybeActive afterward. Where control-flow paths with
-different states meet, the place is MaybeActive.
+the place Active. Direct relocation from the place makes it Inactive, including
+when its destination is indirect: a possible alias no longer adds a defined
+no-op path. Where control-flow paths with different states meet, the place is
+MaybeActive. During assignment, source transfer is recorded before destination
+activation. Thus `x = x` leaves the tracked root Active, although its execution
+is undefined for an Advanced value; `x = copy x` likewise ends with Active
+bookkeeping without making its execution valid.
 
 The analysis follows the evaluation order of section 5.1, including inside
 expressions. Operands and arguments are processed left to right, and a
 method receiver is processed before the arguments. Each by-value parameter
 is bound before the next argument starts. An assignment evaluates its
-destination first and stores after its right-hand side (section 6.3). In
-this section, a *call* is a function, method, or intrinsic call, a constructor
-expression `T(arguments)`, or a constructor initializer entry
+destination first, prepares its RHS inputs, and replaces the value in the
+order specified by section 6.3. In this section, a *call* is a function,
+method, or intrinsic call, a constructor expression `T(arguments)`, or an
+initializer entry
 `field(arguments)`.
 
 #### Control flow
@@ -1835,17 +1959,18 @@ ill-formed, and the compiler must issue a diagnostic. A use is any operation
 that reads or observes the value: relocating it, `copy`, calling a method on
 it, selecting a field, or applying `&` to it or to a field path of it.
 Storing into a field is checked twice. Selecting the field is a use when the
-destination is evaluated, and the store is a use after the right-hand side
-has been evaluated. So `x.count = consume_and_count(x)` is ill-formed.
+destination is evaluated, and the containing root must still be Active after
+RHS preparation, before field replacement. So
+`x.count = consume_and_count(x)` is ill-formed.
 
 The following are not uses and are permitted in any state:
 
-- assigning a whole new value to the place. When the store happens, after
-  the right-hand side has been evaluated, the old value is destroyed if it is
-  still live, using a drop flag when the state is MaybeActive, and the place
-  becomes Active. Uses on the right-hand side are still checked.
-  `x = rebuild(x)` is valid when `x` starts Active: the right-hand side
-  transfers `x`, and the store reactivates it without destroying an old value;
+- assigning a whole new value to the place. After RHS preparation, the old
+  value is destroyed if it is still live, using a drop flag when the state
+  is MaybeActive, and the place becomes Active. Uses on the right-hand side
+  are still checked.
+  `x = rebuild(x)` is valid when `x` starts Active: parameter binding
+  transfers `x`, and the delayed call reactivates it without an old-value drop;
 - compiler-inserted destruction at scope exit, which likewise destroys only a
   live value.
 
@@ -1938,6 +2063,13 @@ reaches the callee through another call or a constructor is not detected
 either, as in `f(identity(&x), x)`. If the callee uses such a pointer, the
 behavior is undefined when that use accesses the inactive source value.
 Merely passing this check is not a lifetime guarantee for pointer arguments.
+
+These required checks concern relocations already tracked during argument
+binding, not the later destruction in Advanced assignment. Extending them to
+that event would require additional dependency analysis, which is not
+required. Thus `x = make_replacement(&x)` and `x = x.rebuilt()` are not rejected
+by new assignment-specific checks, even though accessing the old value after
+its destruction is undefined (section 6.3).
 
 #### Staging and unchecked boundaries
 
@@ -2171,7 +2303,9 @@ platform's atomic memory model.
 ### 8.4 Optional diagnostics and sanitizers
 
 Implementations may warn about likely dangling pointers, null dereferences, or
-access to inactive storage through raw pointers. Debug modes may insert
+access to inactive storage through raw pointers, and obvious Advanced
+self-assignment, overlap, or destroy-first dependencies. Such warnings do not
+make the unchecked assignment cases required errors. Debug modes may insert
 checks. These facilities must not be presented as a language guarantee and
 their absence must not change the meaning of a well-defined program.
 
@@ -4431,6 +4565,11 @@ in C++20; neither emits C or C++ as its initial backend language.
 The following list is representative rather than exhaustive:
 
 - invalid raw-pointer dereference or arithmetic;
+- same-storage or overlapping retained sources in Advanced assignment,
+  including direct `x = x` and `x = copy x`;
+- an assignment's delayed operation or cleanup using a value or resource
+  invalidated by destination destruction, or RHS preparation invalidating
+  the retained destination address;
 - access to inactive Advanced storage outside the section 6.12 check,
   including through raw pointers or untyped addresses, or by name after
   pointer extraction that did not update an aliased local's tracked state;

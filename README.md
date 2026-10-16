@@ -229,16 +229,26 @@ leaving it active. The pointee must be live and accessible in either case.
 - Copying a raw pointer does not clear it. Pointee `mut` may be dropped but
   never gained by ordinary pointer conversion.
 - Replacing an existing value requires a writable destination. An active
-  Advanced destination is cleaned up before replacement. Replacing a raw
-  pointer never destroys its old pointee. Initialization has no old value to
-  clean up.
-- Exact self-relocation of an Advanced value is a no-op.
+  Advanced destination uses destroy-first assignment: prepare RHS inputs,
+  destroy the old value, then construct, call, clone, or relocate into its
+  slot. Nested operations and conditional RHS values can finish before
+  destruction. Prepare a separate replacement first when it needs the old value.
+- Advanced self-assignment, including `x = copy x`, is undefined behavior,
+  with no implicit alias check or fallback. Optional warnings are allowed;
+  ordinary type and moved-value checks remain. Basic self-assignment is valid.
+- Replacing a raw pointer never destroys its old pointee. Initialization has
+  no old value to clean up. Direct constructor, call, and Advanced `copy`
+  results use the final destination through nested direct returns, without
+  requiring inlining.
 - Raw observers do not keep objects alive. They become dangling when the
   object is destroyed and may be invalidated when inline storage relocates.
 
 See [value semantics](docs/value-semantics.md) for the full lifetime rules and
 [the resource-transfer example](examples/ownership.huc0) for working through
 transfers.
+
+The [assignment-order example](examples/assignment-order.huc0) checks
+destroy-first sequencing and final result addresses without a library dependency.
 
 ### Manually managed storage
 

@@ -116,7 +116,7 @@ The examples below cover these use cases:
 | Runtime | Explicit deep copying with `copy` and `clone` |
 | Runtime | Custom clone opting a type into the Advanced category |
 | Runtime | Fixed, non-overridable destructive relocation |
-| Runtime | Relocation assignment, exact self-relocation, and reinitialization |
+| Runtime | Destroy-first assignment, unchecked self-aliasing, and reinitialization |
 | Runtime | Address-dependent values, self-pointers, and stable storage |
 | Runtime | Constructor-required fixed fields |
 | Runtime | Deterministic default initialization |
@@ -515,7 +515,9 @@ Source fields require no clearing. This rule does not depend on whether
 
 There is no user move constructor, move-assignment operator, or relocation
 hook. Relocation assignment first cleans an active destination and then applies
-the same fixed operation. Exact self-relocation assignment is a no-op.
+the same fixed operation. Exact self-relocation is undefined behavior, not a
+no-op. Advanced copy assignment likewise destroys before cloning into the
+destination; prepare a separate replacement first when it needs the old value.
 
 ```huc
 module examples.native_lease;
@@ -559,8 +561,12 @@ fn lifecycle() -> void {
         probable_open_handle(),
         2002,
     );
-    current = copy duplicate; // clone, drop current, relocate the temporary
-    current = current; // exact self-relocation is a no-op
+    current = copy duplicate; // drop current, then clone into its slot
+    // current = current; // undefined behavior; deliberately not executed
+
+    // Intentional self-cloning requires preparing the clone first.
+    let mut replacement: NativeLease = copy current;
+    current = replacement;
 }
 ```
 
@@ -570,8 +576,8 @@ calls `clone`, and destructive relocation never calls user code. In particular,
 the relocation does not write `-1` into `original.handle`: the whole source
 object is inactive, so its cleanup is skipped.
 
-A conventional C++20 counterpart exposes the same resource behavior through
-its special members:
+A conventional C++20 counterpart expresses resource ownership through its
+special members, with different assignment ordering and self-alias handling:
 
 ```cpp
 class NativeLease {
@@ -635,10 +641,15 @@ reinitializing it is a compile-time error. Access through a raw pointer or an
 untyped address is still unchecked and is undefined when it accesses the
 inactive value.
 
+The C++ assignment above duplicates before closing the old resource and guards
+self-assignment. HUC drops before cloning and leaves same-storage Advanced
+assignment undefined. Use an explicit replacement temporary in HUC when the
+new value needs the old one to remain alive during construction.
+
 HUC makes the potentially expensive copy explicit and fixes relocation
 behavior instead of selecting user code through C++ value categories. The
 detailed comparison, including parameters, returns, resource-managing values,
-assignment, exact self-relocation, and a complete image type, is in
+assignment, unchecked self-aliasing, and a complete image type, is in
 [Value Semantics and Special Operations](value-semantics.md).
 
 ### 3.9 Address stability, self-pointers, and containers

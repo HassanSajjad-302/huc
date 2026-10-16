@@ -151,11 +151,12 @@ fn demonstrate_inline_relocation() -> void {
     // its field cleanup runs.
     let mut relocated: NativeBuffer = original;
 
-    relocated = relocated; // exact self-relocation is a no-op
+    // relocated = relocated; // undefined behavior; deliberately not executed
     original = NativeBuffer(32); // reinitializes inactive storage
 
     let mut target: NativeBuffer = NativeBuffer(8);
-    // Clone a temporary, drop old target, then relocate the replacement.
+    // Drop old target, then call clone with target as its result slot.
+    // This clone returns an explicit local, so that local still relocates.
     target = copy duplicate;
 
     io::println(duplicate.first(), relocated.first(), target.first());
