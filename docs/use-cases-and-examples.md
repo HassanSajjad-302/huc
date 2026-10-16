@@ -28,6 +28,7 @@ The following syntax and behavior describe language rules, not library proposals
 - unary `&` for taking the address of any addressable data slot;
 - `ptr_as` for explicit raw-pointer and integer-address casts;
 - `construct_at` and `destruct_at` for manually managed value lifetimes;
+- `take place` to copy Basic values or extract and refill Advanced slots;
 - `raw_storage<T, N>` and `storage_ptr` for typed inline backing storage;
 - `size_of<T>()`, `align_of<T>()`, and `is_basic<T>()` for layout and category queries;
 - ordinary `fn`, deferred `fn name<>()`, and parameterized `fn name<T: auto>`;
@@ -734,15 +735,30 @@ address. The returned value takes responsibility for the resource.
 The compiler does not cancel automatic local or field cleanup through pointer
 aliases. Passing `&local` to an extracting function and then letting that
 inactive local receive automatic cleanup is undefined behavior. Direct
-Advanced moves from fields or array indexing remain rejected; the explicit
-pointer form leaves source cleanup to the programmer instead of tracking
-partial lifetimes.
+Advanced moves from writable fields and indexed elements have the same
+unchecked meaning as `*(&place)`. Source cleanup stays with the programmer;
+no partial-lifetime tracking is added.
 
 Use `construct_at(pointer, value)` to initialize an extracted or otherwise
 inactive slot, and `destruct_at(pointer)` to destroy a live element without
 freeing its backing storage. Both require `mut T*` and leave container
 bookkeeping to the programmer. Ordinary indirect assignment instead assumes
 a live destination and destroys its old value before replacement.
+
+`take place` is useful when a source slot must remain live. For an Advanced
+`T`, it extracts the old value and constructs `T()` directly in that slot.
+For Basic values it simply copies, leaving the source unchanged:
+
+```huc
+let body: Buffer = take request.body; // writable field now holds Buffer()
+let packet: Packet = take packets[index]; // needs Packet()
+let address: Packet* = take pointer; // Basic: pointer is unchanged
+```
+
+A direct field or element move does not refill the source. Use
+`construct_at` to restore it, or adjust the container's live range before
+cleanup. Ordinary assignment would destroy the inactive slot first.
+See [the standalone extraction and take example](../examples/take-and-extraction.huc0).
 
 A future custom relocation hook should be considered only if real
 address-repair cases justify changing the fixed-transfer model.
@@ -900,18 +916,18 @@ struct Item {
     }
 }
 
-fn take(first: Item, second: Item) -> i32 {
+fn combine(first: Item, second: Item) -> i32 {
     return first.value + second.value;
 }
 
 fn run() -> i32 {
     let mut item: Item = Item(7);
-    return take(copy item, item);
+    return combine(copy item, item);
 }
 ```
 
 The result is `14`. The first argument clones the value before the second
-argument transfers it. `take(item, item)` and `take(item, copy item)` are
+argument transfers it. `combine(item, item)` and `combine(item, copy item)` are
 compile-time errors: the first binding leaves `item` inactive before the
 second argument names it. There is no implicit empty value after transfer.
 
@@ -1105,7 +1121,9 @@ The illustrative result-extraction methods must manage their initialized
 payload state explicitly. Pointer extraction can transfer a manually managed
 payload, but it does not disable automatic field cleanup. `construct_at` and
 `destruct_at` provide payload lifetime operations; allocation and representation
-remain library design choices. Direct moves from Advanced fields remain rejected.
+remain library design choices. Direct Advanced field moves have the same
+unchecked cleanup obligation. `take` is an option only when leaving a default
+replacement is appropriate for that result's representation.
 
 ## 4. HUC1 control-flow examples
 

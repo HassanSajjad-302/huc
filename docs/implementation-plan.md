@@ -161,7 +161,7 @@ HUC0 contains:
 - `let` declarations;
 - `mut` permissions;
 - raw pointers `T*`;
-- unary `&`, `construct_at`, `destruct_at`, and the core
+- unary `&` and `take`, `construct_at`, `destruct_at`, and the core
   type-operand intrinsics;
 - typed `raw_storage<T, N>`, `storage_ptr`, and compile-time `size_of`,
   `align_of`, and `is_basic` queries;
@@ -430,14 +430,14 @@ bytes a defined meaning. The backend may copy memory, use loads and stores or
 registers, or remove the transfer when the program still behaves the same.
 The source must become inactive, and cleanup must still happen exactly once.
 
-Relocation accepts two source forms:
+Relocation has two source-cleanup modes:
 
 - A whole named local or parameter, or a fresh temporary/result. The compiler
   updates that root place's active state and suppresses source cleanup.
-- `*pointer` through `mut T*`. The source pointee becomes inactive, but the
-  programmer must prevent later cleanup of its slot. The pointer expression
-  is evaluated once; extraction does not change the pointer address, clear
-  source bytes, or install a replacement value.
+- `*pointer` through `mut T*`, or a writable field or element. The source
+  slot becomes inactive, but the programmer must prevent later cleanup of
+  that slot. Evaluate the source place once; extraction does not change a
+  pointer address, clear source bytes, or install a replacement value.
 
 Pointer extraction never finds and cancels automatic cleanup through aliases,
 including aliases of locals or their fields. Its semantics must not depend on
@@ -445,13 +445,28 @@ inlining or whether the compiler can recognize `&local`. Cleanup reaching an
 inactive extracted slot is undefined behavior. Stack versus heap allocation
 does not determine cleanup responsibility.
 
-HUC0 still rejects direct moves from `pointer->field`, `value.field`, or
-`array[index]`; it does not track partially inactive aggregates. Explicit
-dereference of a writable pointer to such a slot uses programmer-managed
-cleanup and does not disable automatic enclosing-object cleanup.
+HUC0 accepts direct moves from `pointer->field`, `value.field`, and
+`items[index]` with exactly the permissions and cleanup behavior of
+`*(&place)`. It does not track partially inactive aggregates or disable
+enclosing-object cleanup. Fixed fields and read-only access remain invalid
+Advanced sources. Lifetime hazards after extraction are unchecked even when
+visible in source; optional warnings must not become required errors.
+
+Implement unary `take` in both parsers. Basic `take` is an ordinary read:
+the source stays unchanged, including fixed values and raw pointers, and no
+default constructor is required. For Advanced `T`, require a writable place
+and `T()`. Evaluate its address once, extract into a separate result, then
+construct `T()` in the source slot before yielding the result. No source
+`drop`, source clearing, or automatic cleanup-state change is added.
+Preserve the final source-slot address seen by `init`. A discarded result has
+normal full-expression cleanup.
+
+In destroy-first assignment, `take` is fully evaluated during RHS preparation.
+Destroy the assignment destination only after source reconstruction, then
+relocate the prepared result. Cover `x = take x` without an alias branch.
 
 Copying/cloning an indirectly reached value remains valid when it is live
-and supports logical copying. Either eligible source form may replace a valid
+and supports logical copying. Any eligible source may replace a valid
 indirect destination, with distinct and non-overlapping storage as unchecked
 preconditions. No implicit identity check is emitted. Basic pointee binding
 still copies, leaving the source active.
@@ -1601,7 +1616,9 @@ Acceptance:
 - `mut` cannot be gained implicitly;
 - fixed storage cannot be assigned through ordinary typed operations;
 - fixed Advanced values cannot be relocated;
-- direct Advanced field/array-element moves are rejected;
+- writable Advanced field/element moves are accepted as unchecked extraction;
+- `take` requires a place; Advanced `take` also requires writable access and
+  a zero-argument constructor, while Basic `take` needs neither;
 - pointer extraction requires `mut T*` and accepts a fixed pointer binding;
 - all constructor field obligations are checked.
 - every accepted C-linkage signature has a documented target ABI mapping.
@@ -1733,6 +1750,7 @@ Implement:
 - user `drop`;
 - reverse field cleanup;
 - raw-pointer copying without pointee cleanup;
+- Basic `take` as a copy; Advanced `take` as extraction then in-slot construction;
 - `construct_at` and `destruct_at` with manual destination lifetime and cleanup.
 
 Acceptance:
@@ -1753,7 +1771,12 @@ Acceptance:
 - `auto` from a raw pointer stays raw, with no cleanup of its pointee;
 - extraction through writable pointers is accepted without source clearing
   or alias-driven changes to automatic cleanup state;
-- direct field/array-element moves and read-only pointer extraction are rejected;
+- direct field/element moves preserve enclosing cleanup; extraction through
+  read-only access or from fixed fields remains rejected for Advanced types;
+- lifetime misuse after field/element extraction has no required error or
+  runtime check, including direct source paths;
+- Advanced `take` reconstructs its source before yielding the old value;
+  Basic `take` leaves its source unchanged and needs no `T()`;
 - manual construction has no old-value drop, intermediate value parameter,
   or automatic destination cleanup registration;
 - manual destruction performs full drop/field cleanup without deallocation;
@@ -2244,7 +2267,8 @@ Include:
   alongside accepted near-misses such as `f(x.size(), x)`,
   `f(length_of(&x), x)`, and `x = rebuild(x)`;
 - Advanced extraction through a read-only pointer;
-- direct relocation from a field or array element;
+- Advanced extraction from a fixed field, or `take` of a non-place;
+- Advanced `take` from read-only storage or without a valid `T()`;
 - unary `&` applied to a non-place result, literal, type, or function symbol;
 - taking `&` of an Inactive or MaybeActive root, including inside a cast;
 - wrong arity, non-pointer/read-only operands, or invalid pointee types for
@@ -2331,6 +2355,16 @@ Verify LLVM IR, compile to objects, link, and test the implemented subset:
   including a pop-style return without cloning or a replacement value;
 - single evaluation of pointer sources with unchanged pointer addresses and
   no source clearing or per-element flags;
+- direct field, nested-field, pointer-field, and element extraction followed
+  by reconstruction, with normal cleanup of the replacement;
+- compile-only acceptance of extraction followed by inactive-slot use,
+  assignment, or cleanup; never execute these undefined-behavior cases;
+- Basic `take` from fixed values, raw pointers, structures without a default
+  constructor, bit-fields, and packed fields, with no source mutation;
+- Advanced `take` default construction at the source address, single operand
+  evaluation, unchanged source cleanup, and exactly-once result cleanup;
+- `destination = take source`, including self-take assignment, and discarded
+  `take` results, tested at `-O0` and with optimization;
 - single evaluation and pointer-before-initializer ordering for `construct_at`;
 - manual construction from Basic, relocated Advanced, cloned, constructor,
   and function-result initializers, including final `this` address checks;

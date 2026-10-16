@@ -512,7 +512,7 @@ unary-expression-0
                   = postfix-expression-0
                   | ( "+" | "-" | "!" | "~" | "*" | "&" ),
                     unary-expression-0
-                  | "copy", unary-expression-0 ;
+                  | ( "copy" | "take" ), unary-expression-0 ;
 postfix-expression-0
                   = primary-expression-0,
                     { argument-list-0
@@ -551,7 +551,7 @@ unary-expression-1
                   = postfix-expression-1
                   | ( "+" | "-" | "!" | "~" | "*" | "&" | "@" ),
                     unary-expression-1
-                  | "copy", unary-expression-1 ;
+                  | ( "copy" | "take" ), unary-expression-1 ;
 postfix-expression-1
                   = primary-expression-1,
                     { argument-list-1
@@ -593,6 +593,11 @@ binary-op         = "||" | "&&"
    associativity are those specified by the Pratt-parser table in the
    implementation and language specification. Unary & takes an eligible
    data place's typed address, including pointer slots; binary & remains bitwise AND.
+   "take" is a reserved unary keyword. Its operand must be a place. For Basic
+   types it is an ordinary read; for Advanced types it requires writable access
+   and T(), extracts the old value, then constructs T() in the source slot.
+   Direct Advanced field and element sources use unchecked extraction, with
+   the same permissions as *(&place) and no automatic cleanup-state changes.
    construct_at(pointer, value) and destruct_at(pointer)
    are compiler-known, non-overloadable ordinary call forms with unqualified
    names. Semantic analysis checks their arity and operands. construct_at

@@ -224,8 +224,13 @@ leaving it active. The pointee must be live and accessible in either case.
 - Relocating a named Advanced value requires a writable source slot
   (`mut` before its name). The compiler manages source cleanup for whole
   locals, parameters, and fresh results. Extraction through `*pointer` uses
-  programmer-managed source cleanup instead. Direct field and array-element
-  moves remain rejected; HUC does not track partially inactive objects.
+  programmer-managed source cleanup instead. Direct field and element moves
+  (`value.field`, `p->field`, `items[i]`) use the same unchecked extraction
+  rules. They do not cancel cleanup of the old slot or its enclosing object.
+- `take place` extracts an Advanced value and constructs `T()` in its old
+  slot, so normal source cleanup remains valid. It requires writable access
+  and a zero-argument constructor. For Basic values, `take` simply copies:
+  the source is unchanged, and raw pointers are not nulled.
 - Copying a raw pointer does not clear it. Pointee `mut` may be dropped but
   never gained by ordinary pointer conversion.
 - Replacing an existing value requires a writable destination. An active
@@ -249,6 +254,8 @@ transfers.
 
 The [assignment-order example](examples/assignment-order.huc0) checks
 destroy-first sequencing and final result addresses without a library dependency.
+The [field extraction and take example](examples/take-and-extraction.huc0)
+checks slot reconstruction, source cleanup, Basic copies, and assignment order.
 
 ### Manually managed storage
 

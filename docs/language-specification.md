@@ -279,6 +279,10 @@ not keywords.
 `in` is an ordinary identifier, not a reserved keyword. Neither `for` nor
 `for1` has a range-based form; both use three-part, semicolon-separated headers.
 
+`take` is a reserved unary keyword, like `copy`. It copies a Basic value
+without changing its source, or extracts an Advanced value and constructs a
+replacement in the source slot (section 6.6.1).
+
 ### 3.2 Literals
 
 HUC has:
@@ -1045,7 +1049,7 @@ From lowest to highest precedence:
 | Shift | `<<`, `>>` | Left |
 | Additive | `+`, `-` | Left |
 | Multiplicative | `*`, `/`, `%` | Left |
-| Unary | unary `+`, `-`, `!`, `~`, dereference `*`, address-taking `&`, `copy`, and HUC1 `@` | Right |
+| Unary | unary `+`, `-`, `!`, `~`, dereference `*`, address-taking `&`, `copy`, `take`, and HUC1 `@` | Right |
 | Postfix | call, index, `.`, `->`, `++`, `--`, and HUC1 family request | Left |
 
 Unary `&` has the same precedence as dereference `*`. Postfix operations bind
@@ -1192,9 +1196,9 @@ Whenever relocation from a named root is otherwise permitted, its source
 storage must be writable, expressed by `mut` before the binding name.
 Relocation through `*pointer` instead requires `mut T*`; the pointer binding
 itself need not be writable. Section 6.4 defines the source cleanup rules and
-further restricts direct subobject sources. Fresh unnamed results need no
-binding `mut`. Direct constructors, calls, and Advanced `copy` results use
-the supplied final destination under section 6.2; other temporary Advanced
+the permissions for direct field and element sources. Fresh unnamed results
+need no binding `mut`. Direct constructors, calls, and Advanced `copy` results
+use the supplied final destination under section 6.2; other temporary Advanced
 values are relocated into it.
 
 ### 6.2 Destructive-relocation initialization
@@ -1252,7 +1256,7 @@ Ignore parentheses around the RHS when selecting its form:
 | Call returning `T` | Evaluate callee/receiver and bind arguments | Run call into final slot |
 | `copy expression` | Evaluate or retain the source, without the outer clone | Clone into final slot |
 | Eligible existing Advanced place | Retain source location, without transferring | Relocate into final slot |
-| Other Advanced expression, including `?:` | Evaluate completely | Relocate the prepared value |
+| Other Advanced expression, including `?:` and `take` | Evaluate completely | Relocate the prepared value |
 
 This does not delay nested operations. `dst = identity(copy src)` clones
 while binding `identity`'s parameter, then destroys `dst`, then runs `identity`.
@@ -1369,17 +1373,18 @@ and is permitted subject to section 6.12. This check does
 not track lifetime changes through raw-pointer aliases. Accessing inactive
 storage outside the checked cases remains undefined behavior.
 
-Relocation has two source forms:
+Relocation has two cleanup modes:
 
 - A whole named local or parameter, or a fresh temporary or result. These
   are **root places**. The compiler tracks their active state and suppresses
   cleanup after a direct transfer. It may use static control-flow facts or
   separate drop flags at joins. Straight-line transfers require no flag.
-- A dereference `*pointer` of type `T`, reached through `mut T*`. This
-  transfers a live Advanced pointee and makes its old slot inactive. The
+- A dereference `*pointer` through `mut T*`, or a writable field or element
+  place such as `value.field`, `pointer->field`, or `items[index]`. This
+  transfers a live Advanced value and makes its old slot inactive. The
   programmer manages source cleanup: the operation does not find or update
-  automatic cleanup state through aliases, including aliases of locals or
-  their fields. No runtime ownership lookup or per-element flags are added.
+  automatic cleanup state, including that of an enclosing local. No runtime
+  ownership lookup, per-field state, or per-element flags are added.
 
 In both cases, the whole source value and all its fields become inactive.
 No source destructor runs, no source bytes are cleared or initialized to a
@@ -1403,14 +1408,44 @@ into an inactive slot: it would first destroy the old value. Assignment to a
 named local whose cleanup state was not updated has the same problem.
 Use `construct_at` to initialize inactive manual storage (section 6.7).
 
-Direct relocation from `value.field`, `pointer->field`, or `array[index]`
-remains rejected. HUC does not track partially inactive aggregates. Explicitly
-dereferencing a writable pointer to such a slot uses the programmer-managed
-rule above, not automatic partial-lifetime tracking. `copy *pointer` remains
-valid for a live pointee that supports cloning and leaves it active; ordinary
-binding of a Basic pointee copies it instead of ending its lifetime.
+Direct field and element sources have exactly the extraction meaning of
+`*(&place)`, including nested paths such as `a.b.c`, `p->a.b`, and
+`items[i].field`. The selected place must be writable: `&place` must permit
+`mut T*`. Binding `mut` on an enclosing root does not make a fixed field
+writable. Through a pointer, pointee access matters, not the pointer binding's
+fixedness. A directly named containing local or parameter must still be Active
+under section 6.12. Evaluate the source place once.
 
-Either eligible source form may replace a valid indirect destination. Source
+HUC does not track partially inactive aggregates. A field move leaves its
+root's tracked state and normal field cleanup unchanged. Before cleanup reaches
+the old slot, construct a new live value there or arrange for cleanup to exclude
+it. Ordinary assignment to the inactive slot would destroy it again; use
+`construct_at`, or use `take place` to extract and refill in one operation.
+
+```huc
+// request.body is a writable Advanced field; the containing request is Active.
+let mut body: Buffer = request.body;
+construct_at(&request.body, Buffer()); // restore before request's cleanup
+// body now owns the extracted value; request owns the replacement.
+```
+
+Reading an inactive slot, destroying it, or relocating/copying an enclosing
+inline object that contains it is undefined behavior. Methods and user `drop`
+bodies must likewise not access an inactive field. These unchecked
+preconditions add no required diagnostic or runtime check, even for a directly
+written field path. Implementations may warn under section 8.4, but must not
+reject an otherwise well-typed runtime program solely for these lifetime
+hazards. Existing type, mutation-permission, and whole-root checks remain.
+The evaluator's general invalid-access checks still apply during execution.
+
+Inactive payload slots in `raw_storage` are not inactive ordinary fields.
+Moving raw storage with such slots remains valid under section 6.7.5.
+
+`copy place` remains valid for a live value that supports cloning and leaves
+it active. Basic fields, elements, and pointees are copied rather than extracted;
+their source lifetimes and cleanup are unchanged.
+
+Any eligible source may replace a valid indirect destination. Source
 and destination must be distinct and non-overlapping; this is unchecked.
 `construct_at` initializes inactive storage and `destruct_at` destroys a live
 value there (section 6.7).
@@ -1418,13 +1453,13 @@ Pointer extraction uses ordinary dereference syntax and needs no separate
 intrinsic.
 
 This is an unchecked lifetime operation even when the surrounding expression
-looks like an ordinary read. `let working: T = *p`, `return *p`, `consume(*p)`,
-and `construct_at(q, *p)` all extract an Advanced pointee in their value-binding
-contexts. The same expressions copy Basic pointees. Calling `p->method()`
-observes the pointee; `copy *p` requests an independent logical copy when
-supported. A writable observer parameter alone does not promise to preserve
-the pointee's lifetime: the function's contract must state any extraction and
-the required source cleanup or reconstruction.
+looks like an ordinary read. `let working: T = *p`, `return value.field`,
+`consume(items[i])`, and `construct_at(q, p->field)` all extract Advanced
+values in their value-binding contexts. The same expressions copy Basic values.
+Calling `p->method()` observes the pointee; `copy *p` requests an independent
+logical copy when supported. A writable observer parameter alone does not
+promise to preserve the pointee's lifetime: the function's contract must state
+any extraction and the required source cleanup or reconstruction.
 
 Inline values whose correctness depends on a stable address are an unchecked
 boundary of this model. For example, destructive relocation does not repair a
@@ -1586,6 +1621,57 @@ its slot under section 6.3. Every valid evaluated Advanced `copy` calls
 `clone`; there is no same-storage exception that skips it. Self-copy assignment
 is undefined behavior, not an exception to the clone contract.
 
+#### 6.6.1 Taking a value while keeping its source live
+
+`take place` is a non-overloadable unary operation with the precedence of
+`copy`. Its operand must be a place, not a literal or a fresh call result.
+Its result is a value, not an alias to the source place.
+
+For a Basic type, evaluate and read the place once using ordinary copy rules.
+The source is unchanged. No constructor, destruction, address-taking, or mutation
+permission is required beyond that needed to read the place. This includes
+fixed Basic values, raw pointers (which are not nulled), bit-fields, and
+under-aligned Basic fields. A Basic structure needs no zero-argument constructor.
+
+For an Advanced type `T`, require a writable, addressable place and a valid
+zero-argument constructor expression `T()`. A named local or parameter needs
+binding `mut`; fields and indirect places need the same writable access as
+extraction in section 6.4. Existing named-root state checks apply. The source
+must actually be live, valid, and suitably aligned; indirect lifetime and pointer
+validity remain unchecked. Perform these steps in order:
+
+1. Evaluate the source place once and retain its address.
+2. Relocate its old value into a separate result, ending the old slot's lifetime
+   without running its `drop` or clearing its bytes.
+3. Construct `T()` directly in that slot. Its `init` sees the slot's address.
+4. Yield the extracted result as a fresh value.
+
+On normal completion the source contains a live replacement. No automatic
+cleanup registration or per-field state changes. A tracked Active local stays
+Active. The replacement receives the source slot's normal later cleanup; the
+result follows ordinary value binding and temporary cleanup. If construction
+panics, the program terminates without a rollback guarantee.
+
+```huc
+let previous: Buffer = take request.body; // request.body now holds Buffer()
+let address: Buffer* = take pointer;     // Basic: pointer is unchanged
+```
+
+`take` is not a direct result initializer. In Advanced
+`destination = take source`, finish extraction and source reconstruction
+before destroying the old destination, then relocate the prepared result into
+it. Thus `x = take x` can be valid: it drops the freshly constructed replacement,
+not the extracted result. This does not create a same-storage exception for
+ordinary `x = x`. A discarded Advanced `take` result is destroyed at the end
+of its full expression.
+
+The Advanced type's `T()` must leave a usable replacement for this operation;
+it need not be cheap or empty. `take` preserves the slot's lifetime but does not
+prove other invariants of its enclosing object. Without a suitable default,
+extract directly and use `construct_at` with an explicit replacement, or
+exclude the slot from cleanup. Generic code may use `take` for any Basic type
+or an Advanced type with the required constructor and writable source.
+
 ### 6.7 Manually managed storage
 
 Allocation and deallocation are explicit library or external operations.
@@ -1692,9 +1778,13 @@ extraction; inlining does not change it.
   does not reactivate that root for named use or automatic cleanup. The
   programmer must manage the constructed value through pointers and destroy
   or extract it before releasing the storage.
-- Destruction or extraction of an inline field does not cancel automatic
-  field cleanup. Restore that field before enclosing-object use or cleanup
-  requires it to be live.
+- Destruction or extraction of an inline field, including a direct field move,
+  does not cancel automatic field cleanup. Restore that field before
+  enclosing-object use or cleanup requires it to be live.
+
+`take place` (section 6.6.1) performs extraction and reconstruction together
+for an Advanced value. Unlike plain extraction, it leaves a live source for
+normal cleanup. For a Basic value it simply copies without changing the source.
 
 In contrast, an Advanced value transferred from a directly named local into
 `construct_at` updates that **source** local's tracked state normally. The
@@ -1805,8 +1895,8 @@ One slot plus a presence flag is enough for a library inline optional. A sum
 type can use separate raw-storage fields for its alternatives and a tag; this
 uses more space than an overlapping union. Compact overlapping alternatives
 and a general union syntax remain separate design work. These facilities do
-not make ordinary `T` fields manually managed or allow direct Advanced field
-moves.
+not suppress ordinary `T` field cleanup. Direct Advanced field moves are
+unchecked extraction and must respect that cleanup (section 6.4).
 
 #### 6.7.6 Allocated storage and container bookkeeping
 
@@ -4318,8 +4408,8 @@ The evaluator supports the runtime language, including:
   section 6.12;
 - raw pointers to compile-time objects: `&`, `*`, `->`, `null`, equality, and
   arithmetic and ordering within one object or allocation;
-- `raw_storage<T, N>`, `construct_at`, `destruct_at`, and extraction through
-  `mut T*` (sections 6.4 and 6.7);
+- `raw_storage<T, N>`, `construct_at`, `destruct_at`, `take`, and extraction
+  through writable pointers, fields, and elements (sections 6.4, 6.6.1, and 6.7);
 - compile-time allocation (section 12.3);
 - string literals, as read-only compile-time data;
 - immutable constants with compiler-known values, without accessing runtime
@@ -4573,8 +4663,11 @@ The following list is representative rather than exhaustive:
 - access to inactive Advanced storage outside the section 6.12 check,
   including through raw pointers or untyped addresses, or by name after
   pointer extraction that did not update an aliased local's tracked state;
-- destroying an inactive slot after pointer extraction, including through
-  automatic local or enclosing-object cleanup that extraction did not cancel;
+- destroying an inactive slot after pointer, field, or element extraction,
+  including automatic local or enclosing-object cleanup that extraction did
+  not cancel;
+- reading or ordinarily assigning to an extracted field/element before
+  reconstruction, or transferring an enclosing inline object with inactive fields;
 - violation of an external function's contract;
 - out-of-range unchecked indexing;
 - signed overflow, invalid shifts, and integer division by zero;
@@ -4631,6 +4724,8 @@ The closest C++ equivalents are conceptual, not the backend representation:
 | `ptr_as<usize>(pointer)` | A raw data pointer converted to `std::uintptr_t` |
 | `copy a` | clone/copy construction, explicitly selected |
 | Advanced binding from `*p` | Move construction from `std::move(*p)`, except HUC ends the source lifetime and requires manual source cleanup management |
+| Advanced binding from `value.field`, `p->field`, or `items[i]` | Move construction from the corresponding `std::move(place)`, except HUC ends the source lifetime without cancelling enclosing cleanup |
+| `take place` | For Advanced values, extract and default-construct a replacement, conceptually like exchange; Basic values instead copy without resetting the source |
 | `construct_at(p, value)` / `destruct_at(p)` | `std::construct_at` / `std::destroy_at`, with HUC initialization and cleanup rules |
 | `raw_storage<T, N>` | Typed, aligned storage with manually managed element lifetimes; no implicit element cleanup |
 | `size_of<T>()` / `align_of<T>()` | `sizeof(T)` / `alignof(T)` |

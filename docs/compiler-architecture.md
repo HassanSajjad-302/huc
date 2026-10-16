@@ -428,6 +428,7 @@ is another such ordinary call. `as`, `ptr_as`, `size_of`, `align_of`, and
 `is_basic` use the HUC0 type-operand call production. `raw_storage<T, N>` is a
 built-in type primary and may be followed by `()` for empty-storage creation;
 its HUC0 count must be an integer literal. Address-taking uses unary `&`.
+`take` is a reserved unary keyword in both parsers, with `copy`'s precedence.
 
 Important recovery points are:
 
@@ -689,6 +690,12 @@ replacement of a pointer field and mutation of an inline field. It does
 not remove a field type's `mut` permission to mutate the separate object
 that the field points to.
 
+`take` requires a place. For a Basic type, type-check an ordinary read only:
+no writable access, address, or default constructor is needed. Bit-fields and
+under-aligned Basic fields retain their existing load rules. For an Advanced
+type, require writable addressable storage and a valid `T()`; apply existing
+named-root state checks. The actual indirect slot lifetime remains unchecked.
+
 Each concrete type records:
 
 - size and alignment, including the effect of `align`, `pack`, and `bits`;
@@ -857,6 +864,7 @@ Representative HIR operations:
 ```text
 LoadCopy(place)
 LoadRelocate(place)
+Take(place)
 AddressOf(place)
 SlotAddress(place)
 PointerFromAddress(address, raw_pointer_type)
@@ -895,23 +903,42 @@ declaration marked `mut`. Direct construction in the destination remains
 preferred and creates no such temporary.
 
 Relocation accepts a whole tracked local, parameter, temporary, or result, or
-an explicit dereference `*pointer` through `mut T*`. Both forms transfer the
-whole source value. HIR records the cleanup mode: a tracked root updates
-compiler-managed source state, while pointer extraction relies on the
-programmer to prevent cleanup of the inactive source slot. Evaluate the source
-pointer once without changing its address value.
+an explicit dereference `*pointer` through `mut T*`, or a writable field or
+element. These forms transfer the whole source value. HIR records the cleanup
+mode: a tracked root updates compiler-managed source state, while pointer,
+field, and element extraction rely on the programmer to prevent cleanup of
+the inactive source slot. Evaluate the source place once without changing
+any pointer's address value.
 
-Relocation remains rejected from `value.field`, `array[i]`, and
-`pointer->field`. HUC does not track partially inactive aggregates. Explicit
-dereference of a writable pointer to one of those slots uses programmer-managed
-cleanup; it does not suppress the enclosing object's field/element cleanup.
+Direct `value.field`, `items[i]`, and `pointer->field` sources lower with
+the same permissions and cleanup mode as `*(&place)`. Evaluate the place
+once. HUC does not track partially inactive aggregates; extraction does not
+suppress the enclosing object's field/element cleanup. Do not reject a typed
+runtime program solely because extraction leaves an inactive slot for later
+use or cleanup. Optional warnings are separate; existing whole-root and
+permission errors remain.
 Neither pointer provenance nor stack/heap allocation selects the cleanup mode.
 In particular, `*(&local)` does not acquire the direct local's cleanup behavior.
 Preserve this distinction through inlining and other optimizations.
 
 Indirect destinations may be replaced when their validity and activity
-preconditions hold; the restriction above concerns sources. Containers manage
-their backing storage and initialized element ranges explicitly.
+preconditions hold. Containers manage their backing storage and initialized
+element ranges explicitly.
+
+`Take` of a Basic type lowers to `LoadCopy`, including ordinary bit-field or
+under-aligned loads. It leaves the source unchanged. For Advanced `T`, retain
+the place address, relocate the old value into a separate result, then
+`ConstructInPlace` with `T()` in the old slot before yielding that result.
+Do not drop the old value, clear its bytes, or change automatic source cleanup
+state. The constructor sees the source slot's actual address. The result has
+normal temporary cleanup if it is not consumed.
+
+`Replace` treats Advanced `Take` as a fully prepared RHS, not a delayed
+constructor or call. Do not relocate directly into an assignment destination
+before its old value is destroyed: it may be the very slot being taken from.
+`x = take x` reconstructs `x`, drops that replacement, then transfers the
+prepared result back. These operations must keep their order without inlining.
+
 `InitializeAt` represents `construct_at`: evaluate the pointer once, then
 initialize its slot from the second operand using `Copy`, `Clone`, `Relocate`,
 or destination construction. Return the retained pointer. Do not create a
@@ -1072,8 +1099,9 @@ their ordinary `let` spelling; their storage is evaluator-owned for this call.
 Accept the runtime language: every scalar type including `c8` and floats,
 Basic and Advanced structures with constructors, methods, `copy`, relocation,
 and `drop`, pointers to compile-time objects, raw storage with `construct_at`,
-`destruct_at`, and extraction, and compile-time allocation. Execute them over
-the checked block model of section 8.2. Deferred compiler calls additionally
+`destruct_at`, `take`, and pointer/field/element extraction, and compile-time
+allocation. Execute them over the checked block model of section 8.2.
+Deferred compiler calls additionally
 keep their compiler-only value kinds, compiler intrinsics, and `let1 mut`
 assignment; their runtime requests must still reject compiler-only signatures
 and residual operations.
@@ -1725,11 +1753,11 @@ inactive as part of that operation. It never calls source `drop`, performs
 source component cleanup, or requires source fields to be cleared.
 
 The source operand retains the HIR cleanup mode. A tracked root updates its
-active-state metadata. A pointer source ends the pointee lifetime but does
-not search for or alter cleanup metadata of aliased roots or enclosing
-objects. This needs no ownership registry, hidden pointer metadata, or
-per-element flags. The destination is active in either case. Backend
-temporaries for the source address must not create a second owning value.
+active-state metadata. A pointer, field, or element source ends the slot's
+lifetime but does not search for or alter cleanup metadata of aliased roots
+or enclosing objects. This needs no ownership registry, hidden pointer
+metadata, or per-field/element flags. The destination is active in either case.
+Backend temporaries for the source address must not create a second owning value.
 
 `Relocate` and Advanced `Clone` require different, non-overlapping source and
 destination storage. Basic `Copy` retains read-then-store self-alias behavior.
@@ -1784,8 +1812,8 @@ MaybeActive
 ```
 
 This analysis arranges exactly-once destruction for tracked roots, provided
-unchecked pointer operations respect their cleanup contracts. Pointer
-extraction does not update root state through aliases; programmer-managed
+unchecked pointer, field, and element operations respect their cleanup
+contracts. Extraction does not update root state; programmer-managed
 storage uses its own initialized-range or equivalent bookkeeping. Attempting
 cleanup of an inactive extracted slot is undefined behavior, not a request
 to discover and suppress that cleanup at runtime.
@@ -1912,11 +1940,15 @@ Elaboration handles the operations as follows:
 - binding from an Advanced value becomes one fixed representation-transfer
   `Relocate`, which intrinsically makes the source and all subobjects inactive
   without requiring source-field clearing; tracked roots update their cleanup
-  state, while pointer sources leave source cleanup to the programmer;
+  state, while pointer, field, and element sources leave source cleanup to
+  the programmer;
 - a fresh unnamed Advanced result can be transferred directly;
   relocation from named root storage requires `mut` before its name;
 - extraction through `*pointer` requires `mut T*`, not a writable pointer
   binding, and does not modify the pointer's address value;
+- direct field and element extraction has the same meaning as `*(&place)`;
+- `take` becomes a Basic copy or Advanced extraction into a separate result
+  followed by default construction in the source slot;
 - Advanced assignment retains a preparation plan, drops the old destination
   if it remains active, then performs the outer operation in its slot;
 - `destination = copy source` retains source, drops destination, then runs
@@ -2049,7 +2081,8 @@ library's responsibility, not an LLVM array operation.
 | Pointer arithmetic / field access | Target-scaled address calculation with HUC bounds and layout rules |
 | Pointer/integer conversion | Target-supported conversion preserving HUC's specified address round trip |
 | Basic binding | Scalar or aggregate copy; source remains active |
-| Advanced relocation | Representation transfer and tracked-state update, without source clearing |
+| Advanced relocation | Representation transfer without source clearing; update cleanup state only for tracked-root sources |
+| `take place` | Basic read, or Advanced extraction followed by in-slot default construction; no source cleanup-state change |
 | `copy value` | Resolved clone call when required by the source type |
 | `construct_at(pointer, value)` | Initialize the supplied inactive place directly and yield its address |
 | `destruct_at(pointer)` | Emit full drop/field cleanup without freeing storage or updating aliased root flags |
@@ -2430,8 +2463,10 @@ symbol hashes must be identical across processes for identical inputs.
 - evaluator arithmetic and resource limits;
 - deferred-body delimiter scanning;
 - generation modes and insertion points for `#` in runtime and evaluated bodies;
-- tracked-root versus pointer-extraction cleanup modes;
-- rejection of direct field/array-element and read-only pointer sources;
+- tracked-root versus pointer/field/element extraction cleanup modes;
+- acceptance of writable direct field/element sources, with rejection of
+  fixed fields and read-only Advanced pointer sources;
+- `take` source-place checks and Advanced default-constructor selection;
 - drop-state analysis and relocation-state diagnostics for both `Inactive`
   and `MaybeActive` uses, covering branches, short-circuit operators, `?:`,
   loops, later arguments of the same call, and receiver or `&` arguments
@@ -2447,6 +2482,12 @@ incompatible types, missing clone, fixed sources, and containing-root
 relocations such as `packet.field = make_field(packet)`.
 
 Do not run undefined-behavior cases expecting a particular crash or output.
+
+Compile-only extraction cases must accept otherwise well-typed direct
+field/element moves followed by inactive-slot access, ordinary assignment, or
+enclosing cleanup. Optional warnings are allowed, but these are not required
+errors. Do not execute them as runtime conformance tests.
+
 Ordinary lowering tests should use possibly aliasing parameters to check the
 absence of an implicit comparison or fallback; optimizers need not preserve
 a particular instruction sequence after establishing undefined behavior.
@@ -2523,6 +2564,14 @@ Compile and run small programs that record:
   updates, including a pop-style return with exactly one destination cleanup;
 - extraction through a fixed `mut T*` binding without changing its address;
 - Basic pointee copying and explicit pointee cloning leaving sources active;
+- direct local-field, pointer-field, nested-field, and indexed extraction
+  followed by reconstruction or removal from a container's live range;
+- Basic `take` from fixed scalars, pointers, structures without `T()`,
+  bit-fields, and under-aligned fields, with no source changes;
+- Advanced `take` through locals, fields, pointers, and indexing, with one
+  source evaluation, in-slot `T()`, and unchanged automatic source cleanup;
+- `destination = take source` order, including `x = take x`, and destruction
+  of discarded `take` results at the full-expression boundary;
 - `construct_at` from Basic, Advanced, explicit-copy, constructor, and function
   result initializers, with each operand evaluated once and no hidden clone;
 - construct/extract/reconstruct/destruct cycles, final constructor addresses,

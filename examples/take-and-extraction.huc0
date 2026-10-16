@@ -1,0 +1,211 @@
+// Self-contained conformance example: main returns 0 on success.
+// Intended for -O0 and optimized runs once the compiler implements these rules.
+// All executed slots are live when read or destroyed; no UB cases execute.
+module examples.take_and_extraction;
+
+let mut events: u64 = 0;
+let mut last_default: usize = 0;
+let mut evaluations: i32 = 0;
+let mut basic_initializations: i32 = 0;
+
+// Event 1: default construction. Event 2: destruction.
+struct Probe {
+    let mut id: i32;
+
+    fn init() {
+        last_default = ptr_as<usize>(this);
+        events = events * 10 + 1;
+    }
+
+    fn drop() mut -> void {
+        events = events * 10 + 2;
+    }
+}
+
+struct Envelope {
+    let mut item: Probe;
+
+    fn init() {
+    }
+}
+
+struct Holder {
+    let mut envelope: Envelope;
+
+    fn init() {
+    }
+}
+
+// Basic despite having init; there is no zero-argument constructor.
+struct Number {
+    let value: i32;
+
+    fn init(value: i32) : value(value) {
+        basic_initializations += 1;
+    }
+}
+
+struct Flags {
+    let [bits(3)] mut mode: u32;
+
+    fn init() {
+        this->mode = 5;
+    }
+}
+
+struct [pack(1)] Packed {
+    let mut tag: u8;
+    let mut number: u64;
+
+    fn init() {
+        this->number = 9;
+    }
+}
+
+fn once(pointer: mut Probe*) -> mut Probe* {
+    evaluations += 1;
+    return pointer;
+}
+
+fn extract_field(holder: mut Holder*) -> Probe {
+    let mut old: Probe = holder->envelope.item;
+    construct_at(&holder->envelope.item, Probe());
+    return old;
+}
+
+fn main() -> i32 {
+    // Basic take only reads, even from fixed bindings and non-addressable fields.
+    let number: i32 = 7;
+    let copied: i32 = take number;
+    let pointer: i32* = &number;
+    let observed: i32* = take pointer;
+    let record: Number = Number(11);
+    let duplicate: Number = take record;
+    let flags: Flags = Flags();
+    let packed: Packed = Packed();
+    let mode: u32 = take flags.mode;
+    let unaligned: u64 = take packed.number;
+    if (copied != 7 || number != 7 || pointer != observed ||
+        duplicate.value != 11 || record.value != 11 ||
+        basic_initializations != 1 || mode != 5 || flags.mode != 5 ||
+        unaligned != 9 || packed.number != 9) {
+        return 1;
+    }
+
+    {
+        let mut source: Probe = Probe();
+        source.id = 7;
+        events = 0;
+        let old: Probe = take *once(&source);
+        if (evaluations != 1 || events != 1 || old.id != 7 ||
+            source.id != 0 || last_default != ptr_as<usize>(&source)) {
+            return 2;
+        }
+    } // old, then the replacement in source
+    if (events != 122) {
+        return 3;
+    }
+
+    {
+        let mut holder: Holder = Holder();
+        holder.envelope.item.id = 3;
+        events = 0;
+        let old: Probe = holder.envelope.item; // direct nested-field extraction
+        construct_at(&holder.envelope.item, Probe());
+        if (old.id != 3 || holder.envelope.item.id != 0 ||
+            events != 1 ||
+            last_default != ptr_as<usize>(&holder.envelope.item)) {
+            return 4;
+        }
+    } // old and the reconstructed field each receive cleanup
+    if (events != 122) {
+        return 5;
+    }
+
+    {
+        let mut holder: Holder = Holder();
+        holder.envelope.item.id = 4;
+        events = 0;
+        let old: Probe = extract_field(&holder);
+        if (events != 1 || old.id != 4 || holder.envelope.item.id != 0) {
+            return 6;
+        }
+    }
+    if (events != 122) {
+        return 7;
+    }
+
+    {
+        let mut storage: raw_storage<Probe, 2> = raw_storage<Probe, 2>();
+        let items: mut Probe* = storage_ptr(&storage);
+        construct_at(items, Probe());
+        construct_at(items + 1, Probe());
+        items[0].id = 4;
+        items[1].id = 5;
+        events = 0;
+        items[0] = items[1]; // drop destination, then extract source element
+        construct_at(items + 1, Probe()); // source element was inactive
+        let old: Probe = take items[0]; // source now receives a replacement
+        let valid: bool = events == 211 && old.id == 5 &&
+            items[0].id == 0 && items[1].id == 0;
+        destruct_at(items + 1);
+        destruct_at(items); // raw_storage never supplies element cleanup
+        if (!valid) {
+            return 8;
+        }
+    }
+    if (events != 211222) {
+        return 9;
+    }
+
+    {
+        let mut source: Probe = Probe();
+        source.id = 8;
+        let mut current: Probe = Probe();
+        current.id = 9;
+        events = 0;
+        current = take source; // reconstruct source before dropping current
+        if (events != 12 || current.id != 8 || source.id != 0 ||
+            last_default != ptr_as<usize>(&source)) {
+            return 10;
+        }
+
+        events = 0;
+        current = take current; // drop the replacement, then restore old value
+        if (events != 12 || current.id != 8 ||
+            last_default != ptr_as<usize>(&current)) {
+            return 11;
+        }
+
+        events = 0;
+        take current; // default construct, then destroy discarded result
+        if (events != 12 || current.id != 0) {
+            return 12;
+        }
+
+        events = 0;
+        let old: Probe = take current; // direct-local take keeps current Active
+        if (events != 1 || old.id != 0 || current.id != 0) {
+            return 13;
+        }
+    }
+    if (events != 1222) {
+        return 14;
+    }
+
+    {
+        let mut holder: Holder = Holder();
+        holder.envelope.item.id = 6;
+        let pointer: mut Holder* = &holder;
+        events = 0;
+        let old: Probe = take pointer->envelope.item;
+        if (old.id != 6 || holder.envelope.item.id != 0 || events != 1 ||
+            last_default != ptr_as<usize>(&holder.envelope.item)) {
+            return 15;
+        }
+    }
+    if (events != 122) {
+        return 16;
+    }
+    return 0;
+}

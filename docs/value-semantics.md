@@ -762,15 +762,16 @@ compiler is not required to prove address independence.
 
 ### 7.3 Where a transfer may take its value from
 
-An Advanced value can be transferred from either kind of source:
+An Advanced value can be transferred from these sources:
 
 | Source | Who prevents later cleanup of the old value? |
 |---|---|
 | A whole local or parameter with binding `mut`, or a fresh temporary/result | The compiler updates that place's active state. |
 | `*pointer` through `mut T*` | The programmer manages cleanup of the old slot. |
+| Writable `value.field`, `p->field`, or `items[i]` | The programmer, exactly as for `*(&place)`; enclosing cleanup is unchanged. |
 
-Both forms transfer the whole value, including its fields. The source becomes
-inactive, the destination takes responsibility for cleanup, and no source
+All these forms transfer the whole value, including its fields. The source
+becomes inactive, the destination takes responsibility for cleanup, and no source
 destructor, nulling, or replacement initialization occurs. The old bytes are
 not a usable second value. The pointer expression is evaluated once; extraction
 does not change the pointer's address value. Its binding can be fixed, but its
@@ -817,26 +818,70 @@ reconstruct a live value with `construct_at` before the caller uses or destroys
 that slot. Merely avoiding further reads in the caller does not prevent the
 invalid automatic destruction.
 
-Direct field and array-element moves remain rejected:
+Direct field and element moves use the same unchecked extraction rules:
 
 ```huc
-let lease: Lease = session.lease; // error: direct Advanced field source
-let other: Lease = session_pointer->lease; // error: direct field source
-let packet: Packet = packets[index]; // error: direct Advanced element source
+let lease: Lease = session.lease; // writable field becomes inactive
+let other: Lease = session_pointer->lease; // needs writable field access
+let packet: Packet = packets[index]; // needs mut Packet*
 ```
 
-HUC does not track partially inactive aggregates. Explicit extraction through
-a writable pointer to a field or element is allowed, but leaves the same
-cleanup obligation with the programmer. The enclosing object must not later
-try to destroy that inactive slot. Taking a pointer is not a way to cancel
-automatic field cleanup.
+Each selected place must be writable, as for `*(&place)`. An enclosing
+`mut` root does not make a fixed field writable. Named containing roots still
+need to be Active, but HUC does not track partly inactive objects. The enclosing
+object must not later destroy the extracted slot. Refill it with
+`construct_at`, or exclude it from cleanup, for example by reducing a
+container's live length.
+
+Ordinary assignment cannot refill an extracted Advanced field or element:
+it would destroy the inactive value first. Relocating or copying an enclosing
+inline object before restoring its field, or letting a method or `drop` read
+that field, is also undefined behavior. These lifetime mistakes are not
+required errors, even for direct field paths. Implementations may warn, but
+must not reject otherwise well-typed runtime code for them. Type, permission,
+and whole-root checks remain. No per-field flags or alias checks are added.
+Inactive payload slots in `raw_storage` are different: they may accompany a
+whole-storage transfer under section 9.3.
 
 Basic pointees are still copied, not consumed. `copy *file_pointer` clones a
 live, copyable pointee and leaves it active; it does not require pointee `mut`.
-Either eligible source form may replace a valid indirect destination. The
+Any eligible source may replace a valid indirect destination. The
 source must be distinct, non-overlapping, and survive destination destruction.
 Same-storage Advanced assignment is undefined behavior; the backend adds no
 implicit address comparison or no-op path.
+
+#### Taking a value and leaving a live source
+
+Use `take place` when an Advanced slot should remain live:
+
+```huc
+let body: Buffer = take request.body; // leaves Buffer() in the writable field
+let item: Buffer = take items[index]; // leaves Buffer() in that element
+```
+
+Evaluate the place once, relocate the old value out, construct `T()` directly
+in the old slot, then yield the extracted result. The replacement constructor
+observes the source slot's own address. This needs writable access, a live
+source, and a valid zero-argument constructor. No source `drop` runs during
+the extraction; normal cleanup later destroys the replacement.
+
+For Basic values, `take` only copies and leaves the source unchanged. No
+default constructor or writable access is needed, and a raw pointer is not
+set to null. Reading a Basic bit-field or under-aligned packed field works
+without taking its address. The operand must still be a place.
+
+An Advanced `take` is fully evaluated before assignment destroys its old
+destination. In `current = take spare`, `spare` already holds its replacement
+when `current` is destroyed. Even `x = take x` can be valid: it destroys the
+replacement and puts the extracted value back. Ordinary Advanced `x = x`
+remains undefined. A discarded extracted result is cleaned up at the end of
+its full expression.
+
+`take` does not track fields or preserve every enclosing-object invariant.
+The type's `T()` must be a suitable replacement; if not, use direct extraction
+and `construct_at` with an explicit value. If the constructor panics, the
+program terminates without rollback. See specification section 6.6.1 and
+[the standalone example](../examples/take-and-extraction.huc0).
 
 ### 7.4 Native handle example
 
@@ -1202,10 +1247,10 @@ Destruction order is:
 3. destruction of the inline `log` field.
 
 `drop` must not manually destroy Advanced fields that normal field cleanup
-will destroy. Direct relocation from an Advanced field remains rejected,
-even inside `drop`. Extracting through a writable pointer does not suppress
-the subsequent automatic field cleanup; leaving such a field inactive when
-`drop` returns is undefined behavior.
+will destroy. Direct extraction from a writable field is allowed, including
+inside `drop`, but it does not suppress subsequent automatic field cleanup.
+Leaving that field inactive when `drop` returns is undefined behavior. Refill
+it with `construct_at`, or use `take` when its default replacement is suitable.
 
 There is no exception unwinding in HUC0. A terminating panic need not execute
 pending `drop` operations.
@@ -1626,8 +1671,10 @@ Relocation into a different inactive slot can be written
 `construct_at(destination, *source)` through writable pointers. For an
 Advanced element the old slot then needs no destruction; container bookkeeping
 must exclude it from later cleanup. Deallocating backing storage is a separate
-library operation. Direct field/array-element move restrictions and the
-absence of user-defined relocation hooks remain unchanged.
+library operation. Direct `storage[index]` extraction has the same effect.
+There is still no user-defined relocation hook. `take storage[index]` instead
+leaves a live default replacement for an Advanced element; it is not the same
+as removing a slot from the container's live range.
 
 If `Vector<T>` itself supports logical copying, its library implementation can
 declare `clone` and explicitly copy each element. Copying a vector of Advanced
@@ -1839,6 +1886,8 @@ relocation behavior, C++ references, or C++ value-category overloads.
 | Fixed HUC destructive relocation | Move constructor/assignment | HUC ends the source lifetime and has no user hook |
 | Inactive source storage after relocation | Source remains alive after move construction | HUC source has no live object until reinitialized; C++ moved-from guarantees depend on the type, with standard-library types generally valid but unspecified |
 | Advanced binding from `*p`, including arguments and returns | Move construction from `std::move(*p)` | HUC ends the source lifetime without drop or source clearing; the programmer must prevent later source cleanup. Plain `T v = *p` in C++ normally copies instead |
+| Advanced binding from a writable field or element | Move construction from `std::move(object.field)` or `std::move(items[i])` | HUC ends the source lifetime without cancelling enclosing cleanup; it is the same unchecked extraction as `*(&place)` |
+| `take place` | Conceptually exchange with a default value for Advanced types | HUC constructs the replacement in the source slot after extraction; Basic values instead copy without resetting the source |
 | `construct_at(p, value)` | `std::construct_at(p, arguments...)` | HUC takes one initializer, including guaranteed direct destination construction, and requires inactive storage; neither operation allocates it |
 | `destruct_at(p)` | `std::destroy_at(p)` | Both perform destruction without deallocation; HUC does not cancel an aliased local's scheduled cleanup |
 | `raw_storage<T, N>` and `storage_ptr` | Typed aligned storage managed with placement construction/destruction | HUC does not automatically construct or destroy its elements; whole-storage transfer is destructive |
@@ -1857,7 +1906,8 @@ The compiler must reject:
 
 - relocating from a fixed source slot;
 - extraction of an Advanced value through a read-only `T*`;
-- direct relocation of an Advanced value from a field or array element;
+- `take` of a non-place, or Advanced `take` without writable access or a
+  valid zero-argument constructor;
 - copying an Advanced structure that has no valid `clone`;
 - a `clone` with parameters, a writable receiver, or the wrong return type;
 - more than one `clone` in a structure;
@@ -1889,6 +1939,7 @@ Useful warnings include:
 
 - a `clone` that returns or embeds a raw resource address from the source;
 - a `drop` that manually destroys an automatically destroyed field;
+- extraction that leaves an inactive field or element reachable by cleanup;
 - obvious self-assignment, overlapping Advanced assignment, or inputs that
   depend on the destroyed destination;
 - retaining a raw observer across value relocation or destruction;
@@ -1906,8 +1957,9 @@ assuming LLVM provides HUC value lifetimes:
 3. Relocation transfers the representation, makes the whole source inactive,
    and requires no clearing of source bytes; it is non-failing and independent
    of user overloads.
-4. Directly tracked inactive values are not dropped. Pointer extraction
-   leaves prevention of source cleanup to the programmer, not alias tracking.
+4. Directly tracked inactive values are not dropped. Pointer, field, and
+   element extraction leave prevention of source cleanup to the programmer.
+   No per-field state or alias tracking is added.
 5. Advanced assignment prepares RHS inputs, destroys the old active value,
    and executes the outer replacement operation in its slot. Same-storage
    assignment is undefined; no implicit identity branch is emitted.
@@ -1920,9 +1972,10 @@ assuming LLVM provides HUC value lifetimes:
 10. Automatic cleanup follows tracked root state on every normal exit and
     replacement. Programmer-managed extraction must respect that state;
     backend storage reclamation alone never performs HUC cleanup.
-11. Relocation accepts writable whole root sources and writable pointer
-    dereferences, with distinct source-cleanup responsibilities. Distinct,
-    non-overlapping source/destination storage is an unchecked precondition.
+11. Relocation accepts writable whole root sources, pointer dereferences,
+    fields, and elements, with distinct source-cleanup responsibilities.
+    Distinct, non-overlapping source/destination storage is an unchecked
+    precondition.
 12. Raw-pointer copying leaves the source unchanged and never cleans up or
     extends the lifetime of a pointee.
 13. `construct_at` initializes its supplied slot without destroying an old
@@ -1938,6 +1991,10 @@ assuming LLVM provides HUC value lifetimes:
     locals and conditional results retain their relocation semantics.
 16. Record source transfer before destination activation. Self-assignment
     therefore ends with Active bookkeeping without making its execution valid.
+17. Basic `take` is a read with no source changes. Advanced `take` extracts
+    once, then constructs `T()` in the source slot before yielding its result.
+    Keep that result separate from any retained assignment destination until
+    the old destination has been destroyed. Source cleanup state is unchanged.
 
 The middle-end makes construction, copy, relocation, activation, deactivation,
 and cleanup explicit before LLVM emission. Loads, stores, and memory-transfer
