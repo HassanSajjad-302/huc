@@ -29,7 +29,7 @@ The following syntax and behavior describe language rules, not library proposals
 - `ptr_as` for explicit raw-pointer and integer-address casts;
 - `construct_at` and `destruct_at` for manually managed value lifetimes;
 - `take place` to copy Basic values or extract and refill Advanced slots;
-- `raw_storage<T, N>` and `storage_ptr` for typed inline backing storage;
+- fixed arrays `T[N]`, array literals, and aligned `[nozero]` byte storage;
 - `size_of<T>()`, `align_of<T>()`, and `is_basic<T>()` for layout and category queries;
 - ordinary `fn`, deferred `fn name<>()`, and parameterized `fn name<T: auto>`;
 - ordinary `struct`, deferred `struct Name<>`, and parameterized `struct Name<T: auto>`;
@@ -296,7 +296,7 @@ module examples.consume;
 struct FileHandle {
     let mut native: i32;
 
-    fn init(native: i32) : native(native) {
+    fn init(native: i32) : native = native {
     }
 
     fn valid() -> bool {
@@ -349,9 +349,9 @@ struct Session {
     let output: FileHandle;
 
     fn init(id: i32, mut input: FileHandle, mut output: FileHandle)
-        : id(id),
-          input(input),
-          output(output),
+        : id = id,
+          input = input,
+          output = output,
     {
     }
 }
@@ -381,8 +381,8 @@ struct ByteBuffer {
     let size: usize;
 
     fn init(size: usize)
-        : data(memory::allocate_zeroed_bytes(size)),
-          size(size),
+        : data = memory::allocate_zeroed_bytes(size),
+          size = size,
     {
     }
 
@@ -422,8 +422,8 @@ struct Configuration {
     let mut scratch: u8*;
 
     fn init(port: i32, secure: bool)
-        : port(port),
-          secure(secure),
+        : port = port,
+          secure = secure,
     {
         // accepted_connections becomes 0.
         // scratch becomes null.
@@ -457,8 +457,8 @@ struct PixelBuffer {
     let size: usize;
 
     fn init(size: usize)
-        : bytes(memory::allocate_raw_bytes(size)),
-          size(size),
+        : bytes = memory::allocate_raw_bytes(size),
+          size = size,
     {
     }
 
@@ -473,8 +473,8 @@ struct Texture {
     let staging: PixelBuffer;
 
     fn init(gpu_id: u32, mut staging: PixelBuffer)
-        : gpu_id(gpu_id),
-          staging(staging),
+        : gpu_id = gpu_id,
+          staging = staging,
     {
     }
 
@@ -528,8 +528,8 @@ struct NativeLease {
     let identity: u64;
 
     fn init(handle: i32, identity: u64)
-        : handle(handle),
-          identity(identity),
+        : handle = handle,
+          identity = identity,
     {
     }
 
@@ -674,8 +674,8 @@ struct SelfIndexed {
     let key: u64;
 
     fn init(key: u64)
-        : self(null),
-          key(key),
+        : self = null,
+          key = key,
     {
         this->self = this;
     }
@@ -771,7 +771,7 @@ value-semantics examples; `File(handle)` constructs one live file wrapper:
 
 ```huc
 struct OptionalFile {
-    let mut storage: raw_storage<File, 1>;
+    let [align(align_of<File>()), nozero] mut storage: u8[size_of<File>()];
     let mut present: bool;
 
     fn init() {
@@ -779,7 +779,7 @@ struct OptionalFile {
     }
 
     fn set(mut value: File) mut -> void {
-        let slot: mut File* = storage_ptr(&this->storage);
+        let slot: mut File* = ptr_as<mut File*>(&this->storage[0]);
         if (this->present) {
             this->present = false;
             destruct_at(slot);
@@ -790,7 +790,7 @@ struct OptionalFile {
 
     // Precondition: present is true.
     fn remove() mut -> File {
-        let mut result: File = *storage_ptr(&this->storage);
+        let mut result: File = *ptr_as<mut File*>(&this->storage[0]);
         this->present = false;
         return result;
     }
@@ -798,7 +798,7 @@ struct OptionalFile {
     fn drop() mut -> void {
         if (this->present) {
             this->present = false;
-            destruct_at(storage_ptr(&this->storage));
+            destruct_at(ptr_as<mut File*>(&this->storage[0]));
         }
     }
 }
@@ -807,12 +807,12 @@ struct OptionalFile {
 Automatic cleanup of `storage` never repeats payload cleanup. Relocating the
 optional transfers the flag and storage together. An empty optional never
 constructs or destroys a `File`. A larger inline container uses a count rather
-than a presence flag and reserves several slots. Raw storage itself does not
-track either flag or count; it is always Advanced and cannot be cloned directly.
+than a presence flag and reserves several slots. The bytes track neither
+flag nor count. They are Basic; `OptionalFile` is Advanced because of `drop`.
 
-For generic code, Basic sources remain live after binding. End their lifetimes
-before reusing those slots with `construct_at`. Advanced sources are already
-inactive, so do not destroy them again:
+For generic code, Basic sources remain live after binding; Advanced sources
+become inactive. `construct_at` can reuse either kind of slot, so no category
+branch is needed when popping:
 
 ```huc
 // data points to length live, manually managed values; length > 0.
@@ -821,24 +821,24 @@ fn pop_last<T: auto>(data: mut T*, length: mut usize*) -> T {
     let last: usize = *length - 1;
     let slot: mut T* = data + last;
     let mut result: T = *slot;
-    if1 (is_basic<T>()) {
-        destruct_at(slot); // ends the Basic lifetime; no user cleanup call
-    }
     *length = last;
     return result;
 }
 ```
 
-`is_basic` selects this branch during specialization; it creates no runtime
-category test. The same pattern works when growing a vector into a distinct
-allocation: `construct_at(new_data + index, *(old_data + index))`, then end
-the old Basic lifetime only. After transferring the live prefix, free the old
-allocation without dropping its inactive Advanced sources. Allocators must
+The same pattern works when growing a vector into a distinct allocation:
+`construct_at(new_data + index, *(old_data + index))`. After transferring the
+live prefix, free the old allocation without dropping its inactive Advanced
+sources. Copied Basic sources need no cleanup. Allocators must
 honor `align_of<T>()`, and `capacity * size_of<T>()` needs an overflow check.
 Zero capacity can use null; avoid pointer arithmetic on it.
 
-See [the complete raw-storage contract](language-specification.md#675-typed-raw-inline-storage)
-and the [standalone inline-buffer example](../examples/raw-storage.huc0).
+For compiler evaluation, `compiler::deallocate` requires every slot to be
+inactive. Containers using that API must explicitly end copied Basic source
+lifetimes too; the runtime reuse example above does not do that bookkeeping.
+
+See [the complete raw-storage contract](language-specification.md#675-byte-arrays-as-object-storage)
+and the [standalone inline-buffer example](../examples/arrays.huc0).
 
 ### 3.9b Conditional observation
 
@@ -908,7 +908,7 @@ module examples.copy_then_transfer;
 struct Item {
     let value: i32;
 
-    fn init(value: i32) : value(value) {
+    fn init(value: i32) : value = value {
     }
 
     fn clone() -> Item {
@@ -938,7 +938,7 @@ module examples.conditional_relocation;
 
 struct Job {
     let id: i32;
-    fn init(id: i32) : id(id) {}
+    fn init(id: i32) : id = id {}
 
     fn drop() mut -> void {
         probable_finish_job(this->id);
@@ -1178,8 +1178,8 @@ struct PacketHeader {
     fn init(
         kind: u16,
         length: if1 (compact_header) u16 else u64,
-    ) : kind(kind),
-        length(length),
+    ) : kind = kind,
+        length = length,
     {
         if1 (!compact_header) {
             this->checksum = 0;
@@ -1200,8 +1200,8 @@ struct PacketHeader {
         let length: u16;
 
         fn init(kind: u16, length: u16)
-            : kind(kind),
-              length(length),
+            : kind = kind,
+              length = length,
         {
         }
     } else {
@@ -1209,8 +1209,8 @@ struct PacketHeader {
         let mut checksum: u32;
 
         fn init(kind: u16, length: u64)
-            : kind(kind),
-              length(length),
+            : kind = kind,
+              length = length,
         {
         }
     }
@@ -1225,8 +1225,8 @@ struct PacketHeader {
     let length: u16;
 
     fn init(kind: u16, length: u16)
-        : kind(kind),
-          length(length),
+        : kind = kind,
+          length = length,
     {
     }
 }
@@ -1385,7 +1385,7 @@ module examples.storage;
 struct Storage<T: auto> {
     let value: T;
 
-    fn init(mut value: T) : value(value) {
+    fn init(mut value: T) : value = value {
     }
 
     fn get() -> T* {
@@ -1396,7 +1396,7 @@ struct Storage<T: auto> {
 struct Storage<T: auto><T*> {
     let value: T*;
 
-    fn init(value: T*) : value(value) {
+    fn init(value: T*) : value = value {
     }
 
     fn get() -> T* {
@@ -1407,7 +1407,7 @@ struct Storage<T: auto><T*> {
 struct Storage<><u8> {
     let value: u8;
 
-    fn init(value: u8) : value(value) {
+    fn init(value: u8) : value = value {
     }
 
     fn get() -> u8 {
@@ -1436,12 +1436,12 @@ wins for every raw-pointer type.
 
 ### 5.2 Structural selection and body-level conditions
 
-This example assumes a probable library `InlineArray<T, N>` family; primitive
-`[N]T` arrays are deferred pending a separate design.
+This example uses fixed arrays. `N` must be positive; a zero-capacity design
+would need a specialization with no array field.
 
 ```huc
 struct Buffer<T: auto, N: usize> {
-    let mut values: InlineArray<T, N>;
+    let mut values: T[N];
     let mut used: usize;
 
     fn init() {
@@ -1449,7 +1449,7 @@ struct Buffer<T: auto, N: usize> {
 }
 
 struct Buffer<T: auto, N: usize><T*, N> {
-    let mut values: InlineArray<T*, N>;
+    let mut values: T*[N];
     if1 (N <= 16) {
         let mut used: u8;
     } else {
@@ -1520,7 +1520,7 @@ module examples.specialized_slot;
 
 struct Widget {
     let id: i32;
-    fn init(id: i32) : id(id) {}
+    fn init(id: i32) : id = id {}
 }
 
 fn run() -> i32 {
@@ -1865,8 +1865,8 @@ square root of 2; the compiler never substitutes a host `sqrt`.
 module examples.compile_time_storage;
 
 fn reverse_digits(mut value: u32) -> u32 {
-    let mut digits: raw_storage<u32, 10> = raw_storage<u32, 10>();
-    let slots: mut u32* = storage_ptr(&digits);
+    let [nozero] mut digits: u32[10];
+    let slots: mut u32* = &digits[0];
     let mut count: usize = 0;
     while (value > 0) {
         construct_at(slots + count, value % 10);
@@ -1886,9 +1886,9 @@ let1 reversed: u32 = reverse_digits(1234); // 4321
 
 A `let1` initializer is compiler code, so the plain call runs in the compiler.
 Each `construct_at` starts a value's lifetime in a slot, like C++ placement
-`new`. The evaluator records which slots are live, so reading `*(slots + count)`
-before constructing it would be a compile-time diagnostic, not an uninitialized
-read. The same function also remains an ordinary runtime function.
+`new`. The evaluator records which bytes have been written, so reading
+`*(slots + count)` before initializing it would be a compile-time diagnostic.
+The same function also remains an ordinary runtime function.
 
 ### 6.7 Turning compile-time data into runtime code
 
@@ -2621,7 +2621,7 @@ import library.read;
 
 struct UserType {
     let value: i32;
-    fn init(value: i32) : value(value) {}
+    fn init(value: i32) : value = value {}
 }
 
 fn main() -> i32 {
@@ -2655,7 +2655,7 @@ module app.main;
 
 struct UserType {
     let value: i32;
-    fn init(value: i32) : value(value) {}
+    fn init(value: i32) : value = value {}
 }
 
 fn main() -> i32 {
@@ -2679,10 +2679,9 @@ its own output positions.
 
 ## 8. Large case study: target-specialized small vector
 
-This case study uses `raw_storage<T, N>` for inline capacity and probable
+This case study uses aligned byte arrays for inline capacity and probable
 allocator APIs for heap capacity. `Inline` must be positive; a zero-capacity
-specialization would omit the inline-storage field. Primitive fixed arrays
-are still deferred.
+specialization would omit the inline-storage field.
 
 This example combines:
 
@@ -2711,7 +2710,7 @@ struct HeapArray<T: auto> {
     let capacity: usize;
 
     fn init(capacity: usize)
-        : capacity(capacity) {
+        : capacity = capacity {
         if (capacity != 0) {
             this->values = memory::allocate_raw_items<T>(capacity);
         }
@@ -2726,14 +2725,14 @@ struct HeapArray<T: auto> {
 }
 
 struct SmallVector<T: auto, Inline: usize> {
-    let mut inline_values: raw_storage<T, Inline>;
+    let [align(align_of<T>()), nozero] mut inline_values: u8[Inline * size_of<T>()];
     let mut heap_values: HeapArray<T>;
     let mut size: usize;
     let mut capacity: usize;
 
     fn init()
-        : heap_values(HeapArray<T>(0)),
-          capacity(Inline),
+        : heap_values = HeapArray<T>(0),
+          capacity = Inline,
     {
     }
 
@@ -2746,7 +2745,7 @@ struct SmallVector<T: auto, Inline: usize> {
             return this->heap_values.values;
         }
 
-        return storage_ptr(&this->inline_values);
+        return ptr_as<T*>(&this->inline_values[0]);
     }
 
     fn data_mut() mut -> mut T* {
@@ -2754,7 +2753,7 @@ struct SmallVector<T: auto, Inline: usize> {
             return this->heap_values.values;
         }
 
-        return storage_ptr(&this->inline_values);
+        return ptr_as<mut T*>(&this->inline_values[0]);
     }
 
     fn reserve(requested: usize) mut -> void {
@@ -2772,9 +2771,6 @@ struct SmallVector<T: auto, Inline: usize> {
         while (index < this->size) {
             let source: mut T* = this->data_mut() + index;
             construct_at(replacement.values + index, *source);
-            if1 (is_basic<T>()) {
-                destruct_at(source); // copied Basic source is still live
-            }
             index += 1;
         }
 
@@ -2803,7 +2799,7 @@ struct SmallVector<T: auto, Inline: usize> {
 }
 
 struct SmallVector<T: auto><T*, 4> {
-    let mut values: raw_storage<T*, 4>;
+    let [nozero] mut values: T*[4];
     let mut size: usize;
 
     fn init() {
@@ -2812,19 +2808,16 @@ struct SmallVector<T: auto><T*, 4> {
     fn push(value: T*) mut -> void {
         // This compact specialization deliberately has no spill path.
         // Writing past four slots is undefined in the unchecked profile.
-        construct_at(storage_ptr(&this->values) + this->size, value);
+        construct_at(&this->values[0] + this->size, value);
         this->size += 1;
     }
 
     fn get(index: usize) -> T* {
-        return *(storage_ptr(&this->values) + index);
+        return this->values[index];
     }
 
     fn drop() mut -> void {
-        while (this->size > 0) {
-            this->size -= 1;
-            destruct_at(storage_ptr(&this->values) + this->size);
-        }
+        // Keep the container Advanced; Basic pointers need no payload cleanup.
     }
 }
 
@@ -2882,9 +2875,9 @@ struct RegisterSpec<> {
         offset: usize,
         writable: bool,
     )
-        : name(name),
-          offset(offset),
-          writable(writable),
+        : name = name,
+          offset = offset,
+          writable = writable,
     {
     }
 }
@@ -2980,14 +2973,14 @@ let1 protocol_has_checksum: bool = true;
 struct WireInteger<Bits: usize> {
     if1 (Bits == 8) {
         let value: u8;
-        fn init(value: u8) : value(value) {}
+        fn init(value: u8) : value = value {}
     } else {
         if1 (Bits == 16) {
             let value: u16;
-            fn init(value: u16) : value(value) {}
+            fn init(value: u16) : value = value {}
         } else {
             let value: u32;
-            fn init(value: u32) : value(value) {}
+            fn init(value: u32) : value = value {}
         }
     }
 }
@@ -3002,15 +2995,15 @@ struct MessageHeader {
 
     if1 (protocol_has_checksum) {
         fn init(kind: u16, payload_size: u16, checksum: u32)
-            : kind(WireInteger<16>(kind)),
-              payload_size(WireInteger<16>(payload_size)),
-              checksum(WireInteger<32>(checksum)),
+            : kind = WireInteger<16>(kind),
+              payload_size = WireInteger<16>(payload_size),
+              checksum = WireInteger<32>(checksum),
         {
         }
     } else {
         fn init(kind: u16, payload_size: u16)
-            : kind(WireInteger<16>(kind)),
-              payload_size(WireInteger<16>(payload_size)),
+            : kind = WireInteger<16>(kind),
+              payload_size = WireInteger<16>(payload_size),
         {
         }
     }
@@ -3021,8 +3014,8 @@ struct Packet {
     let mut payload: net::ByteBuffer;
 
     fn init(header: MessageHeader, mut payload: net::ByteBuffer)
-        : header(header),
-          payload(payload),
+        : header = header,
+          payload = payload,
     {
     }
 }
@@ -3148,7 +3141,7 @@ import std.memory as memory;
 struct Position {
     let mut x: f32;
     let mut y: f32;
-    fn init(x: f32, y: f32) : x(x), y(y) {}
+    fn init(x: f32, y: f32) : x = x, y = y {}
 }
 
 struct Sprite {
@@ -3156,8 +3149,8 @@ struct Sprite {
     let mut pixels: memory::ByteBuffer;
 
     fn init(texture: u32, mut pixels: memory::ByteBuffer)
-        : texture(texture),
-          pixels(pixels),
+        : texture = texture,
+          pixels = pixels,
     {
     }
 }

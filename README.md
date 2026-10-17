@@ -122,8 +122,9 @@ names; ordinary library APIs remain separate.
 **Basic values are copied; Advanced values are transferred.** Numbers, raw
 pointers, and structures containing only Basic fields with neither `clone()`
 nor `drop()` are Basic. Structures with an Advanced field, `clone()`, or
-`drop()` are Advanced. Built-in `raw_storage<T, N>` is also Advanced, without
-automatic element cleanup. Use `copy value` for an explicit duplicate;
+`drop()` are Advanced. Fixed arrays `T[N]` have their element type's category
+and automatically clean up their elements. Use `copy value` for an explicit
+duplicate;
 Advanced structures support this by defining `clone()`.
 
 An Advanced transfer is bitwise relocation, not C++ move construction.
@@ -151,7 +152,7 @@ import std.io as io;
 struct Widget {
     let value: i32;
 
-    fn init(value: i32) : value(value) {
+    fn init(value: i32) : value = value {
     }
 
     fn clone() -> Widget {
@@ -236,15 +237,15 @@ leaving it active. The pointee must be live and accessible in either case.
 - Replacing an existing value requires a writable destination. An active
   Advanced destination uses destroy-first assignment: prepare RHS inputs,
   destroy the old value, then construct, call, clone, or relocate into its
-  slot. Nested operations and conditional RHS values can finish before
-  destruction. Prepare a separate replacement first when it needs the old value.
+  slot. Nested argument operations finish before destruction; a conditional
+  prepares only its selected arm and forwards the final destination. Prepare a separate replacement first when it needs the old value.
 - Advanced self-assignment, including `x = copy x`, is undefined behavior,
   with no implicit alias check or fallback. Optional warnings are allowed;
   ordinary type and moved-value checks remain. Basic self-assignment is valid.
 - Replacing a raw pointer never destroys its old pointee. Initialization has
-  no old value to clean up. Direct constructor, call, and Advanced `copy`
-  results use the final destination through nested direct returns, without
-  requiring inlining.
+  no old value to clean up. Direct constructor, call, Advanced `copy`, array
+  literal, and selected `?:` results use the final destination through nested
+  direct returns, without requiring inlining.
 - Raw observers do not keep objects alive. They become dangling when the
   object is destroyed and may be invalidated when inline storage relocates.
 
@@ -259,21 +260,26 @@ checks slot reconstruction, source cleanup, Basic copies, and assignment order.
 
 ### Manually managed storage
 
-`construct_at(pointer, value)` initializes an inactive slot and returns its
-pointer. Basic values copy, Advanced values transfer, and `T(arguments)`
-constructs directly in that slot. `destruct_at(pointer)` destroys a live value
-and its fields without freeing the slot's storage.
+`construct_at(pointer, value)` prepares initializer inputs, ends any old
+value in the slot without cleanup, then constructs the replacement there.
+It returns `void`. `destruct_at(pointer)` destroys a live value and its fields
+without freeing the slot's storage.
 
 Both infer the type from `mut T*`. Neither changes automatic cleanup state
 through aliases. The programmer supplies valid storage and tracks which
 slots are live. See [manual storage lifetimes](docs/value-semantics.md#92-constructing-and-destroying-values-in-manual-storage).
 
-`raw_storage<T, N>` reserves aligned inline slots without constructing `T`.
-`storage_ptr(&storage)` obtains their typed address; `size_of<T>()` and
-`align_of<T>()` provide target layout constants. A container tracks its live
-elements and cleans them up in `drop`. `is_basic<T>()` lets generic code tell
-a copied Basic source from an extracted Advanced source when retiring slots.
-See [raw storage](docs/value-semantics.md#93-reserving-raw-inline-storage).
+Fixed arrays use `T[N]` and literals such as `[1, 2, 3]`. They do not decay
+to pointers: `&a` addresses the array, and `&a[0]` addresses its first element.
+An aligned `[nozero]` byte array can reserve inline object storage without
+initializing the bytes. Use `ptr_as` to obtain a typed pointer and
+`construct_at` to start a payload's lifetime. The containing Advanced value
+transfers those payloads when relocated; its `drop` must clean them up.
+`size_of<T>()` and `align_of<T>()` provide target layout constants.
+See [byte-array storage](docs/value-semantics.md#93-reserving-raw-inline-storage)
+and the [standalone array example](examples/arrays.huc0).
+The [inference example](examples/array-inference.huc1) also covers generated
+inits, numeric literals, overloads, and array-parameter deduction.
 
 Conditional expressions produce values. With Advanced operands,
 `(condition ? a : b).size()` transfers the selected value and destroys the

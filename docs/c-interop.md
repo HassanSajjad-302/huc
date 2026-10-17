@@ -195,6 +195,14 @@ Type mapping rules:
 - Accesses through `volatile`-qualified C types are emitted as volatile
   accesses. `_Atomic` types are unsupported at first; use a helper
   (section 5.3).
+- A fixed C array field maps recursively to `T[N]`. C's `float m[3][4]`
+  becomes HUC `f32[4][3]`: both have three rows of four, indexed `[row][column]`.
+  Translate the nested type, not the printed suffix order. Clang still owns
+  the enclosing foreign record's layout.
+- Arrays do not decay in HUC. Pass `&a[0]` to a C element-pointer parameter,
+  or `&a` to a matching pointer-to-array parameter. A C array parameter is
+  imported after C's adjustment to pointer type. HUC `extern "C"` signatures
+  cannot pass or return arrays by value; records containing them are allowed.
 - C types are Basic in HUC. They have no `drop`, and copying one is a bitwise
   copy, exactly as in C.
 

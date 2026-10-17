@@ -13,7 +13,7 @@ fn record(event: u64) -> void {
 struct Probe {
     let value: i32;
 
-    fn [noinline] init(value: i32) : value(value) {
+    fn [noinline] init(value: i32) : value = value {
         last_constructed = ptr_as<usize>(this);
         record(4);
     }
@@ -85,7 +85,8 @@ fn main() -> i32 {
 
     events = 0;
     current = true ? copy source : copy duplicate;
-    if (events != 542 || current.value != 10) {
+    if (events != 254 || current.value != 10 ||
+        last_constructed != ptr_as<usize>(&current)) {
         return 7;
     }
 
@@ -107,6 +108,35 @@ fn main() -> i32 {
     current = replacement;
     if (events != 542 || current.value != 11) {
         return 10;
+    }
+
+    events = 0;
+    construct_at(&current, Probe(argument(current.value)));
+    // Read the scalar first; end the old lifetime without recording a drop.
+    if (events != 14 || current.value != 11 ||
+        last_constructed != ptr_as<usize>(&current)) {
+        return 12;
+    }
+
+    events = 0;
+    current = false ? Probe(argument(1)) : nested_make(argument(2));
+    if (events != 1234 || current.value != 2 ||
+        last_constructed != ptr_as<usize>(&current)) {
+        return 13;
+    }
+
+    let mut array: Probe[2] = [Probe(1), Probe(2)];
+    events = 0;
+    array = [Probe(argument(array[0].value)), Probe(argument(array[1].value))];
+    // All arguments, reverse old drops, then forward construction.
+    if (events != 112244 || array[0].value != 1 || array[1].value != 2 ||
+        last_constructed != ptr_as<usize>(&array[1])) {
+        return 14;
+    }
+    events = 0;
+    let copied: Probe[2] = copy array;
+    if (events != 5454 || last_constructed != ptr_as<usize>(&copied[1])) {
+        return 15;
     }
 
     let mut number: i32 = 12;

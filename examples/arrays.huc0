@@ -1,12 +1,12 @@
-module examples.raw_storage;
+module examples.arrays;
 
-// A self-contained lifetime example: main returns 0 when the checks pass.
+// Self-contained array and byte-storage checks: main returns 0 on success.
 let mut drop_order: i32;
 
 struct Probe {
     let id: i32;
 
-    fn init(id: i32) : id(id) {
+    fn init(id: i32) : id = id {
     }
 
     fn drop() mut -> void {
@@ -15,7 +15,7 @@ struct Probe {
 }
 
 struct InlineProbes {
-    let mut storage: raw_storage<Probe, 2>;
+    let [align(align_of<Probe>()), nozero] mut storage: u8[2 * size_of<Probe>()];
     let mut length: usize;
 
     fn init() {
@@ -24,7 +24,7 @@ struct InlineProbes {
 
     // Precondition: length < 2. The parameter is consumed by this call.
     fn push(mut value: Probe) mut -> void {
-        let slots: mut Probe* = storage_ptr(&this->storage);
+        let slots: mut Probe* = ptr_as<mut Probe*>(&this->storage[0]);
         construct_at(slots + this->length, value);
         this->length += 1;
     }
@@ -32,29 +32,30 @@ struct InlineProbes {
     // Precondition: length > 0.
     fn pop() mut -> Probe {
         let last: usize = this->length - 1;
-        let mut result: Probe = *(storage_ptr(&this->storage) + last);
+        let mut result: Probe = *(ptr_as<mut Probe*>(&this->storage[0]) + last);
         this->length = last; // exclude the inactive source slot
         return result;
     }
 
     fn drop() mut -> void {
-        let slots: mut Probe* = storage_ptr(&this->storage);
+        let slots: mut Probe* = ptr_as<mut Probe*>(&this->storage[0]);
         while (this->length > 0) {
             this->length -= 1;
             destruct_at(slots + this->length);
         }
-        // Automatic raw-storage field cleanup performs no Probe drops.
+        // Automatic byte-array field cleanup performs no Probe drops.
     }
 }
 
 fn main() -> i32 {
-    if (size_of<raw_storage<Probe, 2>>() != 2 * size_of<Probe>()) {
+    if (size_of<Probe[2]>() != 2 * size_of<Probe>()) {
         return 1;
     }
-    if (align_of<raw_storage<Probe, 2>>() != align_of<Probe>()) {
+    if (align_of<Probe[2]>() != align_of<Probe>()) {
         return 2;
     }
-    if (!is_basic<i32>() || is_basic<Probe>() || is_basic<raw_storage<i32, 1>>()) {
+    if (!is_basic<i32>() || is_basic<Probe>() ||
+        !is_basic<i32[1]>() || is_basic<Probe[2]>()) {
         return 3;
     }
 
@@ -87,16 +88,36 @@ fn main() -> i32 {
     }
 
     {
-        let mut numbers: raw_storage<i32, 1> = raw_storage<i32, 1>();
-        let slot: mut i32* = storage_ptr(&numbers);
+        let [nozero] mut numbers: i32[1];
+        let slot: mut i32* = &numbers[0];
         construct_at(slot, 10);
         let old: i32 = *slot; // Basic copy: source remains live
-        destruct_at(slot); // retire it before construction reuses the slot
-        construct_at(slot, 20);
+        construct_at(slot, 20); // live Basic lifetime ends without cleanup
         if (old != 10 || *slot != 20) {
             return 8;
         }
-        destruct_at(slot);
+    }
+    let mut pair: i32[2] = [1, 2];
+    pair = [pair[1], pair[0]]; // Basic replacement is ready before either store.
+    if (pair[0] != 2 || pair[1] != 1) {
+        return 9;
+    }
+    let grid: auto = [[1, 2, 3], [4, 5, 6]]; // i32[3][2]
+    let grid_pointer: i32[3][2]* = &grid;
+    if ((*grid_pointer)[1][2] != 6) {
+        return 10;
+    }
+    let mut zeros: i32[2];
+    if (zeros[0] != 0 || zeros[1] != 0) {
+        return 11;
+    }
+
+    drop_order = 0;
+    {
+        let probes: Probe[2] = [Probe(5), Probe(6)];
+    } // Automatic reverse element cleanup.
+    if (drop_order != 65) {
+        return 12;
     }
     return 0;
 }

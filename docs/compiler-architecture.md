@@ -405,7 +405,8 @@ Parse an optional attribute list directly after `struct`, `fn` (including
 `for`, and before a parameter. Keep the attributes as an AST field of the
 declaration or statement; attribute names are not keywords and are resolved
 against the built-in list, not the symbol table. In HUC0, an argument is an integer
-literal or an option name. In HUC1, it is an expression, and an entry may be
+literal or an option name; `align` also accepts the layout-expression grammar.
+In HUC1, it is an expression, and an entry may be
 `#expression`, ended by the first top-level `,` or `]` after a complete
 expression. After `fn` or `struct`, skip a balanced list to find the name and
 check for `<`. Such a family keeps its list as an opaque span next to its
@@ -423,11 +424,16 @@ Do not retain the old declaration order or `T&` as compatibility spellings.
 
 `construct_at(pointer, value)` and `destruct_at(pointer)`
 use ordinary call syntax with compiler-known, non-overloadable, unqualified
-names. Resolve them as intrinsics, not `std::` library calls. `storage_ptr`
-is another such ordinary call. `as`, `ptr_as`, `size_of`, `align_of`, and
-`is_basic` use the HUC0 type-operand call production. `raw_storage<T, N>` is a
-built-in type primary and may be followed by `()` for empty-storage creation;
-its HUC0 count must be an integer literal. Address-taking uses unary `&`.
+names. Resolve them as intrinsics, not `std::` library calls. `as`, `ptr_as`,
+`size_of`, `align_of`, and `is_basic` use HUC0 type-operand calls.
+Parse interleaved `*` and `[N]` suffixes left to right. HUC0 counts accept
+literals and layout queries combined with `+`, `*`, and parentheses;
+HUC1 counts accept compile-time expressions. Array literals are nonempty
+comma-separated lists in brackets. Attributes follow declaration/statement
+keywords, so an expression beginning with `[` is unambiguous. Constructor
+entries use `field = expression`. There is no array constructor call syntax.
+Address-taking uses unary `&`.
+
 `take` is a reserved unary keyword in both parsers, with `copy`'s precedence.
 
 Important recovery points are:
@@ -716,23 +722,43 @@ has a HUC0 angle-delimited type operand.
 Type-check the second operand of `construct_at` as an initializer for `T`,
 not as an ordinary call parameter. Apply normal built-in conversions,
 Basic/Advanced classification, source permissions, and relocation-state
-checks. Its result is `mut T*`; `destruct_at` returns `void`. Storage lifetime,
-capacity, alignment, and active/inactive preconditions are unchecked.
+checks. Both intrinsics return `void`. Capacity, alignment, and source
+lifetime preconditions are unchecked. `construct_at` ends an existing
+destination lifetime without cleanup; `destruct_at` requires a live value.
 
-Intern `raw_storage<T, N>` by canonical element type and count. Require a
-complete runtime object type, positive count, and representable target layout.
-Its size is `N * size_of<T>()` and alignment is `align_of<T>()`. It is always
-Advanced, without `clone` or implicit element drop. Empty-storage creation
-establishes the wrapper without initializing its payload. `storage_ptr` accepts
-one pointer to that wrapper and produces the element pointer with matching
-access permissions; it does not load an element or register cleanup.
+Intern `T[N]` by canonical element type and count. Require complete runtime
+elements, positive counts, and representable target layouts. Size is
+`N * size_of<T>()`; alignment and Basic/Advanced category follow `T`.
+Array literals use an expected array type or infer their default type from
+the elements. Validate counts and per-element initialization. There is no
+implicit conversion between existing array values of different element types.
+
+Keep unsuffixed numeric literals untyped until context or their default fixes
+the type. Typed operands decide before destination context. Fold maximal
+literal-only integer arithmetic exactly, then check the result's fit; bit
+operations use inferred widths. Find lossless common numeric types, handle
+mixed-sign integer comparisons without lossy conversion, and type shift
+amounts independently. Literal overload candidates must pass fit and count
+checks before ranking. No inference crosses statement boundaries.
+
+Validate `[nozero]` only for scalars and nested scalar arrays. Suppress
+omitted writes, not explicit initializers or fixed-field obligations. Generate
+memberwise and eligible zero-argument inits only for structures with no
+explicit `init`; preserve field order, declaration initializers, and mutable
+Advanced parameter bindings. See specification section 4.6.
+
+Byte arrays are Basic storage regions, not opaque Advanced wrappers. Typed
+pointers may traverse their whole region without payloads already being live.
+The programmer manages payload construction and destruction; no runtime
+payload map is needed. Enclosing Advanced relocation transfers live payloads
+at matching offsets; byte copying alone does not.
 
 Compute a structure's layout from declaration order, natural alignments, and
 its `align` and `pack` attributes (specification section 4.9.8). For a
 structure with a `bits` field, build an equivalent C record in Clang, with
 each bit-field typed as its C integer type. Use corresponding target C types
 for other built-ins and layout-only record/array descriptions for concrete
-HUC structures and `raw_storage`. Do not translate their lifecycle methods.
+HUC structures and fixed arrays. Do not translate their lifecycle methods.
 Preserve natural alignment and explicit alignment separately, including
 through nested types; size and alignment alone are not a sufficient layout
 description. An aligned byte-array replacement can wrongly introduce
@@ -750,7 +776,7 @@ them. Reject `&` on bit-fields.
 Fold `size_of<T>()` and `align_of<T>()` to target `usize`, and `is_basic<T>()`
 to `bool`, with no runtime operands. HUC1 evaluation and HUC0 lowering must
 use the same target layout and classification rules; retain the target layout
-inputs in the translation context. HUC1 resolves a storage count and prints
+inputs in the translation context. HUC1 resolves an array count and prints
 an integer literal in residual HUC0. Runtime counts are not valid type operands.
 
 ### 6.3 HUC1 phase checking
@@ -882,14 +908,18 @@ or return result, HIR names that final place as the constructor destination.
 This preserves the final `this` address for constructors and avoids an observable
 relocation. Direct calls and Advanced clones likewise use the final result
 place, forwarding it through nested direct returns even without inlining.
-An explicit named local or conditional result still has a separate place
-and is relocated; no named-return optimization is guaranteed.
+Array literals build in the final element slots. A conditional forwards the
+place recursively to its selected arm. An explicit named local still has a
+separate place and is relocated; no named-return optimization is guaranteed.
 
 `Replace` retains the RHS form rather than first materializing a complete
 replacement. Bind callee/receiver and arguments, or retain the copy/relocation
 source, before dropping the destination. Only then run the outer call,
 constructor, or clone into its slot, or relocate the retained source.
-Other expressions, including conditionals, are fully evaluated first. Preserve
+Conditionals evaluate the condition once and retain only the selected arm's
+preparation plan, recursively. Array literals prepare all element inputs
+first, then drop old elements in reverse and construct new ones forward.
+Other expressions are fully evaluated first. Preserve
 this distinction through inlining. Track ordinary source uses during
 preparation; the later operation uses retained operands with unchecked lifetime
 preconditions, not a new required alias/dependency check.
@@ -1022,15 +1052,19 @@ Every compile-time object lives in a block: a frame slot, a `let1` object, a
 string literal, or a `compiler::allocate` allocation. A pointer is a logical
 block ID plus a path to a slot or subobject, resolved in the active compiler
 state, never a host address. Each block version records
-its element type, slot count, and which slots and `raw_storage` elements hold
-live values, so every dereference, `construct_at`, `destruct_at`, extraction,
-and deallocation is checked against specification section 12.1. Pointer
-arithmetic moves within one slot sequence, a block's slots or a `raw_storage`
-field, or to one past its end; a pointer to any other object behaves like a
-pointer into a one-element sequence. Ordering pointers into different blocks
+its type, written bytes, and live objects, including payloads constructed in
+byte regions. Every dereference, `construct_at`, `destruct_at`, extraction,
+and deallocation is checked against specification section 12.1. Constructing
+over a live value ends it without cleanup after input preparation; this is
+not an evaluator error. Whole-aggregate transfers carry unwritten bytes
+without typed reads. Pointer arithmetic follows array/allocation slots or
+the whole byte-storage region, including one-past addresses. A pointer to
+any other object behaves like a pointer into a one-element sequence. Ordering pointers into different blocks
 and converting a pointer to an integer are diagnostics. Actual `u8` and `c8`
 objects are ordinary values; viewing an object of another type through `u8*`
-or `c8*` is a diagnostic until a byte-level layout model exists. Integers use
+or `c8*` remains a diagnostic until representation inspection is supported.
+This does not prohibit constructing and using typed objects in byte-array
+backing storage; that only needs target offsets and typed payload records. Integers use
 target widths; floats use strict IEEE binary32 or binary64 arithmetic,
 independent of host floating-point settings.
 
@@ -1392,7 +1426,7 @@ choices do not need name lookup. At expression use sites, retain ambiguous
 angle postfixes until resolution as before; the lexer emits separate angle tokens.
 
 Patterns may contain concrete types and values, binders, pointers whose `mut`
-must agree, family applications, `raw_storage<T, N>`, repeated binders, and
+must agree, family applications, array suffixes `T[N]`, repeated binders, and
 family binders such as `C<T>`. Match repeated binders by canonical identity,
 and bind a family binder to the family of the matched specialization. Ranking
 remains "matches a strict subset". Record each resolved request so that a later
@@ -1776,27 +1810,29 @@ transitions are MIR semantics, not optional annotations for the backend.
 Lower the retained assignment plan in order: prepare inputs, drop the old
 destination according to its post-preparation state, then `ConstructInPlace`,
 `Call`, `Clone`, or `Relocate` into that destination. A source temporary for
-`copy make_source()` survives through the clone. A nested clone argument or
-conditional result is prepared before drop. Source deactivation is recorded
+`copy make_source()` survives through the clone. A nested clone argument
+completes before drop, while a selected conditional arm follows its own
+preparation plan and forwards the slot. Source deactivation is recorded
 before destination activation, so a self-relocation root ends Active in the
 flow model without giving its undefined execution a meaning.
 
-Lower `InitializeAt` to initialization in the retained indirect destination,
-using the existing value operations but without registering automatic cleanup
-for that slot. Lower `DestructAt` to `Drop` of an indirect manual place with
+Lower `InitializeAt` by preparing inputs, ending any old lifetime without
+cleanup, then initializing the retained indirect destination. Use the existing
+value operations, but return `void` and register no automatic cleanup for that
+slot. Do not end enclosing structure or byte-array lifetimes. Lower `DestructAt` to `Drop` of an indirect manual place with
 its required-live precondition. Do not consult or update aliased root flags,
 even for `&local`; preserve that cleanup mode through inlining. Basic
 destruction needs no runtime call but ends the pointee lifetime in HUC.
 Neither operation adds allocation/deallocation or source/pointer-clearing
 code. Invalid runtime preconditions are not required to be checked.
 
-Raw-storage initialization makes its wrapper Active while leaving its element
-region inactive. MIR need not track individual element states. Whole-wrapper
-relocation transfers live payloads and dormant bytes together, without reading
-inactive slots as typed values. Dropping the wrapper emits no element cleanup;
-the library's length or tag controls explicit `DestructAt` operations. Basic
-copy-and-retire paths may contain a `DestructAt` with no runtime instructions;
-do not erase its lifetime meaning before validation.
+Array initialization builds each element in increasing index order. Array
+cloning does likewise; destruction goes in reverse. `[nozero]` omits the
+default writes of a scalar or scalar-array declaration. Byte storage has no
+payload cleanup. Enclosing Advanced relocation transfers payload lifetimes
+and unwritten bytes without scanning them or reading inactive values. The
+evaluator tracks these lifetimes for host safety; runtime MIR needs no
+per-payload flags. Library length or tag state controls explicit cleanup.
 
 ## 12. Lifetime and drop elaboration
 
@@ -1845,10 +1881,10 @@ argument evaluation, including in a nested expression, in two cases. The
 first is when the root is the root of the call's receiver place. The second
 is when an earlier argument of that call is an `AddressOf` of the root or of
 one of its fields. An address formed inside an earlier argument that does
-not itself become an argument does not count. Constructor expressions,
-intrinsic calls, and initializer entries count as calls. Receiver roots, destination roots, and
-earlier `AddressOf` arguments are recognized as specification section 6.12
-describes.
+not itself become an argument does not count. Constructor expressions and
+intrinsic calls count as calls, including inside `field = expression`
+initializers. Receiver roots, destination roots, and earlier `AddressOf`
+arguments are recognized as specification section 6.12 describes.
 HIR records the source spellings needed for this: parentheses, field
 projections, `(&r)->f`, `*&r`, `ptr_as`, and either arm of `?:`. That
 recognition does not change the cleanup mode of `*&r` (section 7).
@@ -2065,12 +2101,13 @@ HIR/MIR even when LLVM represents their addresses with opaque `ptr` values.
 Storage is allocated with the target-required alignment; the emitter must not
 infer source ownership or permissions from an LLVM pointer.
 
-Represent `raw_storage<T, N>` as aligned space for a contiguous sequence of
-`N` concrete `T` layouts. Reserve the region without constructing payloads or
-registering element cleanup. `storage_ptr` addresses its first slot. Transfers
-must carry the representation, including inactive regions, without turning
-uninitialized payload into typed value reads. Cleanup remains the containing
-library's responsibility, not an LLVM array operation.
+Represent `T[N]` with the target layout of `[N x T]`, including nested
+arrays. Emit no default writes for `[nozero]`. Byte arrays provide backing
+regions for typed objects but add no payload cleanup or runtime metadata.
+Aggregate copies and relocations must carry unwritten representation without
+turning it into typed scalar reads or poison-dependent behavior. Use memory
+transfers or equivalent lowering that preserves this contract. Only enclosing
+Advanced relocation transfers payload lifetimes; a Basic byte copy does not.
 
 ### 13.2 Operation mapping
 
@@ -2084,10 +2121,14 @@ library's responsibility, not an LLVM array operation.
 | Advanced relocation | Representation transfer without source clearing; update cleanup state only for tracked-root sources |
 | `take place` | Basic read, or Advanced extraction followed by in-slot default construction; no source cleanup-state change |
 | `copy value` | Resolved clone call when required by the source type |
-| `construct_at(pointer, value)` | Initialize the supplied inactive place directly and yield its address |
+| `construct_at(pointer, value)` | Prepare inputs, end any old lifetime without cleanup, initialize in place; result is `void` |
 | `destruct_at(pointer)` | Emit full drop/field cleanup without freeing storage or updating aliased root flags |
 | Destruction | Explicit user `drop` followed by reverse field cleanup for active values |
 | `T(arguments)` initializing a final place | Initializer call with the final destination address |
+| Array literal / Advanced array copy | Direct element initialization or cloning in increasing index order |
+| Array destruction | Reverse element cleanup |
+| `[nozero]` | Omit default writes; preserve aggregate representation-copy rules |
+| Direct-result `?:` | Branch on the condition once and forward the destination to the selected arm |
 | Layout and category queries | Constants from the shared target/type model |
 | Under-aligned packed field access | Loads and stores with the field's actual alignment |
 | Bit-field read or write | Load the storage unit, then shift and mask; a write keeps neighboring bits |
@@ -2390,7 +2431,7 @@ symbol hashes must be identical across processes for identical inputs.
 - angle-binder declaration lookahead, zero-binder primaries, full and partial
   patterns, and bodies immediately after complete declaration headers;
 - pattern forms: `mut`-sensitive pointers, pointer chains, family
-  applications, `raw_storage`, repeated binders, and family binders, with
+  applications, array suffixes, repeated binders, and family binders, with
   strict-subset ranking and late-specialization errors;
 - `let1 mut` assignment order within its module, preparation-time reads fixed
   into prepared bodies versus current-value reads in executing compiler code, a
@@ -2447,8 +2488,14 @@ symbol hashes must be identical across processes for identical inputs.
 - invalid non-place address operands and pointer/`usize` cast type checking;
 - Inactive/MaybeActive root address rejection even inside integer casts;
 - canonical type interning;
-- raw-storage type interning, positive literal counts, layout overflow, and
-  recursive layout diagnostics; target layout/category query evaluation;
+- array type interning, mixed pointer suffixes, literal/layout-expression
+  counts, layout overflow, recursive layout diagnostics, and target queries;
+- array literals in contextual and inferred positions, nested literals,
+  deduction and overload ranking, no decay, and copying uncopyable elements;
+- contextual numeric literals, exact literal-only arithmetic, typed overflow,
+  independent shift amounts, mixed-sign comparisons, and fit diagnostics;
+- generated memberwise/default inits, suppression by explicit init,
+  `field = expression` entries, and `[nozero]` validity and unwritten reads;
 - raw-pointer copying, including null, with no source changes or pointee cleanup;
 - raw-pointer inference for `auto` and permission-dropping conversions;
 - rejection of incompatible pointer types and added pointee `mut`;
@@ -2511,7 +2558,8 @@ Relocation goldens must show whole-value `Relocate`, including for nested
 Advanced aggregates, with no recursive source-field transfers or null stores.
 Replacement goldens must show input preparation, destination cleanup, and
 the delayed outer operation in that order, with no implicit alias comparison.
-Check nested-copy and conditional RHS cases that finish values before cleanup,
+Check nested copies that finish before cleanup, selected conditional arms
+that forward their result slot, and array-literal prepare/drop/build passes,
 and post-preparation drop flags for `x = wrap(x)`. Address-taking goldens include
 `&place` for pointer slots and `ptr_as<usize>(&place)` for integer conversion.
 The latter must reuse the ordinary address calculation and its permission
@@ -2527,10 +2575,12 @@ Manual-storage goldens must show pointer-before-initializer sequencing, direct
 construction at the supplied address, and complete manual destruction without
 deallocation. Verify that direct Advanced sources become Inactive but aliased
 destination roots keep their existing tracked state.
-Raw-storage goldens must show typed contiguous C backing storage, no element
-construction on wrapper creation, no implicit payload destruction, and no
-per-element flags. Test payload transfer inside a relocated container and
-`storage_ptr` on empty storage without reading uninitialized bytes.
+Byte-storage goldens must show aligned LLVM backing arrays, omitted writes
+for `[nozero]`, no implicit payload destruction, and no per-element flags.
+Test payload transfer inside a relocated container, typed pointer arithmetic
+through unused capacity, and address casts without uninitialized byte reads.
+Check live `construct_at`: inputs are prepared before old lifetime end,
+there is no old drop, and no pointer result is produced.
 
 ### 17.3 Execute tests
 

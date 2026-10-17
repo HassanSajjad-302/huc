@@ -163,12 +163,13 @@ HUC0 contains:
 - raw pointers `T*`;
 - unary `&` and `take`, `construct_at`, `destruct_at`, and the core
   type-operand intrinsics;
-- typed `raw_storage<T, N>`, `storage_ptr`, and compile-time `size_of`,
+- fixed arrays `T[N]`, array literals, byte-array storage, and `size_of`,
   `align_of`, and `is_basic` queries;
 - constructors, methods, `clone`, and `drop`;
 - runtime expressions and control flow;
 - local `let name: auto` inference;
-- built-in attribute lists with literal arguments, such as
+- built-in attribute lists with literal arguments (layout expressions also
+  work in `align`), such as
   `struct [align(64)] Slot` and `if [unlikely] (err)`.
 
 HUC0 does not contain:
@@ -182,14 +183,15 @@ HUC0 does not contain:
 
 The angle operands in `as<T>`, `ptr_as<Target>`, `size_of<T>()`, `align_of<T>()`,
 and `is_basic<T>()` are built-in type operands, not phase-family requests.
-`raw_storage<T, N>` is a built-in type form with a positive integer-literal
-count in HUC0. These are the only angle forms accepted by HUC0.
+These are the only angle forms accepted by HUC0. Arrays use postfix `[N]`,
+where HUC0 accepts a positive integer literal or a layout expression using
+`size_of`, `align_of`, `+`, `*`, and parentheses.
 All HUC intrinsics have unqualified names, not `std::` names; they are not
 ordinary standard-library functions.
 
-Primitive fixed arrays and `bit_as` are deferred pending separate designs.
-Containers and swapping can initially be supplied by libraries. Raw storage
-supplies their inline backing slots without becoming a general array or sum type.
+`bit_as` is deferred pending a separate design. Containers and swapping can
+be supplied by libraries. Aligned `[nozero]` byte arrays provide inline
+backing storage without adding a sum type.
 
 ### 4.2 HUC1
 
@@ -287,7 +289,7 @@ Byte views use `u8*` or `c8*`; casts do not make incompatible typed access valid
 
 Taking `&` of an Inactive or MaybeActive named root remains a diagnostic,
 including when nested in a cast. Manual-storage code retains a pointer before
-transfer or uses `raw_storage`. Casts do not preserve permission metadata or
+transfer or uses byte-array backing storage. Casts do not preserve permission metadata or
 update activation and cleanup state. The programmer must preserve storage
 lifetime, alignment, actual permissions, valid representation, and cleanup
 obligations. Writing actually fixed storage remains undefined behavior.
@@ -314,12 +316,13 @@ Basic types include:
 
 - scalar arithmetic and boolean types;
 - raw pointers;
+- arrays of Basic elements;
 - structures whose fields are all Basic and which declare neither `clone` nor
   `drop`.
 
 Advanced types include:
 
-- built-in `raw_storage<T, N>`, with no implicit payload cleanup or cloning;
+- arrays whose element type is Advanced, with automatic reverse element cleanup;
 - structures containing an Advanced field;
 - structures declaring `clone`;
 - structures declaring `drop`.
@@ -399,8 +402,10 @@ object remains alive. Advanced assignment follows a destroy-first order:
 1. Retain the destination, then prepare RHS arguments or source places.
 2. Drop the old destination if it remains active after preparation.
 3. Run the outer constructor, call, or clone directly in its slot, or relocate
-   the retained source. Other expressions, including `?:`, finish first and
-   then relocate their prepared result.
+   the retained source. A conditional prepares only its selected arm by
+   these rules. An array literal prepares all element inputs before drop,
+   then builds in increasing index order. Other expressions finish first
+   and relocate their prepared result.
 4. Record source transfer before making the destination Active.
 
 Same-storage or overlapping Advanced assignment is undefined behavior, even
@@ -475,14 +480,14 @@ Container implementations manage backing storage and initialized element
 ranges. For example, a pop implementation extracts its last element through
 a writable pointer and reduces the length, excluding that inactive slot from
 later cleanup. No replacement value, per-element flag, or extraction intrinsic
-is required. `construct_at(pointer, value)` initializes an inactive slot and
+is required. `construct_at(pointer, value)` initializes a slot without cleanup and
 `destruct_at(pointer)` destroys a live value without freeing its storage.
 Ordinary assignment is not a substitute for construction into an inactive slot.
 
 Both are unqualified, non-overloadable runtime intrinsics using ordinary call
 syntax. Infer the concrete `T` from a `mut T*` operand; do not add a type
 argument, constructor-argument pack, or overload accepting an untyped address.
-`construct_at` takes exactly two operands and returns the same `mut T*`;
+`construct_at` takes exactly two operands and returns `void`;
 `destruct_at` takes one and returns `void`. The pointer binding may be fixed,
 but the pointee type must be complete and writable. Pointer-chain pointee
 types are allowed when the destination storage is valid and writable.
@@ -491,14 +496,16 @@ Evaluate the destination pointer once before the initializer. Check the
 initializer as for a local of type `T`, without introducing a by-value `T`
 parameter: Basic values copy, eligible Advanced sources transfer, and explicit
 `copy` clones. A direct constructor or function result initializes the supplied
-slot as its final destination. No old value is destroyed. `destruct_at`
+slot as its final destination; array literals and selected `?:` arms do too.
+Prepare the inputs first, then end any old lifetime without cleanup before
+finishing initialization. Enclosing objects stay alive. `destruct_at`
 performs user `drop` and reverse field cleanup; for Basic values it ends the
 lifetime without user code.
 
 The caller supplies valid storage with sufficient size and alignment and
-manages its live/inactive state. Null pointers, construction over a live value,
-overlapping source/destination storage, and destruction of an inactive value
-violate unchecked preconditions. Neither construction nor Advanced assignment
+manages its live/inactive state. A live slot may be reused without cleanup,
+possibly leaking resources. Null pointers, overlapping source/destination
+storage, and destruction of an inactive value violate unchecked preconditions. Neither construction nor Advanced assignment
 has a self-relocation no-op. Neither intrinsic deallocates destination storage,
 nulls the pointer, or registers automatic cleanup. User constructors/destructors
 may manage their own resources.
@@ -508,37 +515,45 @@ named Advanced source transferred into `construct_at` still becomes Inactive
 normally. Destination cleanup remains manual. HIR must preserve this
 distinction through inlining. See language specification section 6.7.
 
-#### Raw storage and layout queries
+#### Arrays, byte storage, and layout queries
 
-Provide `raw_storage<T, N>` as a built-in runtime type with a positive literal
-count in HUC0. HUC1 resolves compile-time counts before emission. The type
-reserves `N * size_of<T>()` contiguous bytes aligned to `align_of<T>()`, with
-no elements constructed, hidden tags, or cleanup flags. Require a complete
-runtime `T` and diagnose invalid counts, recursive layout, and size overflow.
-Empty-storage construction is `raw_storage<T, N>()`, also the default for an
-omitted mutable binding or field.
+Intern `T[N]` by canonical element type and positive count. Suffixes wrap
+left to right, so `f32[4][3]` has three rows of four. HUC0 accepts literal or
+layout-expression counts; HUC1 resolves compile-time counts to literals.
+Require complete runtime elements and representable target layout. Size is
+`N * size_of<T>()`; alignment and Basic/Advanced category follow `T`.
 
-The storage wrapper is always Advanced and has no `clone` or implicit element
-destruction. Whole-wrapper relocation transfers live payloads and dormant
-representation bytes without element scans. Library containers must track and
-clean their live slots explicitly before releasing storage. A container's
-ordinary `drop` performs that work; subsequent field cleanup does not repeat it.
-Do not use a declared byte array with incompatible C typed accesses in lowering.
+Array literals initialize exactly `N` elements. Use an expected array type
+when available, otherwise infer a default from the elements. There is no
+pointer decay, `T[N]()` spelling, or repeat literal. Indexing produces an
+element place with unchecked bounds. Default initialization and explicit
+cloning proceed in increasing index order; destruction uses decreasing order.
+Advanced literal assignment prepares all inputs before destroying old elements
+and constructing new ones. Basic array assignment prepares the whole value
+before stores. Preserve normal extraction and `take` behavior on elements.
 
-`storage_ptr` accepts one pointer to the wrapper and returns the first element
-slot's typed address, preserving read-only/writable permission, without reading
-or constructing a payload. `size_of<T>()`, `align_of<T>()`, and `is_basic<T>()`
-take no value operands and fold to target `usize`, `usize`, and `bool` constants.
-The category query reflects existing inference, not a type marker or trait.
-Use it in generic pop/growth code to destroy copied Basic source values before
-slot reuse, while skipping destruction of extracted Advanced sources.
+`[nozero]` is valid only on scalar or nested scalar-array declarations. It
+suppresses omitted zero/null initialization, not an explicit initializer.
+Whole-aggregate representation copies may carry unwritten bytes without typed
+reads. It adds no runtime initialization flags.
 
-One-slot storage plus a library flag supports an inline optional without a
-default `T`; separate alternative fields plus a tag support a larger inline
-sum representation. Overlapping unions are not introduced by this facility.
-Dynamic backing allocations remain library operations with checked size
-arithmetic and explicit alignment contracts. The controlling details are in
-language specification sections 6.7.4–6.7.6.
+Aligned `u8[N]` and `c8[N]` arrays can hold payload objects of any type.
+Use `ptr_as<mut T*>(&bytes[0])` and `construct_at`; no storage-specific
+type or address intrinsic is needed. Typed pointer arithmetic may traverse
+the byte region and form one-past pointers even before payload construction.
+Byte arrays are Basic and provide no payload cleanup. Relocating an enclosing
+Advanced value transfers live payloads at the same offsets; ordinary byte
+copies do not transfer their lifetimes. Library `drop` code manages live
+ranges. Cached pointers into the old region are not repaired.
+
+`size_of<T>()`, `align_of<T>()`, and `is_basic<T>()` take no value
+operands and fold to target `usize`, `usize`, and `bool` constants.
+A copied Basic source can be reused by `construct_at` without an intervening
+`destruct_at`; an extracted Advanced source must not be destroyed again.
+One aligned region and a flag support an optional without a default payload.
+Separate regions and a tag support sum-like storage without overlapping unions.
+Dynamic allocation remains a library operation with checked size arithmetic
+and explicit alignment contracts. See specification sections 4.7 and 6.7.
 
 ### 5.5 Construction and initialization
 
@@ -556,8 +571,9 @@ HUC behavior rather than optional backend copy elision.
 Direct function and Advanced `copy` results use the same final slot. Forward
 it through `return T(...)`, `return call()`, and `return copy source`, including
 nested factories or clones at `-O0` and without inlining. Returning an explicit
-Advanced local still relocates it; conditionals prepare a value and then
-transfer it. Advanced assignment supplies its inactive destination after
+Advanced local still relocates it. A conditional forwards the result slot
+recursively to its selected arm, and an array literal builds in its element
+slots. Advanced assignment supplies its inactive destination after
 input preparation and old-value cleanup. Basic assignment is not changed.
 
 A constructor is named `init`:
@@ -567,7 +583,7 @@ struct Widget {
     let id: i32;
     let mut visits: i32;
 
-    fn init(id: i32) : id(id) {
+    fn init(id: i32) : id = id {
         // visits defaults to zero
     }
 }
@@ -579,14 +595,23 @@ fields but cannot assign a fixed field in place of its required initializer.
 
 Rules:
 
-- constructor initializer entries must follow field declaration order;
+- constructor initializer entries use `field = expression` and follow field
+  declaration order, with the field slot as the expression's destination;
 - entries evaluate and initialize left-to-right;
 - every fixed field must have a declaration initializer or constructor entry;
 - omitted mutable scalar storage initializes to zero;
 - omitted mutable pointers initialize to null;
-- omitted mutable structures invoke zero-argument construction;
-- the compiler generates a zero-argument `init` only when all fixed fields have
-  initializers and all mutable fields can default-initialize;
+- omitted mutable structures invoke zero-argument construction; arrays
+  default-initialize each element in increasing index order;
+- `[nozero]` scalar or scalar-array declarations leave omitted values unwritten;
+- a structure with no explicit `init` gets a memberwise init: one same-name,
+  same-type parameter per named field without a declaration initializer or
+  `[nozero]`, in field order; Advanced parameters are mutable bindings;
+- it also gets a zero-argument default init when every named field has an
+  initializer or is mutable and default-initializable; if the memberwise init
+  already has zero parameters, there is only one zero-argument init;
+- an explicit `init` suppresses both generated forms; unnamed padding gets
+  no parameter; declaration initializers run in the normal field order;
 - fixed locals and globals require an initializer;
 - every constructor must initialize any fixed field that has no declaration
   initializer;
@@ -614,10 +639,9 @@ fn drop() mut -> void {
 `drop` cannot be called directly. It executes before fields are destroyed in
 reverse declaration order.
 
-Library arrays and vectors should destroy their live prefix in decreasing
-index order. Their own code tracks partial initialization and cleans that
-prefix on normal exits. Raw-storage fields provide no automatic element
-cleanup; this does not introduce primitive fixed arrays.
+Fixed Advanced arrays destroy their elements in decreasing index order.
+Library vectors track their live prefix and clean it up explicitly in that
+order. Byte-array backing fields provide no automatic payload cleanup.
 
 An Advanced structure may customize explicit logical copying with exactly one
 read-only method:
@@ -665,7 +689,7 @@ HUC evaluation is left-to-right for:
 - call arguments;
 - constructor arguments;
 - initializer expressions;
-- aggregate elements if aggregate syntax is added later.
+- array-literal elements, with the prepare/build passes of Advanced assignment.
 
 For a call, each argument expression and its corresponding parameter
 initialization complete before evaluation of the next argument begins. This
@@ -876,7 +900,7 @@ or report an invalid request with `compiler::error`. It cannot ask selection
 to try another candidate; an error in the chosen body remains an error.
 
 Patterns support C++'s structural forms: concrete types and values, binders,
-pointers whose `mut` must agree, family applications, `raw_storage<T, N>`,
+pointers whose `mut` must agree, family applications, array suffixes `T[N]`,
 repeated binders that match only identical arguments, and family binders such
 as `C<T>`. Ranking stays "matches a strict subset". Constraint-based and
 substitution-failure forms are not supported.
@@ -1551,12 +1575,12 @@ Cover:
 - optional numeric digit separators and consistent optional trailing commas;
 - expressions and precedence;
 - constructor syntax;
-- `raw_storage<T, N>` type and zero-argument construction syntax, including
-  nesting and aliases, plus the layout/category query type operands;
+- interleaved pointer and array suffixes, array literals with optional trailing
+  commas, layout-expression counts, and layout/category query type operands;
 - local `let name: auto`;
 - attribute lists after `struct`, `fn`, `let`, `if`, `else`, `while`, and
   `for`, and before parameters, with integer-literal and option-name
-  arguments;
+  arguments, plus layout expressions in `align`;
 - error recovery at declaration and statement boundaries.
 
 The lexer emits individual `<` and `>` tokens and indivisible numbered keyword
@@ -1588,17 +1612,20 @@ Implement:
 - collect-before-check for module declarations;
 - declaration-before-use for locals;
 - canonical built-in, structure, and raw-pointer types;
-- canonical raw-storage types keyed by element type and count, with target
-  size/alignment validation and Advanced classification without element drop;
+- canonical array types keyed by element type and count, target layout
+  validation, category inference, and automatic element cleanup;
 - canonical type aliases and alias-cycle diagnostics;
 - local `auto` inference;
 - constant `size_of<T>()`, `align_of<T>()`, and `is_basic<T>()`, rejecting
-  invalid types and value operands; permission-preserving `storage_ptr`;
+  invalid types and value operands;
 - method receiver permissions;
 - constructor obligation checking;
 - `extern "C"` signatures limited to built-in scalars, `void` or `never`
   returns, and raw pointers, including pointer chains, to built-in types,
   with no structure, array, phase type, or variadic boundary;
+- contextual numeric and array literals with default types, exact literal-only
+  integer arithmetic, mixed-type widening, and value-correct signed/unsigned
+  comparisons; check literal fits and candidate viability before ranking;
 - overload resolution using only specified built-in conversions;
 - no user-defined implicit conversions;
 - built-in attribute checks: unknown names, placement, conflicts, and
@@ -1631,8 +1658,8 @@ HIR records:
 - resolved symbol;
 - value use: read, observe, copy, relocate, or place;
 - unary `&` of an eligible data place, including pointer slots;
-- raw-storage creation, element-address calculation, and folded target layout
-  and category queries;
+- per-element array construction, array indexing, byte-region object storage,
+  `[nozero]` declarations, and folded target layout/category queries;
 - explicit raw-pointer/`usize` casts in both directions;
 - source origin;
 - explicit conversion selected by HUC.
@@ -1785,7 +1812,8 @@ Acceptance:
 - constructor and factory arguments bind before destination drop; the outer
   operation runs afterward in the final slot;
 - direct copy assignment drops before cloning, while nested copy arguments
-  and conditional results are prepared before drop;
+  complete before drop; conditionals prepare only the selected arm and
+  forward the destination recursively;
 - `copy make_source()` keeps its separate source alive through the clone;
 - `x = wrap(x)` uses post-preparation state and skips old-value destruction;
 - explicit replacement temporaries support valid self-cloning and factories
@@ -1872,7 +1900,10 @@ Values include:
 
 Every compile-time object lives in a block: a frame slot, a `let1` object, a
 string literal, or an allocation. Each block records its type, which slots
-hold live values, and its logical object identity. Resolve pointers through the
+and byte-region payloads hold live values, which bytes are written, and its
+logical object identity. Live `construct_at` ends the old lifetime without
+cleanup after preparing inputs. Representation transfer carries unwritten
+bytes without treating them as scalar reads. Resolve pointers through the
 active module's block map. Save completed states and merge them in source import
 order, replacing conflicting whole-block entries with the later values,
 including unchanged ones. Direct and aliased writes change only the active
@@ -1966,7 +1997,7 @@ Implement:
 - `auto` and typed binders;
 - type/value deduction;
 - primary, partial, and full patterns;
-- pattern forms: pointers with `mut`, family applications, `raw_storage`,
+- pattern forms: pointers with `mut`, family applications, array suffixes,
   repeated binders, and family binders;
 - deferred `fn` and `struct` header attribute lists, parsed with the selected
   body so their arguments can use the binders, and checked per specialization;
@@ -2278,8 +2309,10 @@ Include:
 - attempts to use former address-taking or `std::` intrinsic spellings;
 - `ptr_as` with incorrect arity or a source/target pair outside the three
   supported pointer/pointer and pointer/`usize` cases;
-- zero or invalid raw-storage counts, layout overflow, recursive inline layout,
-  `copy` of raw storage, and invalid `storage_ptr` operands;
+- zero or invalid array counts, layout overflow, recursive inline layout,
+  literal count/type mismatches, and unsupported element cloning;
+- non-scalar/non-scalar-array `[nozero]`, using `construct_at` as a value,
+  numeric literal fit failures, and invalid literal-only arithmetic;
 - incorrect query arity and incomplete/non-runtime query types;
 - mutation without `mut`;
 - copying an Advanced type without `clone`;
@@ -2299,8 +2332,8 @@ Include:
 - duplicate attributes on an inner `let`, including equal arguments, and
   `#` insertion in a generic variable's selection body or inner attribute list;
 - compile-time undefined behavior: null, dangling, out-of-bounds,
-  uninitialized, and inactive-slot access, constructing over a live value,
-  and destroying an inactive slot;
+  uninitialized, and inactive-slot access, and destroying an inactive slot;
+  constructing over a live value is valid and must not be rejected for that;
 - compile-time pointer-to-integer conversion, ordering of unrelated pointers,
   and viewing an object of another type through `u8*` or `c8*`;
 - an ordinary function naming `let1 mut` storage during evaluation;
@@ -2335,9 +2368,15 @@ Verify LLVM IR, compile to objects, link, and test the implemented subset:
 - constructors and field initialization order;
 - raw-pointer observation and Advanced-value consumption;
 - raw inline storage starting with no live elements, partial initialization,
-  Advanced pop, Basic copy-and-retire, clear, and container relocation;
+  Advanced pop, Basic copying and live-slot reuse, clear, and container relocation;
 - one-slot optional storage without any default construction of its payload;
-- generic `if1 (is_basic<T>())` selecting Basic source destruction only;
+- optional Basic source destruction and reuse without that extra operation;
+- arrays of scalars, pointers and Advanced values; nested suffix order;
+  contextual and inferred literals, whole-array copy, reverse cleanup, and take;
+- generated memberwise/default constructors, `field = expression`, and
+  `[nozero]` buffers carried through whole-aggregate copies and relocations;
+- exact literal-only arithmetic versus typed wrapping, lossless mixed operands,
+  mixed-sign comparisons, overload fit filtering, and array deduction;
 - target query results matching LLVM data layout, including cross targets;
 - slot addresses for inline, pointer, and fixed storage;
 - slot-address round trips and byte access without extra ownership operations;
@@ -2366,6 +2405,11 @@ Verify LLVM IR, compile to objects, link, and test the implemented subset:
 - `destination = take source`, including self-take assignment, and discarded
   `take` results, tested at `-O0` and with optimization;
 - single evaluation and pointer-before-initializer ordering for `construct_at`;
+- live-slot construction: prepare inputs before ending the old lifetime, no
+  old-value cleanup, no result pointer, and no enclosing-lifetime end;
+- selected `?:` arms forwarding result slots, including nested conditionals,
+  take arms, and factories; never execute self-copy through a selected arm;
+- array-literal assignment's prepare-all/drop-reverse/build-forward ordering;
 - manual construction from Basic, relocated Advanced, cloned, constructor,
   and function-result initializers, including final `this` address checks;
 - construct/extract/reconstruct/destruct cycles in manually managed slots;

@@ -84,7 +84,7 @@ constructor-initializer-list-0
                   = ":", field-initializer-0,
                     { ",", field-initializer-0 }, [ "," ] ;
 field-initializer-0
-                  = identifier, argument-list-0 ;
+                  = identifier, "=", conditional-expression-0 ;
 
 struct-decl-0     = "struct", [ attribute-list-0 ], identifier, "{",
                     { struct-member-0 }, "}", [ ";" ] ;
@@ -133,7 +133,7 @@ constructor-initializer-list-1
                   = ":", field-initializer-1,
                     { ",", field-initializer-1 }, [ "," ] ;
 field-initializer-1
-                  = identifier, argument-list-1 ;
+                  = identifier, "=", conditional-expression-1 ;
 
 struct-decl-1     = "struct", [ attribute-list-1 ], identifier, "{",
                     { struct-member-1 }, "}", [ ";" ] ;
@@ -209,14 +209,11 @@ phase-argument-list
                     { ",", phase-argument }, [ "," ] ], ">" ;
 phase-argument    = type-pattern | expression-1 ;
 
-type-pattern      = [ "mut" ], type-pattern-primary, { "*" } ;
+type-pattern      = [ "mut" ], type-pattern-primary,
+                    { "*" | "[", phase-argument, "]" } ;
 type-pattern-primary
                   = builtin-type
-                  | raw-storage-pattern
                   | symbol-path, [ phase-argument-list ] ;
-raw-storage-pattern
-                  = "raw_storage", "<", type-pattern, ",", phase-argument,
-                    [ "," ], ">" ;
 
 (* A binder may appear more than once in one pattern; it then matches only
    identical arguments. A binder followed by a phase-argument-list in a
@@ -325,32 +322,30 @@ compiler-for-statement-1
 
 (* ---------- Types ---------- *)
 
-type-0            = [ "mut" ], type-primary-0, { "*" } ;
-type-primary-0    = builtin-type | symbol-path | raw-storage-type-0 ;
-raw-storage-type-0
-                  = "raw_storage", "<", type-0, ",", integer-literal,
-                    [ "," ], ">" ;
+type-0            = [ "mut" ], type-primary-0, { type-suffix-0 } ;
+type-primary-0    = builtin-type | symbol-path ;
+type-suffix-0     = "*" | "[", layout-expression-0, "]" ;
+layout-expression-0
+                  = layout-term-0, { "+", layout-term-0 } ;
+layout-term-0     = layout-atom-0, { "*", layout-atom-0 } ;
+layout-atom-0     = integer-literal
+                  | ( "size_of" | "align_of" ), "<", type-0, ">", "(", ")"
+                  | "(", layout-expression-0, ")" ;
 
-type-1            = [ "mut" ], type-primary-1, { "*" } ;
-type-primary-1    = builtin-type
-                  | raw-storage-type-1
-                  | symbol-path, [ phase-argument-list ] ;
-raw-storage-type-1
-                  = "raw_storage", "<", type-1, ",", expression-1,
-                    [ "," ], ">" ;
+type-1            = [ "mut" ], type-primary-1, { type-suffix-1 } ;
+type-primary-1    = builtin-type | symbol-path, [ phase-argument-list ] ;
+type-suffix-1     = "*" | "[", expression-1, "]" ;
 
 builtin-type      = "bool" | "c8"
                   | "i8" | "i16" | "i32" | "i64" | "isize"
                   | "u8" | "u16" | "u32" | "u64" | "usize"
                   | "f32" | "f64" | "void" | "never" ;
 
-(* A type may end in any number of * suffixes. The type-primary rules do
-   not include a suffix, so pointer chains are parsed as repeated suffixes.
-   & is not a type suffix; it remains an expression operator.
-   Named HUC0 types never have phase arguments. raw_storage<T, N> is a
-   built-in type form, not a phase family. Its count is a positive integer
-   literal in HUC0; HUC1 resolves its compile-time count to such a literal.
-   Parse its count with the same angle-delimiter handling as phase arguments. *)
+(* Pointer and array suffixes wrap the preceding type left to right.
+   T[4][3] is an array of three arrays of four T values. mut qualifies the
+   pointee of the last *; & remains an expression operator. HUC0 array counts
+   are literals or layout expressions; HUC1 resolves counts to literals.
+   Counts must be positive and layouts must fit the target. *)
 
 (* ---------- Attributes ---------- *)
 
@@ -358,7 +353,7 @@ attribute-list-0  = "[", attribute-0, { ",", attribute-0 }, [ "," ], "]" ;
 attribute-0       = identifier, [ "(", [ attribute-argument-0,
                     { ",", attribute-argument-0 }, [ "," ] ], ")" ] ;
 attribute-argument-0
-                  = integer-literal | identifier ;
+                  = layout-expression-0 | identifier ;
 
 attribute-list-1  = "[", attribute-entry-1, { ",", attribute-entry-1 },
                     [ "," ], "]" ;
@@ -375,7 +370,9 @@ deferred-attribute-list
    list precedes the parameter. Attribute names are recognized only inside a
    list and are not reserved words. Each built-in attribute defines whether an
    argument is an integer or an option name; an identifier argument in HUC0 is
-   an option name, never a variable. In HUC1 an integer argument may be any
+   an option name, never a variable. Only align accepts a non-literal HUC0
+   layout expression; other integer attributes still require literals.
+   In HUC1 an integer argument may be any
    compiler expression; expansion writes a literal.
 
    A "#" entry is one complete expression-1 of type compiler::Code; the token
@@ -418,7 +415,8 @@ parameter-1       = [ attribute-list-1 ], [ "mut" ], identifier, ":", type-1 ;
    Comma-separated lists allow one optional final comma after an item.
    An empty list has no comma. Conditions, grouped expressions, subscripts,
    and the single type operand of as/ptr_as/size_of/align_of/is_basic are
-   not such lists. raw_storage's type and count form a two-item list. *)
+   not such lists. Array literals permit an optional trailing comma but
+   cannot be empty because zero-length arrays are not provided. *)
 
 block-0           = "{", { statement-0 }, "}" ;
 statement-0       = block-0
@@ -526,12 +524,14 @@ argument-list-0   = "(", [ expression-0,
 primary-expression-0
                   = symbol-path
                   | builtin-type
-                  | raw-storage-type-0
+                  | array-literal-0
                   | literal
                   | "this"
                   | "null"
                   | "(", expression-0, ")"
                   | type-intrinsic-call-0 ;
+
+array-literal-0   = "[", expression-0, { ",", expression-0 }, [ "," ], "]" ;
 
 type-intrinsic-call-0
                   = ( "as" | "ptr_as" | "size_of" | "align_of" | "is_basic" ),
@@ -567,12 +567,14 @@ argument-list-1   = "(", [ expression-1,
 primary-expression-1
                   = symbol-path
                   | builtin-type
-                  | raw-storage-type-1
+                  | array-literal-1
                   | literal
                   | "this"
                   | "null"
                   | "(", expression-1, ")"
                   | type-intrinsic-call-1 ;
+
+array-literal-1   = "[", expression-1, { ",", expression-1 }, [ "," ], "]" ;
 
 type-intrinsic-call-1
                   = ( "as" | "ptr_as" | "size_of" | "align_of" | "is_basic" ),
@@ -602,15 +604,14 @@ binary-op         = "||" | "&&"
    are compiler-known, non-overloadable ordinary call forms with unqualified
    names. Semantic analysis checks their arity and operands. construct_at
    infers T from mut T*, treats value as an initializer for that slot rather
-   than a by-value parameter, and returns mut T*. destruct_at requires mut T*
+   than a by-value parameter, and returns void. destruct_at requires mut T*
    and returns void. They have no angle-delimited type operand.
    ptr_as has exactly one value operand. It permits raw-pointer to raw-pointer,
    raw-pointer to usize, and usize to raw-pointer casts; other pairs are rejected.
    size_of/align_of/is_basic take no value
    operands and return target usize/usize/bool constants respectively.
-   storage_ptr(pointer) is another compiler-known ordinary call: one pointer
-   to raw_storage<T, N> produces an element pointer with the storage's access
-   permission, without constructing or reading an element. *)
+   construct_at can end an old lifetime without cleanup; destruct_at still
+   requires a live pointee. Array literals have contextual or inferred types. *)
 
 literal           = integer-literal
                   | float-literal

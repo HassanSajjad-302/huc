@@ -189,8 +189,8 @@ initializer list, put the body brace on the next line after the final comma:
 
 ```huc
 fn init(x: i32, y: i32)
-    : x(x),
-      y(y),
+    : x = x,
+      y = y,
 {
 }
 ```

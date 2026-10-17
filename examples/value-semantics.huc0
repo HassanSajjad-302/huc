@@ -10,7 +10,7 @@ let mut temporary_drop_order: i32 = 0;
 struct TemporaryProbe {
     let id: i32;
 
-    fn init(id: i32) : id(id) {
+    fn init(id: i32) : id = id {
     }
 
     fn view() -> i32* {
@@ -28,8 +28,8 @@ struct Point {
     let y: i32;
 
     fn init(x: i32, y: i32)
-        : x(x),
-          y(y),
+        : x = x,
+          y = y,
     {
     }
 }
@@ -40,8 +40,8 @@ struct NativeBuffer {
     let size: usize;
 
     fn init(size: usize)
-        : data(memory::allocate_zeroed_bytes(size)),
-          size(size),
+        : data = memory::allocate_zeroed_bytes(size),
+          size = size,
     {
     }
 
@@ -78,8 +78,8 @@ struct Packet {
     let mut payload: NativeBuffer;
 
     fn init(tag: i32, mut payload: NativeBuffer)
-        : tag(tag),
-          payload(payload),
+        : tag = tag,
+          payload = payload,
     {
     }
 }
@@ -90,7 +90,7 @@ struct Packet {
 struct AddressDependent {
     let mut self: AddressDependent*;
 
-    fn init() : self(null) {
+    fn init() : self = null {
         this->self = this;
     }
 
@@ -226,8 +226,8 @@ fn demonstrate_manual_lifetimes() -> void {
         // storage is now Inactive; taking &storage again would be rejected.
         // slot still addresses the storage, but no live value may be read there.
 
-        let initialized: mut TemporaryProbe* = construct_at(slot, TemporaryProbe(2));
-        let mut extracted: TemporaryProbe = *initialized;
+        construct_at(slot, TemporaryProbe(2));
+        let mut extracted: TemporaryProbe = *slot;
         construct_at(slot, extracted); // extracted becomes Inactive
         destruct_at(slot); // drops 2; does not free the stack storage
         // No automatic cleanup was registered for storage's manually built value.

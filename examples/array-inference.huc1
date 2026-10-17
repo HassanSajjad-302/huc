@@ -1,0 +1,72 @@
+module examples.array_inference;
+
+// Generated memberwise init, with fixed fields.
+struct Point {
+    let x: i32;
+    let y: i32;
+}
+
+// Both memberwise Options(used) and default Options() are generated.
+struct Options {
+    let limit: i32 = 8;
+    let mut used: usize;
+    let [nozero] mut scratch: u8[16];
+}
+
+fn sum<T: auto, N: usize>(values: T[N]) -> T {
+    let mut result: T = 0;
+    for (let mut i: usize = 0; i < N; i += 1) {
+        result += values[i];
+    }
+    return result;
+}
+
+fn choose(values: i32[3]) -> i32 {
+    return 1;
+}
+
+fn choose(values: u8[3]) -> i32 {
+    return 2;
+}
+
+fn verify() -> i32 {
+    let point: Point = Point(3, 4);
+    let mut options: Options;
+    if (point.x != 3 || point.y != 4 || options.limit != 8 || options.used != 0) {
+        return 1;
+    }
+    if (sum([1, 2, 3]) != 6 || choose([1, 2, 300]) != 1) {
+        return 2;
+    }
+    let exact: u8 = 200 + 100 - 50;
+    let byte: u8 = 255;
+    let wrapped: u64 = byte + 1;
+    let negative: i8 = -128;
+    let unsigned: u64 = 0;
+    if (exact != 250 || wrapped != 0 || negative != -128 || !(-1 < unsigned)) {
+        return 3;
+    }
+    let small: u16 = 2;
+    let inferred: auto = [small, 1]; // u16[2]
+    let half: f32 = 0.5;
+    let result: f32 = half * 0.5;
+    if (inferred[1] != 1 || result != 0.25) {
+        return 4;
+    }
+    options.scratch[0] = 7;
+    let snapshot: Options = options; // Whole Basic copy carries unwritten bytes.
+    if (snapshot.scratch[0] != 7) {
+        return 6;
+    }
+    // Neither copy reads the other scratch elements as scalar values.
+    return 0;
+}
+
+let1 checked: i32 = verify();
+
+fn main() -> i32 {
+    if (@checked != 0) {
+        return 5;
+    }
+    return verify(); // Same checks at compile time and at runtime.
+}

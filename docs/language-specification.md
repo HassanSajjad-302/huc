@@ -295,9 +295,10 @@ HUC has:
 - byte/character literals;
 - `null`.
 
-Integer suffixes select a type, for example `12u32` or `0xffu8`. An unsuffixed
-integer literal is assigned the first of `i32`, `i64`, or `u64` that represents
-its value. An unsuffixed floating literal has type `f64`.
+Integer suffixes select a type, for example `12u32` or `0xffu8`. Unsuffixed
+numeric literals take their type from context (section 5.2.1). Without context,
+integers default to the first of `i32`, `i64`, or `u64` that holds the value,
+and floating literals default to `f64`. Suffixed literals are already typed.
 
 A numeric literal may contain a single `_` between adjacent digits valid for
 that digit sequence's base. Separators are optional and do not change the
@@ -353,8 +354,7 @@ function values. Semantic analysis checks their operands and argument counts.
 `as<T>` and `ptr_as<Target>` retain their explicit type operands. `ptr_as`
 converts between raw-pointer types or between a raw pointer and `usize`.
 `size_of<T>()` and `align_of<T>()` are target-layout queries with one type
-operand and no value operands. `raw_storage<T, N>` is a built-in storage type,
-not a phase family; `storage_ptr(pointer)` exposes its element storage.
+operand and no value operands.
 `is_basic<T>()` queries the existing Basic/Advanced category at compile time.
 These names likewise cannot be overloaded or used as function values.
 
@@ -378,7 +378,7 @@ never
 T
 T*
 mut T*
-raw_storage<T, N>
+T[N]
 ```
 
 `usize` and `isize` have the target pointer width. Integer widths are exact.
@@ -400,9 +400,9 @@ required. Basic and Advanced are category names, not source keywords.
 Built-in scalars and raw pointers are Basic. A structure is Basic when every
 field is Basic and it declares neither `clone` nor `drop`. Otherwise it is
 Advanced. Having `init()` alone does not make it Advanced. `T*` remains Basic
-regardless of the pointee's category. The built-in `raw_storage<T, N>` type
-is always Advanced and has no `clone` or automatic element cleanup (section
-6.7.5). A structure containing it is therefore Advanced too.
+regardless of the pointee's category. An array `T[N]` has the category of `T`
+(section 4.7). A byte array is Basic even when it provides manually managed
+storage for Advanced values (section 6.7.5).
 
 ```huc
 struct Point {
@@ -490,7 +490,7 @@ and applies the normal address-taking checks before casting the pointer.
 In particular, taking the address of a named Advanced root, or a field path
 through it, requires its tracked state to be Active (section 6.12). To manually
 reuse storage after a direct transfer, retain its pointer before the transfer,
-or use `raw_storage`. Neither obtaining nor casting an address creates a live
+or use a byte array. Neither obtaining nor casting an address creates a live
 value, extends storage lifetime, or changes automatic cleanup state.
 
 Each `mut` keeps its own meaning inside a structure. A fixed structure
@@ -540,7 +540,8 @@ replacement in Advanced assignment. No temporary `T` exists and no destructive
 relocation occurs between that constructor and its destination. This guaranteed
 destination construction lets `init` observe the final `this` address; it is
 not optional backend copy elision. Direct calls and Advanced `copy` results
-also use the final result slot, as specified in section 6.2. Advanced assignment
+also use the final result slot, as do array literals and the selected arms of
+`?:`, as specified in section 6.2. Advanced assignment
 prepares inputs and destroys the old value first (section 6.3). The LLVM backend
 may use explicit destination pointers to preserve these guarantees.
 
@@ -553,8 +554,63 @@ be assigned in the body.
 An omitted mutable scalar initializes to zero, a mutable raw pointer
 to null, and a mutable structure through its zero-argument constructor. Fixed
 fields without declaration initializers must be initialized by each constructor.
-A mutable `raw_storage<T, N>` field instead creates empty storage, without
-constructing elements (section 6.7.5).
+A mutable array default-initializes its elements in increasing index order.
+The `[nozero]` attribute skips omitted scalar zero/null defaults, including
+in arrays of scalars (section 4.9.11).
+
+**Initialization terms.** Default initialization is initialization when no
+value is supplied. Zero initialization is the scalar default: zero for a
+number or character, false for `bool`, and null for a pointer. An explicit
+`= 0` is ordinary initialization from a value. A structure's default
+initialization invokes `T()`; an array applies the defaults to each element.
+Fixed fields and locals require explicit initialization. Mutable globals
+have the separate restrictions of section 2.2.
+
+**Constructor entries.** Write `field = expression` in an initializer list:
+
+```huc
+struct Request {
+    let id: u64;
+    let mut body: Buffer;
+    fn init(id: u64, size: usize) : id = id, body = Buffer(size, 0) {
+    }
+}
+```
+
+Each entry initializes the field as if by `let field: T = expression`,
+using the field's storage as the destination. The name before `=` names a
+field; the expression uses ordinary name lookup. Entries follow field
+declaration order and evaluate left to right. An omitted entry uses the
+field's declaration initializer or, for a mutable field, default initialization.
+
+**Generated inits.** A structure with no declared `init` gets a generated
+memberwise init. It has one parameter per named field without a declaration
+initializer and without `[nozero]`, in declaration order, with that field's
+name and type. Advanced parameters are `mut` bindings so they can relocate
+into the fields. Other fields use their declaration initializers or remain
+unwritten when `[nozero]` applies. An initializer always takes precedence
+over `[nozero]`. Unnamed padding fields are not parameters. Fixed-field
+initialization requirements still apply.
+
+It also gets a generated default init, with no arguments, if every named
+field has a declaration initializer or is mutable and can be default-initialized.
+Fields with declaration initializers use them; other fields use their defaults.
+The two generated inits overload by arity. If the memberwise init has no
+parameters, they are one function. Declaring any `init` suppresses both.
+
+```huc
+struct Point {
+    let x: i32;
+    let y: i32;
+}
+let point: Point = Point(1, 2); // generated memberwise init; no Point()
+
+struct Options {
+    let limit: i32 = 8;
+    let mut used: i32;
+}
+let mut options: Options; // generated default init: limit = 8, used = 0
+```
 
 Methods receive an implicit non-owning `this`:
 
@@ -586,15 +642,157 @@ is customized only by `clone`.
 
 Declaring `drop` makes the structure Advanced.
 
-### 4.7 Indexing and library containers
+### 4.7 Arrays
 
-Raw-pointer indexing is unchecked. Arrays, slices, and containers remain
-library types. The built-in `raw_storage<T, N>` supplies aligned, contiguous
-inline slots without constructing elements or managing their cleanup.
-A HUC1 library can build `Array<T>`, `Slice<T>`, and `InlineArray<T, N>`
-families that generate concrete HUC0 structure types using this facility.
+#### 4.7.1 Syntax
 
-Primitive `[N]T` fixed arrays are deferred.
+An array type is a type followed by `[N]`. Array and pointer suffixes can be
+mixed, and they read left to right, as `*` does today:
+
+```huc
+let mut counts: i32[8];          // 8 i32 values
+let mut names: c8*[4];           // 4 pointers to c8
+let table: i32[8]* = &counts;    // a pointer to an array of 8 i32 values
+let mut grid: f32[4][3];         // 3 arrays, each of 4 f32 values
+```
+
+`mut` keeps its current meaning: it applies to the pointee of the last `*` in
+the type. So `mut i32*[4]` is an array of four `mut i32*` pointers, and
+`mut i32[4]*` is a writable pointer to an array.
+
+**Nesting order.** Because suffixes read left to right, `f32[4][3]` is three
+rows of four. Indexing still goes outer first: `grid[row][column]`, with
+`row < 3` and `column < 4`. The numbers in the type and the index order are
+therefore reversed, unlike C's `float grid[3][4]`. This is the cost of keeping
+one reading direction for every suffix.
+
+**Count.** In HUC1, `N` may be any compile-time `usize` expression. In HUC0,
+it is a positive integer literal, or a layout expression: integer literals,
+`size_of<T>()`, and `align_of<T>()` combined with `+`, `*`, and parentheses.
+The same form is allowed in HUC0 `align` arguments. HUC1 resolves every count
+to a literal when it generates HUC0, so layout expressions are for
+hand-written HUC0 that need not hard-code target sizes.
+A count of zero is an error. Libraries that need zero capacity specialize to a
+form with no array field.
+
+The grammar appendix defines array suffixes, layout expressions, and array
+literals. Attribute lists start after keywords, so an array literal starting
+with `[` is unambiguous.
+
+#### 4.7.2 Layout
+
+`T[N]` stores `N` values of `T` with no gaps beyond `T`'s own padding:
+
+- `size_of<T[N]>()` is `N * size_of<T>()`;
+- `align_of<T[N]>()` is `align_of<T>()`.
+
+`T` must be a complete runtime object type. The total size must fit `usize`
+and the target object-size limits; invalid or recursive layouts are errors.
+
+#### 4.7.3 Category
+
+`T[N]` is Basic when `T` is Basic, and Advanced when `T` is Advanced.
+`is_basic<T[N]>()` reports this.
+
+#### 4.7.4 Indexing and addresses
+
+`a[i]` on an array place is the place of element `i`. The index may have any
+integer type. Indexing is unchecked: `i` must be at least `0` and less than
+`N`, so `a[N]` is undefined behavior. Use `&a[0] + N` for a one-past-the-end
+pointer. An array does not convert to a pointer implicitly: `&a` is a
+`T[N]*`, and `&a[0]` is a `T*`.
+
+A constant index that is out of range, such as `a[5]` on an `i32[4]`, should
+get a warning. It is not a required error.
+
+#### 4.7.5 Array literals
+
+```huc
+let primes: i32[4] = [2, 3, 5, 7];
+let mut files: File[2] = [File(first), File(second)];
+```
+
+An array literal is nonempty and lists every element, with an optional
+trailing comma. It is contextual with a default type,
+like a numeric literal (section 5.2.1):
+
+- **With a destination of array type**, the literal takes that type, and the
+  count must equal `N`. The destination can be anything that gives a numeric
+  literal its type: an initialization, assignment, argument, `return`,
+  `construct_at` value, or an element of an enclosing literal.
+- **Without one**, the literal takes its own type, `T[N]`, where `N` is the
+  number of elements. `T` comes from the elements as if they were the
+  operands of one operator (section 5.2.1, rule 1): typed elements must have
+  the same type, or numeric types with a common type (section 5.2.1), and
+  literal elements take that type. If every element is literal-only, they
+  get the numeric default. A nested literal gets its own type first. With a
+  known destination, its element type supplies context recursively, including
+  through `?:`.
+
+```huc
+let a: u8[3] = [1, 2, 3];          // destination: u8[3]
+let b: auto = [1, 2, 3];           // default: i32[3]
+let c: auto = [x, 1];              // x: u16, so u16[2]
+let d: auto = [[1, 2], [3, 4]];    // two i32[2] elements
+let e: auto = [File(p), File(q)];  // File[2]
+```
+
+So `auto`, generic deduction such as `sum([1, 2, 3])` with a parameter
+`values: T[N]`, overloaded calls (section 7.5), and `?:` arms all work.
+There is no `T[N](...)` form and no fill form such as `[0; 1024]`. A
+non-array destination, wrong element count, incompatible element initializer,
+or lack of a common element type is a diagnostic.
+
+Once its type is known, element `i` is initialized as if by
+`let element: T = expression`, with slot `i` of the literal's storage as its
+storage. In a direct-result position, that storage is the destination.
+
+- **Initialization** builds each element directly in its slot, left to right,
+  wherever `T(arguments)` already builds directly in its destination.
+- **Advanced assignment** follows destroy-first assignment (section 6.3) with
+  the whole array as the destination: prepare the inputs of every element left
+  to right, destroy the old elements in decreasing index order, then build the
+  new elements directly in their slots in increasing index order. Separate
+  passes let the right-hand side see the old array, while destruction stays
+  the reverse of construction.
+- **Basic assignment** is ordinary Basic assignment: the whole replacement is
+  evaluated before it is stored, so `a = [a[1], a[0]]` swaps two `i32` values.
+
+#### 4.7.6 Default construction
+
+Default-initializing `T[N]` default-initializes each element in increasing
+index order. It is valid when the element type can be default-initialized. An
+omitted mutable array uses it, and wherever the spec requires `T()`, an array
+type meets that requirement through it. No source spelling such as
+`File[2]()` is added.
+
+#### 4.7.7 Destruction and `copy`
+
+- An Advanced array destroys its elements in decreasing index order.
+- `copy a` on an Advanced array requires each element to support `copy` and
+  clones each element directly into the destination's matching slot, in
+  increasing index order. In `b = copy a`, the old elements of `b` are
+  destroyed in decreasing order first, as for literal assignment.
+
+Everything else follows from the array's category, and element places follow
+the existing rules for direct moves and `take` (sections 6.4 and 6.6.1).
+
+#### 4.7.8 Layout attributes
+
+The explicit alignment of the element type counts toward a `pack` check
+(section 4.9.8). An under-aligned array field makes its elements under-aligned
+too.
+
+#### 4.7.9 C interop
+
+- A structure field of type `T[N]` maps to a C array member when `T` has a
+  C mapping. Map nested types recursively: C `float m[3][4]` has HUC type
+  `f32[4][3]`, with the same three rows of four and `[row][column]` indexing.
+- C never passes arrays by value. An `extern "C"` parameter or result of array
+  type is an error. Pass `&a[0]` instead.
+
+Raw-pointer indexing remains unchecked. Slices, growable containers, and
+additional matrix or multidimensional-view operations remain library designs.
 
 ### 4.8 Type aliases
 
@@ -662,7 +860,8 @@ Brackets keep it apart from the parentheses of a condition or a parameter list.
 
 Each attribute defines the kind of each argument:
 
-- **Integer.** In HUC0, the argument is an integer literal. In HUC1, it may be
+- **Integer.** In HUC0, the argument is an integer literal, except `align`
+  also accepts the layout expressions of section 4.7.1. In HUC1, it may be
   any compiler expression of integer type; expansion replaces it with a
   literal.
 - **Option.** The argument is one name from a fixed list that the attribute
@@ -703,6 +902,7 @@ the range is a diagnostic:
 
 | Attribute | Applies to | Meaning | LLVM mapping |
 |---|---|---|---|
+| `nozero` | Scalar or scalar-array `let` | Leave omitted scalar defaults unwritten (section 4.9.11) | Omit default stores |
 | `align(N)` | `struct`, `let` | Raise alignment to `N` (section 4.9.8) | Type layout; `align` on globals, allocas, and fields |
 | `pack(N)` | `struct` | Cap field alignment at `N`, like C's `#pragma pack(N)` (section 4.9.8) | Explicit field offsets in a packed struct type |
 | `bits(N)` | Field | Store an integer field in `N` bits, like C's `: N` (section 4.9.9) | Shifts and masks on the shared storage unit |
@@ -812,8 +1012,9 @@ fn [#gpu_attrs::kernel(Gpu)] saxpy<Gpu: bool>(...) -> void { ... }
   including evaluating its arguments, before the next one starts. In
   `[align(current), #change_alignment()]`, `align` reads `current` before the
   builder runs.
-- **HUC0 stays literal.** `#` disappears during expansion, so every HUC0
-  attribute list contains only built-in attributes with literal arguments.
+- **Generated HUC0 stays literal.** `#` disappears during expansion, and
+  generated integer attribute arguments are literals. Hand-written HUC0
+  may also use layout expressions in `align` (section 4.9.2).
 
 #### 4.9.7 When arguments are evaluated
 
@@ -867,7 +1068,7 @@ A type's *explicit alignment* is the largest of:
 - the `align` value on the type itself;
 - the `align` value on any of its fields;
 - the explicit alignment of the type of any inline field, including the
-  element type of `raw_storage`.
+  element type of an array.
 
 Pointer fields do not count, because the pointee is not stored inline. If a
 field's own `align` value or its type's explicit alignment is larger than `N`,
@@ -916,7 +1117,7 @@ struct [pack(1)] Record {
     let tag: u8;
     let point: Point;              // under-aligned; Point has an init
 
-    fn init(tag: u8, point: Point) : tag(tag), point(point) {}
+    fn init(tag: u8, point: Point) : tag = tag, point = point {}
 }
 
 fn make_record() -> Record {
@@ -978,7 +1179,7 @@ structure with any `bits` field, it builds a layout-only record in Clang and
 reads Clang's record layout. A bit-field uses its corresponding C integer
 type, because that type affects placement. Other built-in fields use their
 corresponding target C types where available. Concrete HUC structures and
-`raw_storage` use record or array descriptions of their layout; their methods,
+arrays use record or array descriptions of their layout; their methods,
 construction, and cleanup are not translated to C.
 
 These descriptions must preserve natural type alignment separately from
@@ -1030,6 +1231,37 @@ two kinds:
 Thread-block clusters exist only on NVIDIA Hopper (`sm_90`) and later. On a
 target without clusters, no launch can exceed `K`, so a positive `K` has no
 effect. LLVM's `maxclusterrank` is emitted only for targets with clusters.
+
+#### 4.9.11 Skipping scalar defaults
+
+`[nozero]` applies to a `let` of scalar type or an array of scalars,
+including nested arrays. Scalars are integers, floating types, `bool`,
+`c8`, and raw pointers. Other types are a diagnostic. It does not change
+the type or its Basic/Advanced category.
+
+When an initializer is omitted where omission is allowed, leave the scalar
+bytes unwritten instead of zero-initializing them. Explicit declaration or
+constructor-entry initializers still run normally. This attribute does not
+remove a fixed binding's obligation to be initialized. It does not suppress
+any user-written constructor.
+
+```huc
+let [nozero] mut buffer: u8[65536];
+let count: isize = read(descriptor, &buffer[0], 65536);
+
+struct Packet {
+    let mut length: usize;
+    let [nozero] mut payload: u8[1500];
+    fn init() {
+        // length is zero-initialized; payload remains unwritten.
+    }
+}
+```
+
+Reading an unwritten scalar value is undefined behavior. Copying or relocating
+a structure or array as a whole may carry unwritten bytes without reading
+them as scalar values; a half-filled buffer may therefore be transferred.
+The evaluator preserves which bytes are written (section 12).
 
 ## 5. Expressions and execution order
 
@@ -1096,8 +1328,9 @@ condition ? a.size() : b.size(); // evaluates only the selected call
 
 These are alternative examples with live inputs, not consecutive statements
 after the consuming example. Fixed Advanced operands cannot be transferred.
-There is no special exception based on whether `?:` appears in an initializer,
-return, argument, or method receiver.
+Selecting a named Advanced value transfers it in every context. Direct-result
+positions can instead construct the selected arm in their destination,
+without an intermediate temporary (section 6.2).
 
 ### 5.2 Arithmetic
 
@@ -1124,9 +1357,95 @@ An implementation must diagnose an unsupported target/mode combination rather
 than silently use excess precision, flush subnormals to zero, or relax the
 specified operations.
 
+#### 5.2.1 Contextual numeric literals
+
+An unsuffixed numeric literal has no fixed type when it is written. It has a
+kind, integer or floating, and its type is inferred from the expression it
+appears in. A suffixed literal such as `255u8` already has its type and acts
+as a typed operand. In this section, "literal-only" means made only of
+unsuffixed literals.
+
+1. **Typed operands decide.** The operands of parentheses, unary `+`, `-`,
+   and `~`, the arithmetic, bitwise, and comparison operators, and both arms
+   of `?:` share one type. If any of them has a type, the literal operands
+   take it. In `x * 0.5` with `x: f32`, `0.5` is `f32`. When typed operands
+   differ, they first widen to a common type (the mixed-operand rules below).
+2. **The destination fills literal-only expressions.** An expression whose
+   type depends only on literals takes the type of its destination: an
+   initialization, assignment, compound assignment, argument, `return`,
+   `construct_at` value, or array element. The destination never changes the
+   type of an expression that has a typed operand. That result is converted
+   to the destination by the ordinary rules: lossless promotion, or an error.
+3. **Default.** When nothing fixes the type, the defaults apply: the first
+   of `i32`, `i64`, or `u64` that holds an integer literal, and `f64` for a
+   floating literal. This covers `let n: auto = 5;`, generic deduction such
+   as `sum(5)`, operands of `as<T>`, array indices, and pointer offsets.
+
+```huc
+let mut i: usize = 0;          // 0 is usize (rule 2)
+i += 1;                        // 1 is usize (rule 1)
+let half: f32 = x * 0.5;       // 0.5 is f32 (rule 1)
+let small: u8 = 1 + 2;         // 1, 2, and the sum are u8 (rule 2)
+let flag: bool = count > 10;   // 10 takes count's type (rule 1)
+let n: auto = 5;               // no context: i32 (rule 3)
+
+let byte: u8 = 255;
+let wide: u64 = byte + 1;      // u8 arithmetic wraps to 0, then promotes to u64
+let sum: u64 = as<u64>(byte) + 1; // 256
+```
+
+**Limits:**
+
+- **Kinds don't cross.** An integer literal only takes an integer type, and a
+  floating literal only takes a floating type. `let x: f32 = 1;` and
+  `x * 2` with `x: f32` are errors; write `1.0` and `2.0`. This keeps overload
+  resolution unambiguous between integer and floating parameters.
+- **The value must fit.** After inference, each literal must be representable
+  in its type, or it is a compile error. `let x: u8 = 300;` is rejected. A
+  floating literal rounds to the nearest value of its type, as a suffixed
+  literal does today.
+- **Literal-only arithmetic is exact.** The largest literal-only subexpression
+  is evaluated as a whole at compile time, and only its result is
+  checked against the inferred type. Integer `+`, `-`, `*`, `/`, `%`, and
+  unary `-` are computed exactly, with no width limit; `/` and `%` truncate
+  toward zero as at runtime. Intermediate values are never checked. Suffixed
+  literals use ordinary typed arithmetic instead: `255u8 + 1u8` is `u8`
+  arithmetic and wraps to `0`. So
+  `let x: u8 = 200 + 100 - 50;` is `250` and valid, and `let y: i8 = -128;`
+  is valid because `-128` is computed exactly before the fit check. The bit
+  operators `~`, `&`, `|`, `^`, `<<`, and `>>` depend on a width, so they
+  operate on the bits of the inferred type, and their operands must fit it.
+  Division by zero, a negative shift amount, or a shift amount not less than
+  the type's width is a compile error. Floating literal arithmetic is
+  evaluated in the inferred floating type under the strict rules of section
+  12.1.
+
+**Mixed typed operands.**
+
+When the typed operands of one operator, or the two arms of `?:`, have
+different types, they widen to a common type before the operation:
+
+- **Integers:** the common type is the smallest integer type that both reach
+  by lossless promotion. `u8 + u16` is `u16`, `u8 + i16` is `i16`, and
+  `u32 + i32` is `i64`. If no such type exists, as for `u64 + i64`, the
+  expression is an error; write an explicit `as<T>`.
+- **Floats:** `f32` and `f64` widen to `f64`.
+- **Integers and floats** don't mix. A runtime integer never converts to a
+  floating type implicitly; write `as<T>`.
+- **Shifts** are excluded, here and from rule 1 of this section. The result
+  of `<<` and `>>` has the left operand's type, and the right operand is
+  typed on its own.
+
+**Comparisons are always mathematically correct.** `==`, `!=`, `<`, `<=`,
+`>`, and `>=` between any two integer types compare their values, even when
+no common type exists. In a comparison, a literal that doesn't fit the other
+operand's type keeps its own default type instead of failing rule 1. So
+`-1 < x` is true for every `x: u64`, and `x < 300` is true for every `x: u8`.
+
 ### 5.3 Pointer operations
 
-Raw pointer arithmetic and comparison have C-like preconditions. Pointers may
+Raw pointer arithmetic and comparison have C-like preconditions, with the
+byte-storage-region rule in section 6.7.5. Pointers may
 alias unless an API explicitly uses a future `restrict` facility. Accessing an
 object through an incompatible pointer type is undefined except through `u8*`
 or `c8*`.
@@ -1186,7 +1505,6 @@ Advanced value is supplied to a destination that stores that value:
 - assignment;
 - argument binding to a by-value parameter;
 - return-value binding;
-- aggregate initialization;
 - manual-storage initialization with `construct_at`.
 
 Taking a value's address or calling a method does not transfer it. To observe
@@ -1197,9 +1515,9 @@ storage must be writable, expressed by `mut` before the binding name.
 Relocation through `*pointer` instead requires `mut T*`; the pointer binding
 itself need not be writable. Section 6.4 defines the source cleanup rules and
 the permissions for direct field and element sources. Fresh unnamed results
-need no binding `mut`. Direct constructors, calls, and Advanced `copy` results
-use the supplied final destination under section 6.2; other temporary Advanced
-values are relocated into it.
+need no binding `mut`. Direct constructors, calls, Advanced `copy`, array
+literals, and selected conditional results use the supplied final destination
+under section 6.2; other temporary Advanced values are relocated into it.
 
 ### 6.2 Destructive-relocation initialization
 
@@ -1215,8 +1533,9 @@ No user function is called by the transfer.
 
 #### Direct result construction
 
-A same-type direct constructor, function/method call, or Advanced `copy`
-initializer builds its result in the supplied final destination. Parentheses
+A same-type direct constructor, function/method call, Advanced `copy`, or array
+literal initializer builds its result in the supplied final destination. A
+`?:` forwards that destination to its selected arm, recursively. Parentheses
 preserve this classification. This applies to local and field initialization,
 by-value parameter initialization, direct return results, `construct_at`, and
 the replacement phase of Advanced assignment. No intermediate result object
@@ -1229,8 +1548,11 @@ inlining or optimization. The language does not require a particular ABI.
 
 An explicit Advanced local is different: `return local` relocates it. Named
 return optimization is not guaranteed, and may only remove that transfer
-when observable behavior is preserved. `?:` is still value-producing: its
-selected arm is evaluated completely and the resulting value is transferred.
+when observable behavior is preserved. A selected `?:` arm that is a direct
+constructor, call, `copy`, array literal, or nested `?:` uses the supplied
+destination. An existing Advanced place instead relocates there; a Basic
+place is copied. Outside direct-result positions, `?:` still produces a
+temporary value, never a place.
 Source and argument temporaries retain their normal lifetimes (section 6.5.1).
 
 ### 6.3 Destroy-first Advanced assignment
@@ -1256,14 +1578,29 @@ Ignore parentheses around the RHS when selecting its form:
 | Call returning `T` | Evaluate callee/receiver and bind arguments | Run call into final slot |
 | `copy expression` | Evaluate or retain the source, without the outer clone | Clone into final slot |
 | Eligible existing Advanced place | Retain source location, without transferring | Relocate into final slot |
-| Other Advanced expression, including `?:` and `take` | Evaluate completely | Relocate the prepared value |
+| `condition ? a : b` | Evaluate condition once; recursively prepare only the selected arm by its own row | Complete that arm in the final slot |
+| Array literal | Prepare every element's inputs left to right | Build elements in increasing index order |
+| Other Advanced expression, including `take` | Evaluate completely | Relocate the prepared value |
 
 This does not delay nested operations. `dst = identity(copy src)` clones
 while binding `identity`'s parameter, then destroys `dst`, then runs `identity`.
-`dst = flag ? copy a : copy b` finishes the selected clone before destroying
-`dst`. In `dst = copy make_source()`, the factory first creates a separate
+`dst = flag ? copy a : copy b` prepares the selected source, destroys `dst`,
+then clones into it. Nested conditionals prepare only their selected arms;
+a selected `take` finishes completely before destruction. In
+`dst = copy make_source()`, the factory first creates a separate
 source that remains alive through the delayed clone. Inlining cannot change
 these orders.
+
+For an Advanced array destination, prepare all initializer inputs before
+destroying any old element. Destroy old elements in decreasing index order,
+then construct new elements in increasing index order. Array `copy` likewise
+destroys the old destination before cloning the source elements.
+
+`dst = flag ? copy dst : copy other` is undefined behavior when `flag` is
+true. The false path can be valid if `other` satisfies the ordinary source
+requirements. A condition and the selected arm's argument expressions may
+observe the old destination during preparation; the selected outer call or
+clone must not use anything invalidated by its destruction.
 
 An existing source place is retained, not snapshotted. If destination cleanup
 legally modifies a distinct live source, the delayed operation observes the
@@ -1438,8 +1775,9 @@ reject an otherwise well-typed runtime program solely for these lifetime
 hazards. Existing type, mutation-permission, and whole-root checks remain.
 The evaluator's general invalid-access checks still apply during execution.
 
-Inactive payload slots in `raw_storage` are not inactive ordinary fields.
-Moving raw storage with such slots remains valid under section 6.7.5.
+Unused bytes in byte-array backing storage are not inactive ordinary fields.
+Relocating an Advanced enclosing value may carry those bytes and any live
+payload objects under section 6.7.5.
 
 `copy place` remains valid for a live value that supports cloning and leaves
 it active. Basic fields, elements, and pointees are copied rather than extracted;
@@ -1447,7 +1785,7 @@ their source lifetimes and cleanup are unchanged.
 
 Any eligible source may replace a valid indirect destination. Source
 and destination must be distinct and non-overlapping; this is unchecked.
-`construct_at` initializes inactive storage and `destruct_at` destroys a live
+`construct_at` initializes supplied storage and `destruct_at` destroys a live
 value there (section 6.7).
 Pointer extraction uses ordinary dereference syntax and needs no separate
 intrinsic.
@@ -1483,7 +1821,8 @@ initialization:
 - when an initialized destination is overwritten.
 
 Fields are destroyed in reverse declaration order after the user `drop` body
-runs. Function parameters are local values and follow the same rule: active
+runs. Advanced arrays destroy their elements in decreasing index order.
+Function parameters are local values and follow the same rule: active
 by-value parameters are destroyed before the call returns to its caller.
 On return, the result is bound first, then return-expression temporaries are
 cleaned up, then the function's remaining locals and parameters.
@@ -1516,8 +1855,9 @@ Its boundary is defined by the enclosing construct:
 Each evaluation of a loop condition or individual update has its own boundary.
 A header binding is not a temporary; its lifetime follows section 7.3. The field
 rule covers both declaration initializers evaluated during construction and
-explicit constructor initializer entries. All arguments of one entry belong
-to that entry's full expression; the field itself is not a temporary.
+explicit constructor initializer entries. The expression after `field =`
+is one full expression, including any nested call arguments; the field itself
+is not a temporary.
 `construct_at` initializes its supplied destination, not an intermediate
 temporary. Its helper temporaries belong to the enclosing full expression,
 as for other call operands. The constructed value is not automatically
@@ -1575,6 +1915,9 @@ materialize a temporary or make `&make_text()` valid.
 - For a Basic type, it performs the ordinary copy.
 - For an Advanced structure, it calls a method with the effective signature
   `fn clone() -> T`.
+- For an Advanced array, it copies each element directly into the matching
+  destination slot, in increasing index order; every element must support
+  `copy` (section 4.7.7). The array needs no user-written `clone` method.
 - For a raw pointer, it copies the address and never clones the pointee;
   copying a null raw pointer is valid.
 
@@ -1582,7 +1925,7 @@ materialize a temporary or make `&make_text()` valid.
 struct Text {
     let bytes: ByteArray; // probable concrete HUC0 library type
 
-    fn init(mut bytes: ByteArray) : bytes(bytes) {
+    fn init(mut bytes: ByteArray) : bytes = bytes {
     }
 
     fn clone() -> Text {
@@ -1688,7 +2031,7 @@ Two non-overloadable HUC0 intrinsics manage these lifetimes:
 
 | Expression | Required state of the destination/pointee | Result |
 |---|---|---|
-| `construct_at(pointer, value)` | Inactive storage suitable for `T` | The same address as a `mut T*`, now pointing to a live `T` |
+| `construct_at(pointer, value)` | Writable storage suitable for `T`, live or inactive | `void`; a new live `T` occupies the slot |
 | `destruct_at(pointer)` | A live `T` | `void`; the slot becomes inactive |
 
 Both infer `T` from a first operand of type `mut T*`. The pointer binding
@@ -1721,12 +2064,20 @@ Type checking and initialization follow the same rules as `let local: T = value`
   likewise uses that slot as its result destination under section 6.2,
   including through nested direct return calls or clones without inlining.
 
-No old value is destroyed. The slot must be inactive when initialization
-begins and is live after initialization completes normally. The intrinsic
-then returns the destination pointer. It does not initialize a placeholder,
-call `clone` implicitly, or clear a relocated source. A constructor call has
-the usual argument binding and evaluation order. Other helper temporaries
-follow section 6.5.1; no extra expression boundary is introduced.
+The intrinsic evaluates the destination pointer once, prepares initializer
+inputs using the Advanced-assignment rules of section 6.3 (including array
+literals and selected conditional arms), then ends any old lifetime in the
+slot without cleanup. No old `drop` or field cleanup runs. Enclosing objects,
+such as a containing structure or backing byte array, remain alive. It then
+constructs, calls, clones, copies, or relocates into the slot and returns
+`void`. The slot is live on normal completion.
+
+`construct_at(&item, Item(item.id))` reads the scalar argument before ending
+the old lifetime. In `construct_at(&item, make(&item))`, the outer call runs
+afterward and must not read the old value. No implicit runtime check or
+cleanup-state registration is added. Leaking old resources is the caller's
+responsibility. Helper temporaries retain their normal full-expression
+lifetimes; no extra expression boundary is introduced.
 
 Examples, each assuming `slot` is inactive before the call:
 
@@ -1741,16 +2092,18 @@ Use an explicit initializer: `construct_at(slot, T())` for a default
 structure constructor, or a value such as `0` for a scalar. There is no
 one-operand default-construction form or constructor-argument pack overload.
 
-Constructing over a live value is undefined behavior, not replacement.
-The source must be live and the destination inactive, so they cannot be the
-same slot. Neither construction nor Advanced assignment has a self-alias no-op.
-Overlapping source and destination storage is also invalid.
+Constructing over a live value is allowed but skips its cleanup. A retained
+copy or relocation source must remain live through the old lifetime ending,
+and be distinct and non-overlapping with the destination. Neither construction
+nor Advanced assignment has a self-alias no-op. These are unchecked
+preconditions, not required runtime checks.
 
 #### 6.7.2 Destruction without deallocation
 
 `destruct_at(pointer)` has exactly one operand and evaluates it once. It
 performs the same destruction as automatic cleanup: run `T.drop`, if any,
-then destroy inline fields in reverse declaration order. The slot becomes
+then destroy inline fields in reverse declaration order, or array elements
+in decreasing index order. The slot becomes
 inactive after destruction completes normally. Destroying a Basic value
 invokes no user code but still ends that value's lifetime.
 
@@ -1829,74 +2182,51 @@ known; HUC0 accepts the same queries on concrete types without staging.
 
 `is_basic<T>()` takes the same complete runtime type operand and no value
 operands, and returns a constant `bool`. It is true for Basic types and false
-for Advanced types, including `raw_storage`. It reports the existing inferred
-category; it does not declare a trait, opt a type into copying, or generate
-`clone`. HUC1 can use `if1 (is_basic<T>())` to end a copied Basic source's
-lifetime without trying to destroy an extracted Advanced source.
+for Advanced types. An array has the category of its element type. The query
+reports the existing inferred category; it does not declare a trait, opt a
+type into copying, or generate `clone`. HUC1 can use `if1 (is_basic<T>())`
+to end a copied Basic source's lifetime without trying to destroy an
+extracted Advanced source.
 
-#### 6.7.5 Typed raw inline storage
+#### 6.7.5 Byte arrays as object storage
 
-`raw_storage<T, N>` reserves `N` contiguous slots for `T` inside the containing
-object, with alignment `align_of<T>()` and size `N * size_of<T>()`. It adds no
-tag, length, allocation, or per-element cleanup flags. `T` must be a complete
-runtime object type. `N` must be positive and the total size must fit the
-target's object-size limits and `usize`. Invalid layouts are compile-time
-errors. HUC0 spells `N` as an integer literal; HUC1 can use a compile-time
-`usize` expression and emits the resolved literal. Aliases preserve this type.
-Zero-capacity libraries specialize to a representation with no storage field.
-
-The zero-argument expression `raw_storage<T, N>()` creates the storage with
-every element slot inactive. It calls no `T` constructor and need not initialize
-any payload bytes. An omitted mutable local or field of this type has the same
-initialization; fixed bindings require an initializer as usual. Its slots are
-reserved for exactly `T`, including that type's pointer permissions. Casting
-an address does not permit using the same slot for an unrelated type.
-
-`storage_ptr(pointer)` takes exactly one pointer to a live `raw_storage<T, N>`
-object and returns the address of its first element slot. A read-only storage
-pointer produces `T*`; a writable storage pointer produces `mut T*`. The
-operand is evaluated once. It must be non-null, aligned, and valid; the
-operation neither reads the payload nor constructs an element. It works even
-when all element slots are inactive. It has no type operand and cannot be
-overloaded or used as a function value. Use `&storage` to address the storage
-object itself, and `storage_ptr(&storage)` to address its element region.
+A `u8[N]` or `c8[N]` array may provide storage for objects of any runtime
+object type. Use `construct_at` at an address aligned for `T`, with the
+whole object inside the byte array. Type casts alone do not create objects.
+The ordinary incompatible-type rules still apply to other typed storage.
 
 ```huc
-let mut storage: raw_storage<File, 4> = raw_storage<File, 4>();
-let slots: mut File* = storage_ptr(&storage);
-construct_at(slots, File(handle)); // only slot 0 is now live
-let file: File = *slots; // Advanced extraction; slot 0 is inactive again
-// file has automatic cleanup; storage never closes a File by itself.
+let [align(align_of<File>()), nozero] mut storage: u8[4 * size_of<File>()];
+let slots: mut File* = ptr_as<mut File*>(&storage[0]);
+construct_at(slots, File(handle)); // only slot 0 holds a File
+let file: File = *slots; // extraction: slot 0 no longer holds a live File
+// file has automatic cleanup; storage never closes Files by itself.
 ```
 
-Pointer arithmetic within the region, including forming its one-past address,
-is allowed independently of which slots are live. Reading a value, calling its
-methods, or destroying it requires a live slot. `construct_at` instead requires
-an inactive slot. Merely declaring a `T*`, casting bytes, or obtaining a slot
-address never constructs a `T`.
+Arithmetic on a typed pointer into the byte array may use its whole region,
+including a one-past address, whether or not objects of that type are live
+there. Each access or destruction still requires a valid live object; each
+construction requires suitable alignment, size, and writable storage.
 
-Raw storage is always Advanced, even for Basic `T`. Ordinary whole-value
-transfer relocates its representation and any live payload values to the
-corresponding destination slots, leaving the source inactive without cleanup.
-Inactive bytes may be transferred as representation without reading them as
-initialized `T` values. No source clearing or element-state scan is required.
-`copy storage` is rejected: a container's `clone` must create fresh storage and
-explicitly copy its live elements. Pointers into relocated storage still point
-to the old region and must not be used as observers of the new values.
+The byte array remains Basic. Copying its bytes does not transfer or create
+any payload objects. Relocating an enclosing Advanced value, however,
+transfers the live payload objects at the same offsets into the destination
+and ends their source lifetimes without cleanup. Unwritten bytes may travel
+with the representation. No runtime payload map, clearing, or scan is needed.
+Pointers into the old storage are not updated.
 
-Ending or replacing a raw-storage object's lifetime never invokes element
-cleanup. Any live payload lifetimes end with it, potentially leaking resources.
-The containing library type must destroy or extract its live elements before
-releasing that storage. Its ordinary `drop` can do so; subsequent automatic
-cleanup of the raw-storage field does not repeat element destruction. Storing
-a length or tag is a library responsibility, not hidden compiler state.
+Byte-array cleanup does not destroy payload objects. Ending its lifetime ends
+any remaining payload lifetimes without cleanup, potentially leaking resources.
+The owning container must destroy or extract the live elements before that
+happens. A length or tag is a library responsibility. Its `drop` normally
+handles this and makes the containing type Advanced; even an empty `drop`
+prevents accidental Basic copying but does not clean up payloads. A container's
+`clone` constructs fresh storage and explicitly copies live elements.
 
-One slot plus a presence flag is enough for a library inline optional. A sum
-type can use separate raw-storage fields for its alternatives and a tag; this
-uses more space than an overlapping union. Compact overlapping alternatives
-and a general union syntax remain separate design work. These facilities do
-not suppress ordinary `T` field cleanup. Direct Advanced field moves are
-unchecked extraction and must respect that cleanup (section 6.4).
+One aligned slot plus a presence flag supports an inline optional. Separate
+byte arrays plus a tag support sum types without overlapping alternatives.
+Overlapping unions remain separate design work. None of these rules suppress
+automatic cleanup for ordinary typed fields or array elements.
 
 #### 6.7.6 Allocated storage and container bookkeeping
 
@@ -1908,21 +2238,26 @@ the library establishes capacity for whole `T` slots before using element
 pointer arithmetic. Zero capacity may use a null pointer; it permits no
 dereference or pointer arithmetic on that null pointer.
 
-A vector maintains `0 <= length <= capacity`, with exactly `[0, length)` live.
+A vector maintains `0 <= length <= capacity`; `[0, length)` is its published
+live range. Basic values outside that range may remain live after a pop.
 Push constructs at `data + length` before increasing length. Pop extracts an
 Advanced last element or copies a Basic one, then removes that slot from the
-live range. A copied Basic source still has a lifetime: use `destruct_at` to
-end it before reusing the slot with `construct_at`. This calls no user code.
-The same distinction applies when growing into a new allocation: Advanced
-sources become inactive on transfer, while copied Basic sources must have
-their lifetimes ended before the old region is reused. The old allocation
-can then be freed without destroying already-transferred Advanced elements.
+live range. A copied Basic source remains live, but `construct_at` may reuse
+its storage without a preceding `destruct_at`. Advanced sources become
+inactive on transfer. The old allocation can be freed without destroying
+already-transferred Advanced elements; ending the allocation also ends any
+remaining Basic lifetimes.
+
+Compiler-only allocation has its own deallocation contract: every slot passed
+to `compiler::deallocate` must be inactive (section 12.3). A container using
+that API must also retire copied Basic slots before deallocation, even though
+`construct_at` does not require retirement before reuse.
 
 Clear destroys each live element exactly once and sets length to zero. The
 library must not publish an unconstructed element or let cleanup reach an
 extracted one, including on early returns. An ordinary inline-storage field
 containing live `T` objects would receive automatic field cleanup; a
-`raw_storage<T, N>` field deliberately does not. No hidden array of drop flags
+byte-array backing field deliberately does not. No hidden array of drop flags
 is needed in either inline or allocated storage.
 
 ### 6.8 Raw-pointer binding
@@ -2010,9 +2345,9 @@ method receiver is processed before the arguments. Each by-value parameter
 is bound before the next argument starts. An assignment evaluates its
 destination first, prepares its RHS inputs, and replaces the value in the
 order specified by section 6.3. In this section, a *call* is a function,
-method, or intrinsic call, a constructor expression `T(arguments)`, or an
-initializer entry
-`field(arguments)`.
+method, or intrinsic call, or a constructor expression `T(arguments)`.
+An initializer entry `field = expression` follows ordinary initialization;
+calls inside its expression undergo the same checks.
 
 #### Control flow
 
@@ -2220,6 +2555,12 @@ inference is allowed. HUC does not also accept an omitted `: Type`, the
 old type-first declaration form, or a destructuring declaration. Runtime
 parameters, fields, and globals require explicit types.
 
+An omitted initializer on a mutable local performs default initialization
+(section 4.6); fixed locals require an initializer. Scalars receive zero,
+false, or null, unless `[nozero]` applies; structures invoke their zero-argument
+init, and arrays apply the element defaults in index order. No additional
+array-constructor spelling or repeat literal is provided.
+
 Use `let1` for a compiler-only binding while preparing runtime code:
 
 ```huc
@@ -2338,6 +2679,34 @@ HUC permits overloading by arity and parameter types. Resolution uses:
 
 No user-defined implicit conversion participates. A tie is a diagnostic.
 
+An argument whose type depends only on literals, such as `1` or `1 + 2`, is
+matched before its type is fixed:
+
+- it is an exact match for its default type;
+- it matches any other type of the same kind that can represent its value at
+  the level of a lossless promotion (this section, rule 2).
+
+A candidate is viable only if the literal-only expression's value fits its
+type, and any bit operator in it is valid for that type. Otherwise the
+candidate is skipped rather than reported. So `f(200 + 100)`, whose exact
+value is `300`, skips `f(x: u8)` and picks `f(x: i32)`. The fit error applies
+only when no candidate is viable, or when there is no overload.
+
+For example, `f(1)` picks `f(x: i32)` over `f(x: i64)`, and is ambiguous between
+`f(x: u8)` and `f(x: u16)`, which is a diagnostic as ties are today.
+
+An array literal argument (section 4.7.5) is matched the same way, element by
+element. It is an exact match for its default type. It matches another array
+type with the same count when each element matches that element type, and
+its rank is the worst rank of its elements. A candidate whose count differs,
+or whose element type some element doesn't fit, is skipped.
+
+```huc
+f([1, 2, 3]);   // picks f(x: i32[3]) over f(x: i64[3]): exact match
+f([1, 2, 300]); // with f(x: u8[3]) and f(x: i32[3]): 300 doesn't fit u8, so i32[3]
+f([1, 2]);      // with only f(x: i32[3]): wrong count, error
+```
+
 ## 8. Lifetime and safety model
 
 These rules define HUC's safety limits; they are language requirements, not
@@ -2452,8 +2821,8 @@ translator writes one flattened file with namespace sections before the
 HUC0-to-LLVM translator begins. Both translators are implemented in C++20;
 HUC0 remains a printable source boundary, not a private IR handoff.
 
-Built-in casts such as `as<T>` and `ptr_as<Target>`, type queries, and
-`raw_storage<T, N>` use angle operands without being phase-family requests.
+Built-in casts such as `as<T>` and `ptr_as<Target>`, and the layout/category
+queries, use type operands without being phase-family requests.
 No nominal type or ordinary function application with phase arguments survives
 into HUC0.
 
@@ -2578,7 +2947,7 @@ constraint-based and substitution-failure forms have no equivalent.
 | Binder | `<T: auto, N: usize><T*, N>` | Any type or value, which the binder receives |
 | Pointer | `<T: auto><mut T*>` | A pointer with the same `mut`, binding its pointee |
 | Family application | `<T: auto><Vector<T>>` | Any specialization of that family |
-| Built-in parameterized type | `<T: auto, N: usize><raw_storage<T, N>>` | Matching storage, binding its element type and count |
+| Array type | `<T: auto, N: usize><T[N]>` | Matching an array, binding its element type and count |
 | Repeated binder | `<T: auto><T, T>` | Only identical arguments in those positions |
 | Family binder | `<C: auto, T: auto><C<T>>` | Any one-argument family specialization; `C` receives the family |
 
@@ -2613,7 +2982,7 @@ fn is_pointer<T: auto><mut T*>() -> bool {
 ```
 
 A body can then check `if1 (is_same<T, u8>())` without a compiler query.
-Pattern forms for array, function, and pack types will follow those types.
+Pattern forms for function and pack types will follow those types.
 
 ### 9.3 Selection and residual declarations
 
@@ -4197,7 +4566,7 @@ struct Helper<> {
     let name: compiler::Text;
     let code: compiler::Code;
 
-    fn init(name: compiler::Text, code: compiler::Code) : name(name), code(code) {
+    fn init(name: compiler::Text, code: compiler::Code) : name = name, code = code {
     }
 }
 
@@ -4408,8 +4777,9 @@ The evaluator supports the runtime language, including:
   section 6.12;
 - raw pointers to compile-time objects: `&`, `*`, `->`, `null`, equality, and
   arithmetic and ordering within one object or allocation;
-- `raw_storage<T, N>`, `construct_at`, `destruct_at`, `take`, and extraction
-  through writable pointers, fields, and elements (sections 6.4, 6.6.1, and 6.7);
+- arrays, byte-array backing storage, `construct_at`, `destruct_at`, `take`,
+  and extraction through writable pointers, fields, and elements
+  (sections 6.4, 6.6.1, and 6.7);
 - compile-time allocation (section 12.3);
 - string literals, as read-only compile-time data;
 - immutable constants with compiler-known values, without accessing runtime
@@ -4429,8 +4799,10 @@ diagnostic with the evaluation call stack, never host undefined behavior:
   holds no live value of the accessed type, including one whose value was
   relocated, extracted, or destroyed;
 - pointer arithmetic beyond one past the end of its object or allocation;
-- reading storage that was never initialized;
-- constructing over a live value or destroying an inactive slot;
+- reading an unwritten scalar, including an element omitted by `[nozero]`;
+  whole-aggregate representation copies can carry unwritten bytes;
+- destroying an inactive slot; constructing over a live value is allowed
+  without cleanup, but leaked resources still follow section 12.3;
 - deallocation errors and leaks (section 12.3).
 
 An ordinary function cannot name `let1 mut` storage, which has no run-time
@@ -4438,7 +4810,10 @@ equivalent. It may still change compile-time objects through pointers it
 receives, including `this` (section 9.8). Actual `u8` and `c8` objects, such
 as string literal bytes or `Vector<u8>` elements, are accessed like any other
 values. Viewing an object of another type as bytes through `u8*` or `c8*` is
-deferred; it needs a byte-level model of target layout.
+deferred; it needs a byte-level model of target representation. Constructing
+and accessing typed payloads inside byte-array storage is supported: the
+evaluator tracks target offsets, live payloads, and written bytes without
+exposing another type's raw representation.
 
 Eligibility is checked along the executed path, following the call chain into
 ordinary and concrete generic callees. An unsupported operation in an untaken
@@ -4474,7 +4849,7 @@ struct Span {
     let first: i32;
     let last: i32;
 
-    fn init(first: i32, last: i32) : first(first), last(last) {
+    fn init(first: i32, last: i32) : first = first, last = last {
     }
 
     fn length() -> i32 {
@@ -4552,9 +4927,9 @@ compiler::allocate<T>(count)          // mut T* to count inactive slots
 compiler::deallocate<T>(slots, count) // releases them
 ```
 
-`allocate` returns a pointer to `count` inactive slots for `T`, like a
-`raw_storage<T, count>` that lives on the heap; `count` may be zero. Values
-enter and leave the slots through `construct_at`, `destruct_at`, and
+`allocate` returns a pointer to `count` suitably aligned inactive slots for
+`T` on the compiler heap; `count` may be zero. Values enter and leave the
+slots through `construct_at`, `destruct_at`, and
 extraction (section 6.7), and pointer arithmetic stays within the allocation.
 `deallocate` requires the pointer and count that `allocate` returned, and every
 slot must be inactive. Allocated memory counts toward the evaluator's memory
@@ -4675,7 +5050,7 @@ The following list is representative rather than exhaustive:
 - accessing a value through an incompatible pointer type;
 - writing actually fixed storage through a cast pointer or integer-address round trip;
 - raw slot manipulation that violates ownership or cleanup obligations;
-- `construct_at` into a live slot, or `destruct_at` on an inactive slot;
+- `destruct_at` on an inactive slot;
 - breaking a `noalias` parameter's rule (section 4.9.10);
 - a foreign function declared with result `never` returning normally;
 - reading uninitialized storage;
@@ -4690,7 +5065,7 @@ The following require separate proposals. This list describes the current
 design, not the complete set of features that release 0.1 might leave unimplemented:
 
 - checked references or lifetime analysis;
-- primitive fixed arrays;
+- fill/repeat array literals and dedicated multidimensional views;
 - representation reinterpretation with `bit_as`;
 - inheritance and implicit subtype conversion;
 - exceptions and stack unwinding;
@@ -4727,7 +5102,8 @@ The closest C++ equivalents are conceptual, not the backend representation:
 | Advanced binding from `value.field`, `p->field`, or `items[i]` | Move construction from the corresponding `std::move(place)`, except HUC ends the source lifetime without cancelling enclosing cleanup |
 | `take place` | For Advanced values, extract and default-construct a replacement, conceptually like exchange; Basic values instead copy without resetting the source |
 | `construct_at(p, value)` / `destruct_at(p)` | `std::construct_at` / `std::destroy_at`, with HUC initialization and cleanup rules |
-| `raw_storage<T, N>` | Typed, aligned storage with manually managed element lifetimes; no implicit element cleanup |
+| `T[N]` | A fixed array value, conceptually like `std::array<T, N>` |
+| Aligned `u8[N]` / `c8[N]` backing storage | Byte storage with manually managed payload lifetimes |
 | `size_of<T>()` / `align_of<T>()` | `sizeof(T)` / `alignof(T)` |
 | `struct [align(64)] S` / `let [align(64)] x: T` | `struct alignas(64) S` / `alignas(64) T x` |
 | `struct [pack(1)] S` | `#pragma pack(1)` around one structure |
@@ -4800,7 +5176,7 @@ import std.io as io;
 struct Widget {
     let value: i32;
 
-    fn init(value: i32) : value(value) {
+    fn init(value: i32) : value = value {
     }
 
     fn clone() -> Widget {

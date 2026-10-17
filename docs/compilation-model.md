@@ -919,7 +919,7 @@ pub struct Pair {
     let mut x: u64;
     let mut y: u64;
 
-    fn init(x: u64, y: u64) : x(x), y(y) {}
+    fn init(x: u64, y: u64) : x = x, y = y {}
 }
 
 pub let1 mut pair: Pair = Pair(1, 2);
@@ -1096,7 +1096,7 @@ import library.read;
 struct Point {
     let value: i32;
 
-    fn init(value: i32) : value(value) {}
+    fn init(value: i32) : value = value {}
 }
 
 fn main() -> i32 {

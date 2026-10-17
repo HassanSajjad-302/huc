@@ -62,7 +62,7 @@ access through `u8*` or `c8*` performs no lifetime or cleanup operations.
 
 `&` still requires a named Advanced root to be tracked Active, even when its
 result is cast to an integer. Manual-storage code can retain a pointer before
-transferring the value or use `raw_storage`; taking a pointer does not keep
+transferring the value or use byte-array storage; taking a pointer does not keep
 the old value alive. Section 7.5 defines the checked-use boundary.
 
 Declarations use `name: Type`. `mut` before the name controls the slot;
@@ -110,12 +110,13 @@ Basic types are:
 
 - scalar arithmetic and boolean types;
 - raw pointers;
+- arrays of Basic elements;
 - structures whose fields are all Basic and which declare neither `clone` nor
   `drop`.
 
 Advanced types are:
 
-- built-in `raw_storage<T, N>`, irrespective of `T`'s category;
+- arrays of Advanced elements;
 - structures containing at least one Advanced field;
 - structures declaring `clone`;
 - structures declaring `drop`.
@@ -123,8 +124,9 @@ Advanced types are:
 Having `init()` alone does not make a structure Advanced. A raw `T*` is Basic
 even when `T` is Advanced; it copies only the observer address. In contrast,
 an inline Advanced field makes its containing structure Advanced too.
-Primitive arrays are deferred. Library array types follow the rules for
-their concrete generated structures, including any raw-storage field.
+An array is Basic exactly when its element type is Basic. A byte array is
+therefore Basic, even when used as manual backing storage; a container must
+declare `drop` or otherwise be Advanced to get destructive whole-value transfer.
 
 Declaring `clone` intentionally makes an otherwise Basic structure Advanced.
 Otherwise ordinary binding could silently bypass the custom copy behavior:
@@ -133,7 +135,7 @@ Otherwise ordinary binding could silently bypass the custom copy behavior:
 struct Ticket {
     let id: u64;
 
-    fn init(id: u64) : id(id) {
+    fn init(id: u64) : id = id {
     }
 
     fn clone() -> Ticket {
@@ -156,7 +158,7 @@ when its author wants to prevent copying:
 struct UniqueTicket {
     let value: u64;
 
-    fn init(value: u64) : value(value) {
+    fn init(value: u64) : value = value {
     }
 
     fn drop() mut -> void {
@@ -174,7 +176,7 @@ does not need another type-category keyword.
 HUC lets a type define three lifecycle methods:
 
 ```huc
-fn init(...) : field(initializer), ... {
+fn init(...) : field = initializer, ... {
     // construction body
 }
 
@@ -214,8 +216,8 @@ struct Point {
     let y: i32;
 
     fn init(x: i32, y: i32)
-        : x(x),
-          y(y),
+        : x = x,
+          y = y,
     {
     }
 }
@@ -230,14 +232,18 @@ applies when a constructor expression directly initializes:
 - a field through a constructor initializer entry;
 - a by-value function parameter;
 - a function result in `return T(arguments)`;
-- the supplied slot in `construct_at(pointer, T(arguments))`.
+- the supplied slot in `construct_at(pointer, T(arguments))`;
+- the replacement slot after Advanced assignment destroys its old value.
 
 HUC guarantees this; it is not an optional optimization. `init` sees the final
 `this` address, and constructing a fixed Advanced value needs no writable
-temporary first. More complex expressions that supply an existing Advanced
-value still follow the normal transfer rules.
+temporary first. Direct calls, Advanced copies, array literals, and selected
+conditional arms also use their final result slots (section 8.2). Existing
+Advanced values still follow the normal transfer rules.
 
-Constructor initializer entries:
+Constructor initializer entries use `field = expression`. The left name is a
+field; the expression uses ordinary lookup. Each entry initializes its field
+as an ordinary `let` initializer would, using that field's storage. Entries:
 
 1. must follow field declaration order;
 2. are evaluated left-to-right;
@@ -245,7 +251,18 @@ Constructor initializer entries:
 
 Every fixed field requires a declaration initializer or a constructor entry.
 An omitted mutable scalar becomes zero, an omitted mutable pointer
-becomes null, and an omitted mutable structure is default-constructed.
+becomes null, and an omitted mutable structure is default-initialized. Arrays
+default-initialize their elements in increasing index order. `[nozero]` skips
+omitted writes for scalars and scalar arrays; explicit initializers still run.
+
+With no written `init`, a structure gets a generated memberwise init, with one
+parameter per named field lacking both a declaration initializer and
+`[nozero]`. Parameters have the field names and types in declaration order;
+Advanced parameters are mutable bindings. It also gets a default no-argument
+init when every named field has an initializer or is mutable and supports
+default initialization. Identical zero-argument forms are one function. Any
+written `init` suppresses both generated forms. Fixed-field initialization
+obligations still apply. See [the full construction rules](language-specification.md#46-structures).
 
 `init` does not double as a copy or relocation hook. An overload accepting
 another `T` is just an explicitly selected constructor:
@@ -256,8 +273,8 @@ struct ScaledPoint {
     let y: i32;
 
     fn init(source: Point, scale: i32)
-        : x(source.x * scale),
-          y(source.y * scale),
+        : x = source.x * scale,
+          y = source.y * scale,
     {
     }
 }
@@ -266,7 +283,7 @@ struct ScaledPoint {
 ## 5. Copying Basic values
 
 A structure made entirely from Basic fields, with no `clone` and no `drop`, is
-copied field by field:
+copied by value, including its representation bytes:
 
 ```huc
 struct Point {
@@ -274,8 +291,8 @@ struct Point {
     let y: i32;
 
     fn init(x: i32, y: i32)
-        : x(x),
-          y(y),
+        : x = x,
+          y = y,
     {
     }
 }
@@ -434,8 +451,8 @@ struct HeapText {
     let size: usize;
 
     fn init(source: text::View)
-        : data(memory::allocate_raw_bytes(source.size())),
-          size(source.size()),
+        : data = memory::allocate_raw_bytes(source.size()),
+          size = source.size(),
     {
         memory::copy_bytes(this->data, source.data(), this->size);
     }
@@ -600,8 +617,8 @@ struct Packet {
     let payload: HeapText;
 
     fn init(tag: i32, mut payload: HeapText)
-        : tag(tag),
-          payload(payload),
+        : tag = tag,
+          payload = payload,
     {
     }
 }
@@ -624,7 +641,7 @@ For an Advanced value, relocation transfers its stored representation:
 The operation need not clear `source.payload`; that field is inactive,
 not a second live value. Neither it nor `source` may be used as a value before
 the whole source is reinitialized. No source `drop` body or source-field
-cleanup runs. Advanced library array structures use the same whole-value rule.
+cleanup runs. Advanced fixed arrays use the same whole-value relocation rule.
 The operation invokes no user code and cannot fail in the HUC type system.
 
 The rule is the same whether the structure is Advanced because of `clone`, `drop`,
@@ -709,8 +726,8 @@ struct SelfIndexed {
     let mut self: SelfIndexed*;
 
     fn init(payload: i32)
-        : payload(payload),
-          self(null),
+        : payload = payload,
+          self = null,
     {
         this->self = this;
     }
@@ -840,8 +857,8 @@ that field, is also undefined behavior. These lifetime mistakes are not
 required errors, even for direct field paths. Implementations may warn, but
 must not reject otherwise well-typed runtime code for them. Type, permission,
 and whole-root checks remain. No per-field flags or alias checks are added.
-Inactive payload slots in `raw_storage` are different: they may accompany a
-whole-storage transfer under section 9.3.
+Unused byte-array capacity is different: it may accompany relocation of an
+enclosing Advanced value under section 9.3.
 
 Basic pointees are still copied, not consumed. `copy *file_pointer` clones a
 live, copyable pointee and leaves it active; it does not require pointee `mut`.
@@ -892,7 +909,7 @@ struct File {
     let mut handle: i32;
 
     fn init(handle: i32)
-        : handle(handle) {
+        : handle = handle {
     }
 
     fn drop() mut -> void {
@@ -1095,11 +1112,14 @@ What preparation does depends on the outer RHS operation:
 | `make(arguments)` | Retain callee/receiver and bind arguments | Run call into slot |
 | `copy source` | Retain or evaluate source, without outer clone | Clone into slot |
 | Existing eligible Advanced place | Retain source location | Relocate into slot |
-| Other expression, including `?:` | Evaluate the whole value | Relocate the result |
+| Array literal | Prepare every element's inputs left to right | Build elements in increasing index order |
+| `condition ? yes : no` | Evaluate condition once, then prepare only the selected arm by these rules | Finish that arm directly in the slot |
+| Other expression | Evaluate the whole value | Relocate the result |
 
 Parentheses do not change the selected form. This does not delay every nested
 operation: `current = identity(copy other)` clones before destroying `current`,
-then runs `identity`. A conditional RHS also finishes its selected value first.
+then runs `identity`. A conditional forwards the destination to its selected
+arm recursively; an outer clone or factory in that arm runs after destruction.
 For `current = copy make_source()`, the factory builds a separate source that
 stays alive through the delayed clone. Retaining a source place is not a
 snapshot: legal changes made by the destination's destructor are visible to
@@ -1174,12 +1194,15 @@ so there is nothing left to drop. A conditional that transfers `x` also uses
 its post-preparation state. Existing containing-root checks still reject
 `packet.field = make_field(packet)` and `*(&x) = wrap(x)`.
 
-A direct constructor, call, or Advanced `copy` result uses its final destination
-for initialization as well as assignment. `return T(...)`, `return make()`,
-and `return copy source` forward that slot through nested calls. The final
+A direct constructor, call, Advanced `copy`, array literal, or selected `?:`
+result uses its final destination for initialization as well as assignment.
+`return T(...)`, `return make()`, `return copy source`, and conditional direct
+results forward that slot through nested calls. The final
 constructor address is guaranteed even at `-O0` and without inlining. Returning
 an explicit Advanced local still relocates it; named-return optimization is
-not guaranteed. Conditional results are prepared separately and transferred.
+not guaranteed. A named Advanced arm still relocates; the conditional is a
+value, not a place. For example, `x = c ? copy x : copy other` has undefined
+behavior when `c` selects the clone of the destroyed `x`.
 
 The tracked-state reinitialization rule does not apply to a slot made
 inactive through pointer extraction.
@@ -1225,9 +1248,9 @@ struct Session {
     let mut native_transaction: i64;
 
     fn init(mut log: Logger, mut socket: Socket, native_transaction: i64)
-        : log(log),
-          socket(socket),
-          native_transaction(native_transaction),
+        : log = log,
+          socket = socket,
+          native_transaction = native_transaction,
     {
     }
 
@@ -1347,8 +1370,10 @@ nulls the pointer, or registers automatic cleanup. Constructors and `drop`
 methods still perform whatever resource operations their bodies specify.
 
 `construct_at(pointer, value)` infers the type from `mut T*` and returns
-the same pointer. It evaluates the pointer once, then initializes that slot
-from the value expression. This follows ordinary initialization:
+`void`. It evaluates the pointer once and prepares the initializer inputs as
+in Advanced assignment. It then ends any old value in the slot without
+cleanup and completes initialization there. Enclosing objects stay alive.
+For the replacement:
 
 - Basic values copy.
 - Advanced values transfer from an eligible source, leaving that source
@@ -1358,10 +1383,13 @@ from the value expression. This follows ordinary initialization:
   and move a temporary. This also preserves the final `this` address.
 - Direct call results forward the slot through nested direct returns, as
   described in section 8.2, without requiring inlining.
+- Array literals build in the element slots; `?:` forwards the destination
+  to its selected arm.
 
 There is no hidden by-value parameter between the initializer and the slot.
 For a default structure constructor write `construct_at(slot, T())`; for a
-scalar, supply its value. Helper temporaries still follow the enclosing
+scalar, supply its value. Arrays use a literal or another array value, not
+`T[N]()`. Helper temporaries still follow the enclosing
 expression's lifetime, but the newly constructed value is not destroyed at
 the semicolon.
 
@@ -1371,11 +1399,16 @@ value has no cleanup code, but its lifetime ends too. Source bytes need not
 be cleared. This is distinct from extraction: `let result: T = *slot;`
 transfers an Advanced value without running its destructor.
 
-These are unchecked operations. Constructing over a live value, destroying
-an inactive value, or passing an invalid pointer is undefined behavior.
-Neither construction nor Advanced assignment has a same-storage no-op.
-Use ordinary assignment to replace a live value; use `construct_at` to
-initialize an inactive slot.
+These are unchecked operations. Destroying an inactive value or passing an
+invalid pointer is undefined behavior. Constructing over a live value is
+allowed, but skips its cleanup and can leak resources. Neither construction
+nor Advanced assignment has a same-storage no-op. Ordinary assignment drops
+the old Advanced value; `construct_at` never does.
+
+`construct_at(&item, Item(item.id))` reads the scalar argument before ending
+the old lifetime. In `construct_at(&item, make(&item))`, the factory runs
+after that lifetime ends and must not read the old value. Retaining a pointer
+does not preserve the object.
 
 **Automatic cleanup is not changed through aliases.** For example:
 
@@ -1401,43 +1434,44 @@ for the full contract.
 
 ### 9.3 Reserving raw inline storage
 
-`raw_storage<T, N>` reserves aligned space for `N` contiguous `T` values,
-without constructing any of them. It is a built-in HUC0 type, not a generic
-library family. HUC0 uses a concrete type and positive literal count; HUC1
-can resolve a type parameter and compile-time count into that form.
+An aligned `u8[N]` or `c8[N]` array provides inline storage for any complete
+runtime object type. `[nozero]` leaves its bytes unwritten. No payload is
+constructed until the programmer constructs it:
 
 ```huc
-let mut storage: raw_storage<File, 2> = raw_storage<File, 2>();
-let slots: mut File* = storage_ptr(&storage);
+let [align(align_of<File>()), nozero] mut storage: u8[2 * size_of<File>()];
+let slots: mut File* = ptr_as<mut File*>(&storage[0]);
 construct_at(slots, File(first_handle));
 construct_at(slots + 1, File(second_handle));
 
-let file: File = *(slots + 1); // second slot becomes inactive
+let file: File = *(slots + 1); // second payload becomes inactive
 destruct_at(slots); // close the first File
-// storage has no live elements left; only file gets automatic File cleanup.
+// Byte-array cleanup performs no File drops; file has ordinary cleanup.
 ```
 
-`storage_ptr` evaluates its storage-pointer operand once. A writable storage
-pointer gives `mut T*`; a read-only one gives `T*`. Obtaining the pointer does
-not read or initialize the element region. `size_of<T>()` and `align_of<T>()`
-return target layout constants of type `usize`; the region occupies
-`N * size_of<T>()` bytes aligned for `T`. Reject zero counts, incomplete
-element types, and sizes exceeding the target limits at compile time.
+The whole payload must fit in the byte array at an address aligned for its
+type. Typed pointer arithmetic can traverse this byte region, including
+unused capacity, or form a one-past pointer. Neither taking the address nor
+casting it reads the bytes. `size_of<T>()` and `align_of<T>()` provide target
+layout constants. HUC0 counts and alignment arguments accept layout queries,
+addition and multiplication; HUC1 emits concrete counts.
 
-Raw storage is always Advanced, with no `clone` and no automatic element
-cleanup. Moving it, including as part of a container, transfers its live
-payloads without scanning slots or clearing the source. It also carries
-inactive representation bytes without reading them as `T` values. A container
-must track its initialized length or presence flag, destroy the live elements
-in its `drop`, and explicitly copy live elements if it offers `clone`.
-Discarding raw storage without that cleanup can leak resources. Pointers into
-the old region do not follow a relocation.
+The byte array is Basic. Copying its bytes does not construct or transfer any
+payload objects. Relocating an enclosing Advanced value does transfer its
+live payloads at the same offsets, without scanning slots or clearing the
+source. Pointers into the old region do not follow the relocation. A container
+must track its initialized range, destroy those objects in `drop`, and clone
+them explicitly if it offers `clone`. Even an empty `drop` makes a wrapper
+Advanced; omitting it can accidentally make the wrapper Basic.
 
-An inline optional can use `raw_storage<T, 1>` plus a flag; its empty state
-contains no live `T` and needs no default or sentinel `T`. A sum type can use
-separate storage fields and a tag, at the cost of space for every alternative.
-This does not introduce overlapping unions or general primitive arrays.
-See [the raw-storage contract](language-specification.md#675-typed-raw-inline-storage)
+Whole-aggregate representation copies and relocations can carry unwritten
+bytes without reading them as scalar values. Reading an unwritten scalar is
+still invalid. Neither array cleanup nor the compiler supplies payload drops.
+
+An inline optional uses one aligned byte region plus a flag; its empty state
+needs no default or sentinel payload. Separate regions plus a tag can hold a
+sum type, at the cost of space for every alternative. This adds no union type.
+See [the byte-storage contract](language-specification.md#675-byte-arrays-as-object-storage)
 and [container examples](use-cases-and-examples.md#39a-raw-storage-for-containers).
 
 For allocated storage, allocator APIs must honor the requested size and
@@ -1447,9 +1481,10 @@ storage does not run their cleanup.
 
 `is_basic<T>()` reports the existing category as a compile-time `bool`. It lets
 generic code distinguish a copied Basic element, which remains live, from an
-extracted Advanced one. A Basic source can be retired with `destruct_at`
-before its slot is reused; that operation emits no user cleanup call. Do not
-call `destruct_at` on the already-inactive Advanced source.
+extracted Advanced one. A copied Basic source need not be retired before
+`construct_at` reuses its slot: the intrinsic ends its old lifetime. Explicit
+`destruct_at` is also allowed and emits no user cleanup call. Do not destroy
+the already-inactive Advanced source.
 
 ## 10. Parameters and argument order
 
@@ -1526,8 +1561,10 @@ condition ? first.size() : second.size();
 ```
 
 Each evaluates only the selected observation. The pointer form copies an
-address, which is Basic; it does not extend the pointee's lifetime. The rule
-does not change according to where the conditional expression appears.
+address, which is Basic; it does not extend the pointee's lifetime. A selected
+named Advanced value still transfers in a direct-result position; a selected
+constructor, call, copy, or array literal can build directly in the supplied
+destination (section 8.2).
 
 ## 11. Return values
 
@@ -1555,8 +1592,9 @@ addresses and required `clone` calls. This named-return optimization is not
 guaranteed. `clone` runs exactly when required by an evaluated `copy` expression.
 
 In contrast, `return T(...)`, `return make()`, and `return copy x` for Advanced
-`T` forward the caller's final result slot through direct calls and clones,
-even without inlining or optimization, as specified in section 8.2.
+`T` forward the caller's final result slot through direct calls and clones.
+Array literals and direct-result conditional arms do too, even without
+inlining or optimization, as specified in section 8.2.
 
 The result is bound before return-expression temporary cleanup, which runs
 before cleanup of remaining locals and parameters. A returned owner survives
@@ -1718,10 +1756,10 @@ struct Image {
     let stride: usize;
 
     fn init(width: usize, height: usize)
-        : pixels(memory::allocate_zeroed_bytes(width * height * 4)),
-          width(width),
-          height(height),
-          stride(width * 4),
+        : pixels = memory::allocate_zeroed_bytes(width * height * 4),
+          width = width,
+          height = height,
+          stride = width * 4,
     {
     }
 
@@ -1888,9 +1926,10 @@ relocation behavior, C++ references, or C++ value-category overloads.
 | Advanced binding from `*p`, including arguments and returns | Move construction from `std::move(*p)` | HUC ends the source lifetime without drop or source clearing; the programmer must prevent later source cleanup. Plain `T v = *p` in C++ normally copies instead |
 | Advanced binding from a writable field or element | Move construction from `std::move(object.field)` or `std::move(items[i])` | HUC ends the source lifetime without cancelling enclosing cleanup; it is the same unchecked extraction as `*(&place)` |
 | `take place` | Conceptually exchange with a default value for Advanced types | HUC constructs the replacement in the source slot after extraction; Basic values instead copy without resetting the source |
-| `construct_at(p, value)` | `std::construct_at(p, arguments...)` | HUC takes one initializer, including guaranteed direct destination construction, and requires inactive storage; neither operation allocates it |
+| `construct_at(p, value)` | `std::construct_at(p, arguments...)` | HUC takes one initializer, including guaranteed direct destination construction, returns `void`, and can end an old lifetime without cleanup; neither operation allocates storage |
 | `destruct_at(p)` | `std::destroy_at(p)` | Both perform destruction without deallocation; HUC does not cancel an aliased local's scheduled cleanup |
-| `raw_storage<T, N>` and `storage_ptr` | Typed aligned storage managed with placement construction/destruction | HUC does not automatically construct or destroy its elements; whole-storage transfer is destructive |
+| `T[N]`, `[e0, e1, ...]` | Fixed array / `std::array<T, N>` | HUC arrays are regular by-value types; category follows the element type and there is no pointer decay |
+| Aligned `[nozero]` byte array | Uninitialized aligned byte buffer | Payload lifetimes are manual; only enclosing Advanced relocation transfers them |
 | `size_of<T>()`, `align_of<T>()` | `sizeof(T)`, `alignof(T)` | Target layout constants; no value evaluation or construction |
 | Unconsumed temporary | Usually destroyed at full-expression end | HUC specifies condition, initializer, and return boundaries and has no reference-based lifetime extension |
 | Checked use of an Inactive or MaybeActive local | No corresponding C++ destructive-move state | HUC rejects named uses on uncertain paths; raw-pointer aliases remain unchecked |
@@ -1931,8 +1970,10 @@ The compiler must reject:
   read-only pointer operand, or an invalid/incomplete pointee type;
 - `construct_at` with an incompatible initializer or ineligible Advanced source;
 - attempts to overload either lifetime intrinsic or use it as a function value;
-- invalid `raw_storage` element types, zero/nonconstant counts, or layout overflow;
-- `copy` of raw storage, or a `storage_ptr` operand that is not a pointer to it;
+- incomplete/invalid array element types, zero/nonconstant counts, or layout overflow;
+- array literal count/type mismatches, or copying an uncopyable Advanced array;
+- `[nozero]` on a non-scalar, non-scalar-array type;
+- using the `void` result of `construct_at` as a value;
 - invalid type operands or value arguments for `size_of`, `align_of`, or `is_basic`.
 
 Useful warnings include:
@@ -1982,13 +2023,14 @@ assuming LLVM provides HUC value lifetimes:
     value or creating an intermediate by-value parameter. `destruct_at` ends
     a live value with its full cleanup, without deallocating its storage.
     Neither operation changes an aliased root's tracked cleanup state.
-14. Raw storage reserves aligned contiguous slots without constructing `T` or
-    adding element flags. Its transfer carries live payloads; its cleanup never
-    drops them. The owning library controls payload cleanup through its length
-    or tag. Target layout queries and category queries are compile-time constants.
-15. Direct constructor, call, and Advanced `copy` results use final destination
-    slots through nested direct returns, even without inlining. Explicit
-    locals and conditional results retain their relocation semantics.
+14. Byte arrays provide aligned object storage without constructing payloads
+    or adding runtime flags. Only relocation of an enclosing Advanced value
+    transfers payload lifetimes; Basic byte copies do not. The owning library
+    controls payload cleanup through its length or tag. Layout and category
+    queries are compile-time constants.
+15. Direct constructors, calls, Advanced copies, array literals, and selected
+    conditional arms use final destination slots through nested direct returns,
+    even without inlining. An existing Advanced local still relocates.
 16. Record source transfer before destination activation. Self-assignment
     therefore ends with Active bookkeeping without making its execution valid.
 17. Basic `take` is a read with no source changes. Advanced `take` extracts

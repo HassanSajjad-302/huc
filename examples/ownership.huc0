@@ -10,8 +10,8 @@ struct Widget {
     let mut native_handle: i32;
 
     fn init(value: i32)
-        : value(value),
-          native_handle(probable_open_widget(value)),
+        : value = value,
+          native_handle = probable_open_widget(value),
     {
     }
 
