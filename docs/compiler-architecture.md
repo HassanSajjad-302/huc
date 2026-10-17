@@ -425,7 +425,8 @@ Do not retain the old declaration order or `T&` as compatibility spellings.
 `construct_at(pointer, value)` and `destruct_at(pointer)`
 use ordinary call syntax with compiler-known, non-overloadable, unqualified
 names. Resolve them as intrinsics, not `std::` library calls. `as`, `ptr_as`,
-`size_of`, `align_of`, and `is_basic` use HUC0 type-operand calls.
+`size_of`, `align_of`, `is_basic`, `is_relocatable`, `is_copyable`, and
+`is_default_initializable` use HUC0 type-operand calls.
 Parse interleaved `*` and `[N]` suffixes left to right. HUC0 counts accept
 literals and layout queries combined with `+`, `*`, and parentheses;
 HUC1 counts accept compile-time expressions. Array literals are nonempty
@@ -435,6 +436,9 @@ entries use `field = expression`. There is no array constructor call syntax.
 Address-taking uses unary `&`.
 
 `take` is a reserved unary keyword in both parsers, with `copy`'s precedence.
+`drop` and `forget` are reserved statement keywords that take one name. Because
+`copy` and `drop` are reserved, the lifecycle method declarations `fn copy()`
+and `fn drop()` use their own grammar form, like `fn init`.
 
 Important recovery points are:
 
@@ -773,11 +777,14 @@ packed records nested in other records. Mark fields that `pack` leaves
 under-aligned, and reject `&`, method calls, Advanced types, and `init` on
 them. Reject `&` on bit-fields.
 
-Fold `size_of<T>()` and `align_of<T>()` to target `usize`, and `is_basic<T>()`
+Fold `size_of<T>()` and `align_of<T>()` to target `usize`, and `is_basic<T>()`,
+`is_relocatable<T>()`, `is_copyable<T>()`, and `is_default_initializable<T>()`
 to `bool`, with no runtime operands. HUC1 evaluation and HUC0 lowering must
 use the same target layout and classification rules; retain the target layout
-inputs in the translation context. HUC1 resolves an array count and prints
-an integer literal in residual HUC0. Runtime counts are not valid type operands.
+inputs in the translation context. A query evaluated during preparation
+about a structure whose body is still being processed is a diagnostic. HUC1
+resolves an array count and prints an integer literal in residual HUC0.
+Runtime counts are not valid type operands.
 
 ### 6.3 HUC1 phase checking
 
@@ -879,11 +886,12 @@ typedef struct HucHirExprHeader {
 This distinction prevents the C emitter from rediscovering transfer intent
 from plain storage representations.
 
-Basic and Advanced are type categories; `Copy`, `Clone`, and `Relocate` name
-compiler operations, not categories. Same-type Basic binding uses `Copy`.
-An inline Advanced transfer uses `Relocate`: the destination becomes active
-and the source becomes inactive without receiving `drop`.
-Explicit duplication through `clone()` uses `Clone`.
+Basic and Advanced are type categories; `Copy`, `LogicalCopy`, and
+`Relocate` name compiler operations, not categories. Same-type Basic binding
+uses `Copy`. An inline Advanced transfer uses `Relocate`: the destination
+becomes active and the source becomes inactive without receiving `drop`.
+Explicit duplication through a type's `copy` method, written or generated,
+uses `LogicalCopy`.
 
 Representative HIR operations:
 
@@ -894,10 +902,12 @@ Take(place)
 AddressOf(place)
 SlotAddress(place)
 PointerFromAddress(address, raw_pointer_type)
-Clone(value)
+LogicalCopy(value)
 ConstructInPlace(destination, constructor, arguments)
 InitializeAt(pointer, initializer)
 DestructAt(pointer)
+DropLocal(root)
+ForgetLocal(root)
 Call(function, arguments)
 Replace(destination, rhs_preparation_plan)
 ```
@@ -906,16 +916,17 @@ Replace(destination, rhs_preparation_plan)
 relocate.” When `T(arguments)` initializes a local, field, by-value parameter,
 or return result, HIR names that final place as the constructor destination.
 This preserves the final `this` address for constructors and avoids an observable
-relocation. Direct calls and Advanced clones likewise use the final result
+relocation. Direct calls and Advanced copies likewise use the final result
 place, forwarding it through nested direct returns even without inlining.
 Array literals build in the final element slots. A conditional forwards the
-place recursively to its selected arm. An explicit named local still has a
+place recursively to its selected arm, including its own temporary outside
+direct-result positions. An explicit named local still has a
 separate place and is relocated; no named-return optimization is guaranteed.
 
 `Replace` retains the RHS form rather than first materializing a complete
 replacement. Bind callee/receiver and arguments, or retain the copy/relocation
 source, before dropping the destination. Only then run the outer call,
-constructor, or clone into its slot, or relocate the retained source.
+constructor, or copy into its slot, or relocate the retained source.
 Conditionals evaluate the condition once and retain only the selected arm's
 preparation plan, recursively. Array literals prepare all element inputs
 first, then drop old elements in reverse and construct new ones forward.
@@ -927,7 +938,7 @@ preconditions, not a new required alias/dependency check.
 HIR records whether a source is a tracked root, a pointer dereference, or a
 direct subobject. Transferring from a named root requires `mut` before its
 name; extraction through a pointer requires pointee `mut` instead. A fresh
-function result, explicit `copy`/clone result, or
+function result, explicit `copy` result, or
 unavoidable constructor temporary can be transferred once without a source
 declaration marked `mut`. Direct construction in the destination remains
 preferred and creates no such temporary.
@@ -970,12 +981,17 @@ before its old value is destroyed: it may be the very slot being taken from.
 prepared result back. These operations must keep their order without inlining.
 
 `InitializeAt` represents `construct_at`: evaluate the pointer once, then
-initialize its slot from the second operand using `Copy`, `Clone`, `Relocate`,
-or destination construction. Return the retained pointer. Do not create a
-by-value initializer parameter or drop an old destination. `DestructAt`
+initialize its slot from the second operand using `Copy`, `LogicalCopy`,
+`Relocate`, or destination construction. The result is `void`. Do not create
+a by-value initializer parameter or drop an old destination. `DestructAt`
 performs complete destruction at a retained pointer, without deallocation.
 Both leave automatic cleanup state of aliased roots unchanged. A directly
 tracked source consumed by `Relocate` still updates its own state normally.
+
+`DropLocal` and `ForgetLocal` represent the `drop` and `forget` statements on
+a tracked root. `DropLocal` performs the same complete destruction as scope
+exit; `ForgetLocal` performs none. Both make the root Inactive, like a
+transfer, so scope exit skips it and later named uses are rejected.
 
 ## 8. Compile-time evaluator
 
@@ -1056,9 +1072,12 @@ its type, written bytes, and live objects, including payloads constructed in
 byte regions. Every dereference, `construct_at`, `destruct_at`, extraction,
 and deallocation is checked against specification section 12.1. Constructing
 over a live value ends it without cleanup after input preparation; this is
-not an evaluator error. Whole-aggregate transfers carry unwritten bytes
-without typed reads. Pointer arithmetic follows array/allocation slots or
-the whole byte-storage region, including one-past addresses. A pointer to
+not an evaluator error. Relocating an enclosing object that carries a live
+`[norelocate]` payload, and `drop` or `forget` of a root whose lifetime
+already ended, are evaluator errors. Whole-aggregate transfers carry
+unwritten bytes without typed reads. Pointer arithmetic follows
+array/allocation slots or the whole byte-storage region, including one-past
+addresses. A pointer to
 any other object behaves like a pointer into a one-element sequence. Ordering pointers into different blocks
 and converting a pointer to an integer are diagnostics. Actual `u8` and `c8`
 objects are ordinary values; viewing an object of another type through `u8*`
@@ -1293,13 +1312,13 @@ Keep nonconflicting entries. Treat a structure or allocation as a whole block,
 not a collection of independently merged fields. Distinct allocations remain
 distinct; imported paths to one shared allocation retain one logical ID.
 
-An import does not run language-level assignment, relocation, `clone`, or
-`drop`. The implementation may overwrite a parent map entry, share immutable
-block versions, and detach on a write. It must never overwrite the saved
-dependency version in place. Preserve aliases, private supporting objects,
-inactive slots, and deallocation records. Prune unselected versions only when
-no surviving entry or pointer needs them; discarding compiler metadata is not
-a user-language leak or cleanup event.
+An import does not run language-level assignment, relocation, a `copy`
+method, or `drop`. The implementation may overwrite a parent map entry,
+share immutable block versions, and detach on a write. It must never
+overwrite the saved dependency version in place. Preserve aliases, private
+supporting objects, inactive slots, and deallocation records. Prune
+unselected versions only when no surviving entry or pointer needs them;
+discarding compiler metadata is not a user-language leak or cleanup event.
 
 All evaluator reads and writes resolve through the active state. Calls inherit
 that state even when the callee is imported; lexical lookup still resolves names
@@ -1754,7 +1773,7 @@ Representative MIR statements:
 StorageLive place
 StorageDead place
 Copy destination, source
-Clone destination, source
+LogicalCopy destination, source
 Relocate destination, source
 AddressOf destination_raw, source_inline
 SlotAddress destination_usize, source_place
@@ -1793,8 +1812,9 @@ or enclosing objects. This needs no ownership registry, hidden pointer
 metadata, or per-field/element flags. The destination is active in either case.
 Backend temporaries for the source address must not create a second owning value.
 
-`Relocate` and Advanced `Clone` require different, non-overlapping source and
-destination storage. Basic `Copy` retains read-then-store self-alias behavior.
+`Relocate` and Advanced `LogicalCopy` require different, non-overlapping
+source and destination storage. Basic `Copy` retains read-then-store
+self-alias behavior.
 Advanced assignment adds no identity comparison or no-op
 branch. Even direct self-assignment is accepted under the normal static rules,
 but has undefined execution. Optional warnings or sanitizer instrumentation
@@ -1809,8 +1829,9 @@ transitions are MIR semantics, not optional annotations for the backend.
 
 Lower the retained assignment plan in order: prepare inputs, drop the old
 destination according to its post-preparation state, then `ConstructInPlace`,
-`Call`, `Clone`, or `Relocate` into that destination. A source temporary for
-`copy make_source()` survives through the clone. A nested clone argument
+`Call`, `LogicalCopy`, or `Relocate` into that destination. A source
+temporary for `copy make_source()` survives through the copy. A nested copy
+argument
 completes before drop, while a selected conditional arm follows its own
 preparation plan and forwards the slot. Source deactivation is recorded
 before destination activation, so a self-relocation root ends Active in the
@@ -1827,7 +1848,7 @@ Neither operation adds allocation/deallocation or source/pointer-clearing
 code. Invalid runtime preconditions are not required to be checked.
 
 Array initialization builds each element in increasing index order. Array
-cloning does likewise; destruction goes in reverse. `[nozero]` omits the
+copying does likewise; destruction goes in reverse. `[nozero]` omits the
 default writes of a scalar or scalar-array declaration. Byte storage has no
 payload cleanup. Enclosing Advanced relocation transfers payload lifetimes
 and unwritten bytes without scanning them or reading inactive values. The
@@ -1839,7 +1860,7 @@ per-payload flags. Library length or tag state controls explicit cleanup.
 ### 12.1 Place state
 
 The pass tracks whether each compiler-managed root place of an
-Advanced-classified type is:
+Advanced-classified type, and each Basic root named by `drop` or `forget`, is:
 
 ```text
 Inactive
@@ -1962,17 +1983,36 @@ flags; remaining flags belong to storage places, not nominal value layouts.
 
 ### 12.4 Special-operation elaboration
 
-Semantic analysis classifies a structure as Basic only when every field is Basic
-and it declares neither `clone` nor `drop`. Declaring either method makes the
-structure Advanced.
+Semantic analysis classifies a structure as Basic only when every field is
+Basic, it declares neither a `copy` method nor `drop`, and it is marked neither
+`[nocopy]` nor `[norelocate]`. Each of these makes the structure Advanced.
+
+It also computes three type properties. A type supports copying when it is
+Basic, has a written or generated `copy` method, or is an array of such
+elements. A type is non-relocatable when it is marked `[norelocate]`, has an
+inline non-relocatable field, or is an array of such elements. A type can be
+default-initialized when it is a scalar or raw pointer, a structure with a
+written or generated zero-argument init, or an array of such elements. The
+`is_copyable`, `is_relocatable`, and `is_default_initializable` queries
+report these properties. Generate a structure's `copy` method only under
+specification section 6.6: it is Advanced on its own, declares no `copy`
+method or `drop`, is neither `[nocopy]` nor explicitly `[norelocate]`, and has
+only copyable fields. Its body copies the named fields in declaration order
+directly into the destination fields. Skip a generated memberwise init that
+would relocate a non-relocatable field. The properties need no runtime
+metadata and must survive HUC0 printing.
 
 Elaboration handles the operations as follows:
 
 - same-type Basic binding becomes fieldwise `Copy`;
-- `copy` of an Advanced structure with the required protocol becomes `Clone` into
-  the copy expression's result place; lacking `clone` is a diagnostic. Direct
-  copy assignment uses the destination slot after old-value destruction;
+- `copy` of an Advanced structure with a written or generated `copy` method
+  becomes `LogicalCopy` into the copy expression's result place; a type that
+  does not support copying, including a `[nocopy]` type, is a diagnostic.
+  Direct copy assignment uses the destination slot after old-value
+  destruction;
 - copying `T*` copies only the observer address and permits null;
+- any relocation of a non-relocatable type is a diagnostic, whatever its
+  source; direct results still construct in their final place;
 - binding from an Advanced value becomes one fixed representation-transfer
   `Relocate`, which intrinsically makes the source and all subobjects inactive
   without requiring source-field clearing; tracked roots update their cleanup
@@ -1988,13 +2028,17 @@ Elaboration handles the operations as follows:
 - Advanced assignment retains a preparation plan, drops the old destination
   if it remains active, then performs the outer operation in its slot;
 - `destination = copy source` retains source, drops destination, then runs
-  `Clone` there. `destination = make(args)` binds args, drops destination,
-  then runs the factory into that result slot;
+  `LogicalCopy` there. `destination = make(args)` binds args, drops
+  destination, then runs the factory into that result slot;
+- `drop name;` becomes `DropLocal` and `forget name;` becomes `ForgetLocal`.
+  Both require a mutable, Active root; a Basic operand emits no code but still
+  becomes Inactive;
 - Basic assignment keeps its ordinary copy behavior, including self-aliasing;
 - destruction calls user `drop`, then drops fields in reverse order.
 
-`Clone` means an independent logical duplicate whose two active values can be
-destroyed independently. A user `clone` must duplicate owned resources or
+`LogicalCopy` means an independent logical duplicate whose two active values
+can be destroyed independently. A user `copy` method must duplicate owned
+resources or
 establish an explicit independent share, but it need not recursively duplicate
 objects reached only through raw observers. This is a semantic contract the
 unchecked compiler cannot prove.
@@ -2120,16 +2164,17 @@ Advanced relocation transfers payload lifetimes; a Basic byte copy does not.
 | Basic binding | Scalar or aggregate copy; source remains active |
 | Advanced relocation | Representation transfer without source clearing; update cleanup state only for tracked-root sources |
 | `take place` | Basic read, or Advanced extraction followed by in-slot default construction; no source cleanup-state change |
-| `copy value` | Resolved clone call when required by the source type |
+| `copy value` | Resolved `copy` method call when required by the source type |
 | `construct_at(pointer, value)` | Prepare inputs, end any old lifetime without cleanup, initialize in place; result is `void` |
 | `destruct_at(pointer)` | Emit full drop/field cleanup without freeing storage or updating aliased root flags |
 | Destruction | Explicit user `drop` followed by reverse field cleanup for active values |
 | `T(arguments)` initializing a final place | Initializer call with the final destination address |
-| Array literal / Advanced array copy | Direct element initialization or cloning in increasing index order |
+| Array literal / Advanced array copy | Direct element initialization or copying in increasing index order |
+| `drop name;` / `forget name;` | Full cleanup at the statement, or none; the root becomes Inactive and scope exit skips it |
 | Array destruction | Reverse element cleanup |
 | `[nozero]` | Omit default writes; preserve aggregate representation-copy rules |
 | Direct-result `?:` | Branch on the condition once and forward the destination to the selected arm |
-| Layout and category queries | Constants from the shared target/type model |
+| Layout and type queries | Constants from the shared target/type model |
 | Under-aligned packed field access | Loads and stores with the field's actual alignment |
 | Bit-field read or write | Load the storage unit, then shift and mask; a write keeps neighboring bits |
 | `inline`, `noinline`, `cold` | `alwaysinline`, `noinline`, `cold`; report a call that cannot be inlined |
@@ -2442,7 +2487,7 @@ symbol hashes must be identical across processes for identical inputs.
   unrelated names and independently allocated objects remain distinct;
 - aliases and object merging: direct and pointer reads agree, entire structures
   and allocation blocks are selected, inactive/deallocated entries win too,
-  and merging neither replays initializers nor calls clone/drop;
+  and merging neither replays initializers nor calls copy methods or drop;
 - staging contexts: compiler calls inherit the active caller state; runtime
   definitions and canonical types use the defining module's state; delayed
   insertions preserve the appropriate context without changing mangling;
@@ -2525,7 +2570,7 @@ wrapper arguments without required errors; optional warnings are allowed.
 Check that self-assignment leaves the named root Active in the flow model,
 and that a tracked source relocated into an indirect destination becomes
 Inactive. Preserve errors for already Inactive/MaybeActive sources,
-incompatible types, missing clone, fixed sources, and containing-root
+incompatible types, missing `copy` support, fixed sources, and containing-root
 relocations such as `packet.field = make_field(packet)`.
 
 Do not run undefined-behavior cases expecting a particular crash or output.
@@ -2606,14 +2651,14 @@ Compile and run small programs that record:
 - return-result binding before temporary, local, and parameter cleanup;
 - by-value parameter cleanup before call return, without double cleanup of
   the transferred source at the caller's full-expression boundary;
-- destructive-relocation and clone counts;
+- destructive-relocation and copy-method counts;
 - copying fixed and writable raw pointers without modifying the source;
 - relocation of nested Advanced aggregates with cleanup only through the
   active destination;
 - extraction from manually managed slots followed by initialized-range
   updates, including a pop-style return with exactly one destination cleanup;
 - extraction through a fixed `mut T*` binding without changing its address;
-- Basic pointee copying and explicit pointee cloning leaving sources active;
+- Basic pointee copying and explicit pointee copying leaving sources active;
 - direct local-field, pointer-field, nested-field, and indexed extraction
   followed by reconstruction or removal from a container's live range;
 - Basic `take` from fixed scalars, pointers, structures without `T()`,
@@ -2623,15 +2668,29 @@ Compile and run small programs that record:
 - `destination = take source` order, including `x = take x`, and destruction
   of discarded `take` results at the full-expression boundary;
 - `construct_at` from Basic, Advanced, explicit-copy, constructor, and function
-  result initializers, with each operand evaluated once and no hidden clone;
+  result initializers, with each operand evaluated once and no hidden copy;
 - construct/extract/reconstruct/destruct cycles, final constructor addresses,
   manual reverse field cleanup, and reuse of the allocation afterward;
 - unchanged root cleanup state when either intrinsic operates through an alias;
 
 - Basic self-assignment and explicit library guards for equal slots;
-- destroy-first constructor, factory, and clone order, including final result
-  addresses through nested factories and clones at `-O0` and without inlining;
-- explicit temporary preparation for intentional self-cloning;
+- destroy-first constructor, factory, and copy order, including final result
+  addresses through nested factories and copies at `-O0` and without inlining;
+- explicit temporary preparation for intentional self-copying;
+- generated `copy` methods: field order, direct field copies, suppression by
+  a written `drop`, `[nocopy]`, explicit `[norelocate]`, or a noncopyable
+  field, and Basic structures staying Basic;
+- `[norelocate]`: rejection of every relocation source, propagation through
+  inline fields and arrays but not pointers, and final addresses for
+  constructors, factories, `copy`, array literals, by-value arguments, and
+  conditional temporaries;
+- `drop` and `forget`: cleanup at the statement or none, Inactive and
+  MaybeActive results, drop flags at joins, reinitialization, Basic operands,
+  and rejection of field, pointer, fixed, and inactive operands;
+- `is_relocatable`, `is_copyable`, and `is_default_initializable` answers for
+  scalars, pointers, arrays, written and generated methods and inits,
+  `[nocopy]`, and `[norelocate]`; `if1`-guarded members in generic types; and
+  rejection of a query about a structure whose body is still being processed;
 - destruction order;
 - early-return cleanup;
 - conditional relocation;
@@ -2799,7 +2858,7 @@ Within the chosen runtime subset, the main dependencies are:
 4. typed HIR and sequenced MIR with explicit parameter places,
    direct-construction destinations, relocation, and cleanup;
 5. scalar LLVM IR generation, verification, and object emission;
-6. explicit bitwise relocation and clone/drop
+6. explicit bitwise relocation and copy/drop
    functions, cleanup edges, sidecar active-state handling, and lifecycle
    hardening.
 
@@ -2879,7 +2938,7 @@ Grow either route with explicitly chosen features, such as:
 T* and independent mut layers
 constructors and direct destination construction
 Basic/Advanced classification
-destructive relocation, clone, and drop
+destructive relocation, copy methods, and drop
 left-to-right typed parameter binding
 ```
 
@@ -2894,7 +2953,7 @@ The following should be enforced in code review and tests:
 
 1. No HUC phase rule is delegated to LLVM or a foreign compiler.
 2. No ownership decision is inferred from LLVM storage or pointer types.
-3. HIR records Copy, Relocate, Observe, and Clone explicitly.
+3. HIR records Copy, Relocate, Observe, and LogicalCopy explicitly.
 4. MIR is fully concrete and contains no phase construct.
 5. Compile-time evaluation has no ambient untracked host effects. Writes change
    only the active state; a saved dependency state remains unchanged.

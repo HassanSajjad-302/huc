@@ -31,7 +31,7 @@ HUC uses two related type forms:
 
 HUC has no general reference type that aliases another variable. Raw pointers
 never destroy or deallocate their pointees. Resource-managing structures use
-the same `clone`, `drop`, and relocation rules as other Advanced values.
+the same `copy` method, `drop`, and relocation rules as other Advanced values.
 
 Address-taking uses the non-overloadable unary `&` operator:
 
@@ -111,15 +111,15 @@ Basic types are:
 - scalar arithmetic and boolean types;
 - raw pointers;
 - arrays of Basic elements;
-- structures whose fields are all Basic and which declare neither `clone` nor
-  `drop`.
+- structures whose fields are all Basic, which declare neither a `copy` method
+  nor `drop`, and which are marked neither `[nocopy]` nor `[norelocate]`.
 
 Advanced types are:
 
 - arrays of Advanced elements;
 - structures containing at least one Advanced field;
-- structures declaring `clone`;
-- structures declaring `drop`.
+- structures declaring a `copy` method or `drop`;
+- structures marked `[nocopy]` or `[norelocate]`.
 
 Having `init()` alone does not make a structure Advanced. A raw `T*` is Basic
 even when `T` is Advanced; it copies only the observer address. In contrast,
@@ -128,7 +128,8 @@ An array is Basic exactly when its element type is Basic. A byte array is
 therefore Basic, even when used as manual backing storage; a container must
 declare `drop` or otherwise be Advanced to get destructive whole-value transfer.
 
-Declaring `clone` intentionally makes an otherwise Basic structure Advanced.
+Declaring a `copy` method intentionally makes an otherwise Basic structure
+Advanced.
 Otherwise ordinary binding could silently bypass the custom copy behavior:
 
 ```huc
@@ -138,38 +139,34 @@ struct Ticket {
     fn init(id: u64) : id = id {
     }
 
-    fn clone() -> Ticket {
+    fn copy() -> Ticket {
         return Ticket(probable_issue_related_ticket(this->id));
     }
 }
 
 let mut original: Ticket = Ticket(100);
-let moved: Ticket = original; // destructive relocation; clone is not called
-let copied: Ticket = copy moved; // calls Ticket.clone
+let moved: Ticket = original; // destructive relocation; copy is not called
+let copied: Ticket = copy moved; // calls Ticket's copy method
 ```
 
 Basic and Advanced are category names, not keywords or declaration modifiers.
 The compiler determines the category from the rules above.
 
-A token containing only scalars can use an empty `drop` to become Advanced
-when its author wants to prevent copying:
+A token containing only scalars can use `[nocopy]` to become Advanced when its
+author wants to prevent copying:
 
 ```huc
-struct UniqueTicket {
+struct [nocopy] UniqueTicket {
     let value: u64;
 
     fn init(value: u64) : value = value {
     }
-
-    fn drop() mut -> void {
-        // No external cleanup; this lifecycle declaration makes the type Advanced.
-    }
 }
 ```
 
-With no `clone`, `UniqueTicket` can be relocated but cannot be copied. A future
-explicit non-copyable marker may replace this pattern, but the first compiler
-does not need another type-category keyword.
+`UniqueTicket` can be relocated but cannot be copied (section 6.5). The
+attribute is not a type-category keyword; the category still follows from the
+rules above.
 
 ## 3. Special operations
 
@@ -180,7 +177,7 @@ fn init(...) : field = initializer, ... {
     // construction body
 }
 
-fn clone() -> T {
+fn copy() -> T {
     // return an independent logical duplicate
 }
 
@@ -195,12 +192,16 @@ Their roles are:
 |---|---|---|
 | Construction | `fn init(...)` | `T(...)` |
 | Fieldwise copy of a Basic type | None | Ordinary binding or `copy` |
-| Logical copy of an Advanced structure | `fn clone() -> T` | Only requested by `copy` |
+| Logical copy of an Advanced structure | `fn copy() -> T`, or a generated one | Only requested by `copy` |
 | Logical copy of an Advanced array | None | `copy` applies logical copy to each element |
 | Destructive relocation initialization | None | Ordinary binding of an Advanced value |
 | Destructive relocation assignment | None | Ordinary assignment of an Advanced value |
-| Destruction | `fn drop() mut -> void` | Inserted by the compiler |
+| Destruction | `fn drop() mut -> void` | Inserted by the compiler, or `drop name;` for a local |
 | Field destruction | None | Inserted after `drop`, in reverse field order |
+| Ending a local without cleanup | None | `forget name;` |
+
+Two attributes switch off default operations: `[nocopy]` forbids `copy`
+(section 6.5), and `[norelocate]` forbids relocation (section 7.2).
 
 This is deliberately smaller than C++'s special-member system. In particular,
 there is no user-defined move constructor, relocation constructor, or
@@ -262,7 +263,9 @@ Advanced parameters are mutable bindings. It also gets a default no-argument
 init when every named field has an initializer or is mutable and supports
 default initialization. Identical zero-argument forms are one function. Any
 written `init` suppresses both generated forms. Fixed-field initialization
-obligations still apply. See [the full construction rules](language-specification.md#46-structures).
+obligations still apply. `is_default_initializable<T>()` reports whether a
+type can be default-initialized; section 12 uses it in generic code. See
+[the full construction rules](language-specification.md#46-structures).
 
 `init` does not double as a copy or relocation hook. An overload accepting
 another `T` is just an explicitly selected constructor:
@@ -282,8 +285,9 @@ struct ScaledPoint {
 
 ## 5. Copying Basic values
 
-A structure made entirely from Basic fields, with no `clone` and no `drop`, is
-copied by value, including its representation bytes:
+A structure made entirely from Basic fields, with no `copy` method, no `drop`,
+and neither `[nocopy]` nor `[norelocate]`, is copied by value, including its
+representation bytes:
 
 ```huc
 struct Point {
@@ -311,7 +315,7 @@ fn copy_values() -> void {
 
 Structure fields are copied in declaration order. The rule copies field values;
 it does not promise to copy padding bytes. Because a Basic type
-has no `clone` or `drop` method and no Advanced field, ordinary copying does
+has no `copy` or `drop` method and no Advanced field, ordinary copying does
 not invoke user copy code. It may still have constructors.
 
 The direct C++20 value-semantic equivalent is:
@@ -356,13 +360,14 @@ current = replacement;
 current = replacement;
 ```
 
-## 6. Custom logical copying with `clone`
+## 6. Custom logical copying with a `copy` method
 
 An Advanced structure is not implicitly copied. It may support explicit logical
-copying by declaring exactly one method with this signature:
+copying by declaring exactly one method with this signature, or by getting a
+generated one (section 6.4):
 
 ```huc
-fn clone() -> T;
+fn copy() -> T;
 ```
 
 Rules:
@@ -376,21 +381,21 @@ Rules:
 - ordinary binding, assignment, argument passing, and return never call it;
 - `copy source` calls it when `source` is an Advanced structure;
 - declaring it makes the structure Advanced even when every field is Basic;
-- omit `clone` when the type must not be copyable;
+- mark the type `[nocopy]` when it must not be copyable (section 6.5);
 - it cannot return a recoverable error, although allocation failure or panic
   may terminate the process.
 
 An “independent logical duplicate” means that the original and its copy can
-each be destroyed without invalidating the other. To achieve this, `clone`
-must duplicate owned resources or create another valid ownership share, for
-example by increasing a library-managed reference count.
+each be destroyed without invalidating the other. To achieve this, the `copy`
+method must duplicate owned resources or create another valid ownership
+share, for example by increasing a library-managed reference count.
 
-Deep cloning in HUC does **not** mean copying every reachable object. A `T*`
-is an observer, so cloning a raw-pointer field normally copies only its
+Deep copying in HUC does **not** mean copying every reachable object. A `T*`
+is an observer, so copying a raw-pointer field normally copies only its
 address. Shared external state, interned data, immutable tables, and other
 observed objects may remain shared. The type author decides what belongs to
-the value and writes the necessary `copy` operations inside `clone`. The
-compiler cannot prove that the method follows these rules.
+the value and writes the necessary `copy` operations inside its `copy`
+method. The compiler cannot prove that the method follows these rules.
 
 Allocation and updates to external bookkeeping are allowed. For example, a
 future HUC1 `Rc<T>` could implement `copy rc` by increasing a shared reference
@@ -404,7 +409,7 @@ That function is not selected by the `copy` expression.
 
 The initial language has one logical copy operation rather than separate
 custom copy-construction and copy-assignment hooks. Advanced copy assignment
-destroys the old destination, then builds the clone directly in its slot:
+destroys the old destination, then builds the copy directly in its slot:
 
 ```huc
 let mut destination: Text = Text("old");
@@ -418,23 +423,24 @@ Conceptually:
 ```text
 retain(source)
 destroy(destination)
-CloneInto(destination, source)
+CopyInto(destination, source)
 ```
 
 These are abstract compiler operations, not callable HUC functions. The source
-and everything the clone needs must survive destination destruction. Thus
+and everything the copy needs must survive destination destruction. Thus
 Advanced `value = copy value` is undefined behavior, even when written directly.
-To deliberately replace a value with its own clone, prepare the clone first:
+To deliberately replace a value with its own copy, prepare the copy first:
 
 ```huc
 let mut replacement: Text = copy value;
 value = replacement;
 ```
 
-Direct construction in `let b: T = copy a` likewise uses `b` as the clone's
-result slot. A clone that returns `T(...)`, another call, or `copy source`
-forwards that slot; no inlining is required. Returning an explicit local
-still relocates it. Section 8 gives the complete assignment order.
+Direct construction in `let b: T = copy a` likewise uses `b` as the copy's
+result slot. A `copy` method that returns `T(...)`, another call, or
+`copy source` forwards that slot; no inlining is required. Returning an
+explicit local still relocates it. Section 8 gives the complete assignment
+order.
 
 ### 6.1 Owning text example
 
@@ -461,7 +467,7 @@ struct HeapText {
         return text::View(this->data, this->size);
     }
 
-    fn clone() -> HeapText {
+    fn copy() -> HeapText {
         return HeapText(this->view());
     }
 
@@ -544,7 +550,7 @@ private:
 ```
 
 This direct-allocation C++ example writes five special members and leaves a
-moved-from object empty and copyable. The HUC version writes `clone` and `drop`;
+moved-from object empty and copyable. The HUC version writes `copy` and `drop`;
 HUC supplies fixed destructive relocation. This is not a requirement for every
 C++ class: composing standard resource types, as in the `Image` example,
 often removes custom cleanup and move code. A `std::string` member could
@@ -554,9 +560,9 @@ but a copyable wrapper still needs to define how to duplicate its resource.
 The first HUC backend emits LLVM IR with explicit lifetime operations; this
 source comparison does not describe the generated backend code.
 
-The C++ copy assignment above clones before releasing the old allocation and
+The C++ copy assignment above copies before releasing the old allocation and
 explicitly guards self-assignment. HUC instead releases the old value before
-cloning; self-assignment is unchecked undefined behavior. The examples share
+copying; self-assignment is unchecked undefined behavior. The examples share
 the ownership intent, not identical assignment ordering or alias guarantees.
 
 ### 6.2 Copying through a raw pointer
@@ -567,7 +573,7 @@ Copying a raw pointer never copies its pointee and is valid even when null:
 let text: HeapText = HeapText("hello");
 let observer: HeapText* = &text;
 let another_observer: HeapText* = copy observer; // copies only the address
-let duplicate: HeapText = copy *observer; // calls HeapText.clone
+let duplicate: HeapText = copy *observer; // calls HeapText's copy method
 ```
 
 The dereferenced form requires a live, accessible pointee that supports
@@ -576,14 +582,14 @@ unchanged; it does not allocate storage for a separate wrapper object.
 
 ### 6.3 Specialized copy assignment
 
-HUC's automatic Advanced `destination = copy source` destroys, then clones
+HUC's automatic Advanced `destination = copy source` destroys, then copies
 into the destination. This does not reuse the old resource or buffer.
 When an application needs buffer reuse or another specialized algorithm, it
 uses a clearly named writable method:
 
 ```huc
 struct ReusableBuffer {
-    // fields, init, clone, and drop omitted
+    // fields, init, copy, and drop omitted
 
     fn assign_from(source: ReusableBuffer*) mut -> void {
         probable_resize_in_place(this, source->size());
@@ -599,6 +605,68 @@ buffer.assign_from(&other);
 `assign_from` is not an implicit copy-assignment hook. The call site explicitly
 selects the specialized operation.
 
+### 6.4 Generated copy methods
+
+A structure that is Advanced only because of its fields usually needs no
+written `copy` method. The compiler generates one when the structure:
+
+1. is Advanced independently of the generated method;
+2. declares neither a `copy` method nor `drop`;
+3. is not marked `[nocopy]`, and not explicitly marked `[norelocate]`;
+4. has only fields that support copying.
+
+```huc
+struct Packet {
+    let tag: i32;
+    let payload: HeapText;
+}
+
+let packet: Packet = Packet(7, HeapText("hello"));
+let duplicate: Packet = copy packet; // generated copy method
+```
+
+The generated method copies the named fields in declaration order, each
+directly into the matching destination field. It runs no constructor or
+declaration initializer. A Basic structure stays Basic. A written `drop`
+blocks generation, because copying the fields would duplicate whatever `drop`
+releases.
+
+Having no `drop` does not prove that copying the fields is correct:
+
+```huc
+struct TextAndView {
+    let text: HeapText;
+    let view: c8*; // intended to point into text
+}
+```
+
+Relocation is fine, because moving the owning handle doesn't move its heap
+buffer. A generated `copy` method, however, copies `text` into a new buffer
+and copies `view` unchanged, so the duplicate's view still points into the
+original. Such a type needs a written `copy` method or `[nocopy]`. The type
+author remains responsible for relationships between fields. Rust instead
+requires an explicit `#[derive(Clone)]`; HUC deliberately chooses a more
+automatic default.
+
+### 6.5 Opting out with `[nocopy]`
+
+A field that doesn't support copying already prevents generation. To make a
+type move-only on purpose, mark it `[nocopy]`:
+
+```huc
+struct [nocopy] UniquePacket {
+    let payload: HeapText;
+}
+```
+
+The type is Advanced, even when all its fields are Basic, so ordinary binding
+moves it. No `copy` method is generated, a written one is an error, and a
+`copy` expression on it is rejected. A structure with a `[nocopy]` field gets
+no generated `copy` method either. Adding or removing copy support changes a
+public type's copying contract, as changing its category does.
+`is_copyable<T>()` reports whether a type supports copying; section 12 uses
+it in a generic container.
+
 ## 7. Transferring Advanced values
 
 Basic and Advanced are the type categories. **Transfer** is the everyday term
@@ -609,7 +677,7 @@ leaves the source alive. The compiler specification uses “relocation” when
 that distinction matters.
 
 Here `Packet` is Advanced because it contains an Advanced `HeapText`, even
-though it declares neither `clone` nor `drop`:
+though it declares neither a `copy` method nor `drop`:
 
 ```huc
 struct Packet {
@@ -644,9 +712,10 @@ the whole source is reinitialized. No source `drop` body or source-field
 cleanup runs. Advanced fixed arrays use the same whole-value relocation rule.
 The operation invokes no user code and cannot fail in the HUC type system.
 
-The rule is the same whether the structure is Advanced because of `clone`, `drop`,
-or an Advanced field. It does not change ordinary binding of Basic types, which
-duplicates the value and leaves the source active.
+The rule is the same whether the structure is Advanced because of a `copy`
+method, `drop`, `[nocopy]`, or an Advanced field. It does not change ordinary
+binding of Basic types, which duplicates the value and leaves the source
+active.
 
 A fixed field cannot be assigned to directly, but it can be transferred as
 part of a whole value. The containing source must be writable. For example,
@@ -709,19 +778,21 @@ Fixed destructive relocation provides:
 - no need for a resource wrapper to reserve an “empty” value merely so a
   source destructor can run.
 
-This is HUC0's chosen default. A future proposal may allow custom relocation
-if real programs show that the address-dependent cases below are common enough
-to justify more complex type rules, generic code, and failure handling. That
-would need a separate feature, not another form of `init`.
+This is HUC0's chosen default. Types that must not move are marked
+`[norelocate]` instead (section 7.2). A future proposal may allow custom
+relocation if real programs show that repairing addresses during a move is
+needed often enough to justify more complex type rules, generic code, and
+failure handling. That would need a separate feature, not another form of
+`init`.
 
 ### 7.2 Address-dependent inline values
 
 Fixed relocation has one important limit: it cannot repair values that depend
 on the object's current address. A stored pointer to the object itself is one
-example:
+example. Mark such a type `[norelocate]`:
 
 ```huc
-struct SelfIndexed {
+struct [norelocate] SelfIndexed {
     let mut payload: i32;
     let mut self: SelfIndexed*;
 
@@ -735,47 +806,57 @@ struct SelfIndexed {
     fn has_expected_address() -> bool {
         return this->self == this;
     }
-
-    fn drop() mut -> void {
-        // Empty: this opts the scalar-only structure into Advanced.
-    }
 }
 
-let mut first: SelfIndexed = SelfIndexed(10);
-let second: SelfIndexed = first; // bitwise relocation; first becomes inactive
-
-// second.self still contains the old inline address. Relying on the broken
-// invariant is undefined behavior.
+let mut first: SelfIndexed = SelfIndexed(10); // built in first
+let second: SelfIndexed = first; // error: SelfIndexed is never relocated
 ```
 
-HUC0 does not automatically find or repair self-pointers. A value that needs
-such a pointer to stay correct must instead:
-
-- be redesigned to compute internal addresses when needed rather than storing
-  them;
-- remain in directly constructed, fixed read-only storage and never be passed,
-  returned, assigned, or stored in a relocating container by value; or
-- use a purpose-built stable-address library container or low-level storage
-  API whose contract avoids inline relocation.
-
-For a local value, one option is to construct it in fixed storage and pass
-only observers:
+A `[norelocate]` type is Advanced, even when all its fields are Basic, so it is
+never copied implicitly either. Every relocation is a compile-time error:
+binding an existing value, passing it by value, returning a local, extracting
+it through a pointer, `take`, or relocating a structure that holds it inline.
+Direct results still work, because they build in their final slot:
+constructors, factories that return `T(...)` or another direct call, array
+literals, and the selected arm of `?:`, even when the conditional's temporary
+is only used for a member access.
 
 ```huc
-let stable: SelfIndexed = SelfIndexed(10);
-let elsewhere: SelfIndexed* = &stable;
+fn make_indexed(payload: i32) -> SelfIndexed {
+    return SelfIndexed(payload);
+}
 
-if (elsewhere->has_expected_address()) {
-    probable_use(elsewhere);
+let a: SelfIndexed = make_indexed(1); // built in a
+let pair: SelfIndexed[2] = [SelfIndexed(2), make_indexed(3)];
+let n: i32 = (ready ? SelfIndexed(4) : make_indexed(5)).payload;
+```
+
+Assignment replaces in place: `first = SelfIndexed(6)` destroys the old value
+and builds the new one in the same storage. `drop` and `forget` end a local
+without moving it (section 9.4). A structure that holds a `[norelocate]` field
+inline is non-relocatable too; a pointer to one is not. A generated memberwise
+init that would relocate such a field is not generated, so the owner writes an
+init that constructs the field directly.
+
+An explicitly `[norelocate]` type gets no generated `copy` method, because
+copying its fields would copy its self-pointer. It may declare one that builds
+a correct new object, or add `[nocopy]` to forbid copying too:
+
+```huc
+struct [norelocate, nocopy] Mutex {
+    let mut native: pthread_mutex_t; // used by address; never moved or copied
 }
 ```
 
-`Vector<SelfIndexed>` breaks this requirement when growth relocates elements.
-Stable-address storage or a different representation is necessary.
+`Vector<SelfIndexed>` cannot grow by relocating elements; use stable-address
+storage instead. A library can test `is_relocatable<T>()` to report this
+clearly. A byte array hides its payloads from the type system, so relocating
+an enclosing object that carries a live non-relocatable payload is undefined
+behavior (section 9.3).
 
-The same caveat applies to by-value parameters, returns, aggregate fields, and
-assignment. HUC is unchecked: obvious cases may be warned about, but the
-compiler is not required to prove address independence.
+Without the attribute, HUC does not find or repair self-pointers. Relocating
+such a value leaves its stored address stale, and relying on it is undefined
+behavior.
 
 ### 7.3 Where a transfer may take its value from
 
@@ -860,7 +941,7 @@ and whole-root checks remain. No per-field flags or alias checks are added.
 Unused byte-array capacity is different: it may accompany relocation of an
 enclosing Advanced value under section 9.3.
 
-Basic pointees are still copied, not consumed. `copy *file_pointer` clones a
+Basic pointees are still copied, not consumed. `copy *file_pointer` copies a
 live, copyable pointee and leaves it active; it does not require pointee `mut`.
 Any eligible source may replace a valid indirect destination. The
 source must be distinct, non-overlapping, and survive destination destruction.
@@ -1068,7 +1149,7 @@ By contrast, `attach(identity(&document), document)` escapes this check but
 is invalid if `attach` accesses the inactive document through that pointer.
 
 To fix the first example, obtain the size before transferring the document
-and pass that saved number to `merge`. For `compare_versions`, clone the
+and pass that saved number to `merge`. For `compare_versions`, copy the
 first argument before transferring the original into the second.
 
 The check does not prove pointer lifetimes. An existing raw observer is not
@@ -1101,7 +1182,7 @@ All Advanced `=` assignments use one order:
 1. Evaluate the destination location once.
 2. Prepare the RHS inputs in left-to-right order.
 3. Destroy the old destination if it is still active after preparation.
-4. Construct, call, clone, or relocate into that slot.
+4. Construct, call, copy, or relocate into that slot.
 5. Mark the destination Active and finish normal temporary cleanup.
 
 What preparation does depends on the outer RHS operation:
@@ -1110,18 +1191,18 @@ What preparation does depends on the outer RHS operation:
 |---|---|---|
 | `T(arguments)` | Bind arguments | Construct in the slot |
 | `make(arguments)` | Retain callee/receiver and bind arguments | Run call into slot |
-| `copy source` | Retain or evaluate source, without outer clone | Clone into slot |
+| `copy source` | Retain or evaluate source; delay the copy itself | Copy into slot |
 | Existing eligible Advanced place | Retain source location | Relocate into slot |
 | Array literal | Prepare every element's inputs left to right | Build elements in increasing index order |
 | `condition ? yes : no` | Evaluate condition once, then prepare only the selected arm by these rules | Finish that arm directly in the slot |
 | Other expression | Evaluate the whole value | Relocate the result |
 
 Parentheses do not change the selected form. This does not delay every nested
-operation: `current = identity(copy other)` clones before destroying `current`,
+operation: `current = identity(copy other)` copies before destroying `current`,
 then runs `identity`. A conditional forwards the destination to its selected
-arm recursively; an outer clone or factory in that arm runs after destruction.
+arm recursively; an outer copy or factory in that arm runs after destruction.
 For `current = copy make_source()`, the factory builds a separate source that
-stays alive through the delayed clone. Retaining a source place is not a
+stays alive through the delayed copy. Retaining a source place is not a
 snapshot: legal changes made by the destination's destructor are visible to
 the later operation.
 
@@ -1135,11 +1216,11 @@ Same-storage and overlapping Advanced assignment are undefined behavior:
 
 ```huc
 current = current;        // Undefined behavior, not a no-op.
-current = copy current;   // Undefined behavior, not a safe self-clone.
+current = copy current;   // Undefined behavior, not a safe self-copy.
 *destination = *source;   // Same rule if the Advanced slots alias.
 ```
 
-The compiler adds no implicit address test or clone-first fallback. Ordinary
+The compiler adds no implicit address test or copy-first fallback. Ordinary
 typing, permission, and moved-value checks still apply. Implementations may
 warn about obvious self-aliasing, overlap, or dependencies, but these are not
 required errors. Optional sanitizers do not change the language contract.
@@ -1202,7 +1283,7 @@ constructor address is guaranteed even at `-O0` and without inlining. Returning
 an explicit Advanced local still relocates it; named-return optimization is
 not guaranteed. A named Advanced arm still relocates; the conditional is a
 value, not a place. For example, `x = c ? copy x : copy other` has undefined
-behavior when `c` selects the clone of the destroyed `x`.
+behavior when `c` selects the copy of the destroyed `x`.
 
 The tracked-state reinitialization rule does not apply to a slot made
 inactive through pointer extraction.
@@ -1234,7 +1315,8 @@ it once when an active value is **destroyed**. Destructive relocation is not
 destruction: it ends the source lifetime without calling source `drop`, and the
 destination becomes responsible for later cleanup. `drop` is intended
 to release resources that are not already represented by automatically
-destroyed fields.
+destroyed fields. The `drop name;` statement destroys a local early
+(section 9.4).
 
 All HUC0 structure members are public. Compiler-inserted destruction applies
 wherever destruction of an active value is required.
@@ -1351,7 +1433,7 @@ print(bad_view(make_text())); // the returned view already dangles
 
 A transferred temporary is inactive and is not destroyed a second time.
 Similarly, a value built directly in a local or return result follows that
-destination's lifetime. These rules add no hidden clone or lifetime extension.
+destination's lifetime. These rules add no hidden copy or lifetime extension.
 See [language specification section 6.5.1](language-specification.md#651-temporary-values)
 for the precise boundaries.
 
@@ -1378,7 +1460,7 @@ For the replacement:
 - Basic values copy.
 - Advanced values transfer from an eligible source, leaving that source
   inactive. A named source needs binding `mut`.
-- `copy value` explicitly clones into the slot when supported.
+- `copy value` explicitly copies into the slot when supported.
 - `T(arguments)` constructs directly in the slot; it does not first create
   and move a temporary. This also preserves the final `this` address.
 - Direct call results forward the slot through nested direct returns, as
@@ -1460,9 +1542,12 @@ The byte array is Basic. Copying its bytes does not construct or transfer any
 payload objects. Relocating an enclosing Advanced value does transfer its
 live payloads at the same offsets, without scanning slots or clearing the
 source. Pointers into the old region do not follow the relocation. A container
-must track its initialized range, destroy those objects in `drop`, and clone
-them explicitly if it offers `clone`. Even an empty `drop` makes a wrapper
-Advanced; omitting it can accidentally make the wrapper Basic.
+must track its initialized range, destroy those objects in `drop`, and copy
+them explicitly if it offers a `copy` method. A `drop` or `[nocopy]` makes a
+wrapper Advanced; omitting both can accidentally make the wrapper Basic.
+Relocating an enclosing object that carries a live `[norelocate]` payload is
+undefined behavior, so an inline owner of such payloads should itself be
+`[norelocate]` (section 7.2).
 
 Whole-aggregate representation copies and relocations can carry unwritten
 bytes without reading them as scalar values. Reading an unwritten scalar is
@@ -1485,6 +1570,65 @@ extracted Advanced one. A copied Basic source need not be retired before
 `construct_at` reuses its slot: the intrinsic ends its old lifetime. Explicit
 `destruct_at` is also allowed and emits no user cleanup call. Do not destroy
 the already-inactive Advanced source.
+
+### 9.4 Ending a local early: `drop` and `forget`
+
+Two statements end a local's lifetime before its scope ends:
+
+```huc
+drop value;   // run the full cleanup now
+forget value; // run no cleanup at all
+```
+
+`drop` runs the cleanup that the scope end would have run: the `drop` method,
+then fields in reverse order, or array elements in decreasing index order.
+`forget` runs none, so owned resources leak unless their ownership moved
+elsewhere. Both make the local Inactive: a later use is a compile-time error
+until a whole new value is assigned, and the scope end skips it.
+
+```huc
+fn update(mutex: mut Mutex*, path: c8*) -> void {
+    let mut guard: LockGuard = LockGuard(mutex);
+    let mut file: File = open_locked(path);
+    write_header(&file);
+    drop guard;        // unlock now; file stays open
+    write_body(&file); // runs without holding the lock
+}                      // file closes here; guard is already Inactive
+
+fn hand_off(mut file: File) -> void {
+    let handle: i32 = file.handle;
+    forget file;          // no sentinel; file's drop never closes the handle
+    adopt_handle(handle); // adopt_handle now owns it
+}
+```
+
+The operand is one named, mutable local or by-value parameter whose tracked
+state is Active. Fields and pointees keep using `destruct_at` and
+`construct_at`. A Basic operand runs no code but still ends the binding, so
+generic code can write `drop value;` for any `T`. In a runtime branch or loop,
+the statements work like a conditional transfer: the local becomes
+MaybeActive at the join, and a drop flag decides its scope-end cleanup.
+Neither statement moves the object, so both work on `[norelocate]` locals.
+
+The object must actually still be live; the tracked state does not see
+`destruct_at(&local)` or extraction through a pointer. After a field was
+extracted, the two differ: `forget` cancels the remaining cleanup without
+touching the missing field, while `drop` would destroy it, which is undefined
+behavior.
+
+For fully live, relocatable values, a by-value library function gives the
+same result as `drop`, because a callee destroys its by-value parameters
+before returning:
+
+```huc
+fn dispose<T: auto>(mut value: T) -> void {
+}
+```
+
+The statements are still needed for `[norelocate]` locals, which cannot be
+passed by value, and `forget` for an owner with an extracted field, which a
+by-value helper would relocate with undefined behavior. Rust's `mem::drop` and
+`mem::forget` are by-value library functions.
 
 ## 10. Parameters and argument order
 
@@ -1534,7 +1678,7 @@ let mut document: Document = Document(...);
 let ordering: i32 = compare_versions(copy document, document);
 ```
 
-HUC clones `document` for `left`, then relocates the original into `right`.
+HUC copies `document` for `left`, then relocates the original into `right`.
 Reversing the arguments is a compile-time error: `document` is already
 inactive when `copy document` runs. Passing `document` by value twice is
 rejected for the same reason.
@@ -1552,6 +1696,8 @@ The conditional operator produces a value. For live, writable Advanced
 locals, `(condition ? first : second).size()` transfers the selected value to
 a temporary, calls its method, and destroys the temporary at the semicolon.
 Both original locals are then MaybeActive, so later named use is rejected.
+Compilers are encouraged to warn about this form (language specification
+section 8.4).
 
 To observe one without transferring it, use either of these alternatives:
 
@@ -1564,7 +1710,8 @@ Each evaluates only the selected observation. The pointer form copies an
 address, which is Basic; it does not extend the pointee's lifetime. A selected
 named Advanced value still transfers in a direct-result position; a selected
 constructor, call, copy, or array literal can build directly in the supplied
-destination (section 8.2).
+destination (section 8.2). Elsewhere it builds directly in the conditional's
+temporary, which is what lets `[norelocate]` types use `?:`.
 
 ## 11. Return values
 
@@ -1588,11 +1735,13 @@ fn open_file(path: text::View) -> File {
 
 For a named local, the implementation may construct directly in caller-provided
 result storage only when it preserves observable behavior, including constructor
-addresses and required `clone` calls. This named-return optimization is not
-guaranteed. `clone` runs exactly when required by an evaluated `copy` expression.
+addresses and required `copy` method calls. This named-return optimization is
+not guaranteed. A `copy` method runs exactly when required by an evaluated
+`copy` expression. A `[norelocate]` local cannot be returned by value at all;
+return a direct result instead (section 7.2).
 
 In contrast, `return T(...)`, `return make()`, and `return copy x` for Advanced
-`T` forward the caller's final result slot through direct calls and clones.
+`T` forward the caller's final result slot through direct calls and copies.
 Array literals and direct-result conditional arms do too, even without
 inlining or optimization, as specified in section 8.2.
 
@@ -1647,7 +1796,7 @@ fn text_values() -> void {
 
     texts.push(text); // destructive relocation; text becomes inactive
     text = HeapText("second");
-    texts.push(copy text); // clone, then relocate the clone into the vector
+    texts.push(copy text); // copy, then relocate the copy into the vector
 }
 
 ```
@@ -1656,7 +1805,9 @@ A reallocation of `Vector<T>`:
 
 - copies elements when `T` is Basic;
 - uses fixed destructive relocation when `T` is Advanced;
-- never calls `clone` merely to relocate elements;
+- cannot hold `[norelocate]` elements, because growth relocates them; a
+  library can reject them early with `is_relocatable<T>()`;
+- never calls a `copy` method merely to relocate elements;
 - does not drop old element places that relocation made inactive;
 - drops every element that remains active exactly once;
 - may invalidate raw pointers into its storage without a diagnostic.
@@ -1682,7 +1833,7 @@ The returned `File` is responsible for closing the handle. The old slot has
 no live `File` and receives no destructor call; neither its bytes nor the
 source pointer need clearing. The backing allocation stays allocated.
 The container must construct a new value before including that slot in its
-initialized range again. No clone, replacement value, or per-element flag
+initialized range again. No copy, replacement value, or per-element flag
 is needed to pop.
 
 `construct_at` and `destruct_at` complete the element-lifetime operations.
@@ -1714,9 +1865,54 @@ There is still no user-defined relocation hook. `take storage[index]` instead
 leaves a live default replacement for an Advanced element; it is not the same
 as removing a slot from the container's live range.
 
-If `Vector<T>` itself supports logical copying, its library implementation can
-declare `clone` and explicitly copy each element. Copying a vector of Advanced
-elements is then available only when those elements support `copy`.
+`Vector<T>` has a `drop`, so it gets no generated `copy` method. Its library
+can write one that copies each element. HUC checks every method of a selected
+generic body, so an unguarded `copy` method would make `Vector<File>` invalid
+when `File` doesn't support copying, even if no program copies the vector.
+Methods that default-initialize elements have the same problem. The library
+guards such members with `if1`:
+
+```huc
+struct Vector<T: auto> {
+    let mut data: mut T*;
+    let mut length: usize;
+    let mut capacity: usize;
+
+    // init, reserve, push, and drop as usual
+
+    if1 (is_copyable<T>()) {
+        fn copy() -> Vector<T> {
+            let mut result: Vector<T> = Vector<T>();
+            result.reserve(this->length);
+            while (result.length < this->length) {
+                result.push(copy *(this->data + result.length));
+            }
+            return result;
+        }
+    }
+
+    if1 (is_default_initializable<T>()) {
+        fn resize(count: usize) mut -> void {
+            this->reserve(count);
+            while (this->length < count) {
+                let mut fresh: T; // default initialization
+                this->push(fresh);
+            }
+            while (this->length > count) {
+                this->length -= 1;
+                destruct_at(this->data + this->length);
+            }
+        }
+    }
+}
+```
+
+`Vector<File>` is then valid and simply lacks the methods its element type
+can't support; only a use of a missing method is an error. Rust gets the same
+effect from `impl<T: Clone> Clone for Vec<T>`. C++ declares the copy
+constructor of `std::vector<T>` for every `T`, so
+`std::is_copy_constructible_v<std::vector<std::unique_ptr<int>>>` is true and
+the error appears only when a copy is instantiated.
 
 Comparable C++20 calls are:
 
@@ -1771,7 +1967,7 @@ struct Image {
         memory::fill_bytes(this->pixels, value, this->byte_count());
     }
 
-    fn clone() -> Image {
+    fn copy() -> Image {
         let mut result: Image = Image(this->width, this->height);
         memory::copy_bytes(
             result.pixels,
@@ -1808,7 +2004,7 @@ fn main() -> i32 {
     print_shape(&working); // observe
     invert(&working); // writable observation
 
-    let snapshot: Image = copy working; // logical copy through Image.clone
+    let snapshot: Image = copy working; // calls Image's copy method
 
     let mut outgoing: Image = working; // working becomes inactive
     print_shape(&outgoing);
@@ -1912,15 +2108,19 @@ relocation behavior, C++ references, or C++ value-category overloads.
 | `let b: T = a` for Basic `T` | `T b = a` | Both copy |
 | `let b: T = a` for Advanced `T` | `T b = std::move(a)` | HUC destructively relocates and ends the source lifetime |
 | `copy a` for Advanced `T` | Copy construction | HUC makes a potentially expensive copy explicit |
-| `destination = copy source` | Copy assignment | HUC destroys the old value, then clones into its slot; self-copy is undefined |
+| `destination = copy source` | Copy assignment | HUC destroys the old value, then copies into its slot; self-copy is undefined |
 | `destination = source` for Advanced `T` | Move assignment | HUC drops the destination, then performs non-overridable relocation |
 | Advanced `destination = make(args)` | Assignment from a function result | HUC binds arguments, destroys destination, then runs the factory into that slot |
 | `T*` | `const T*` by default | HUC pointer is always raw and unchecked |
 | `mut T*` | `T*` | Writable pointee |
 | `T**` and longer chains | Nested raw pointers with corresponding access permissions | HUC permits chains, including through aliases; none of the levels owns its pointee |
 | `&value`, including a pointer slot | `std::addressof(value)` | HUC accepts addressable data places and cannot overload `&`; it does not materialize a temporary |
-| `fn clone() -> T` | Copy constructor, often clone function | Invoked only by explicit logical copying |
+| `fn copy() -> T` | Copy constructor | Invoked only by explicit logical copying; generated for eligible structures |
 | `fn drop() mut -> void` | Destructor body | Both run the body before reverse member cleanup; HUC has no inheritance cleanup or exception unwinding |
+| `struct [nocopy] S` | `S(const S&) = delete;` | The type still moves, by fixed relocation |
+| `struct [norelocate] S` | `S(S&&) = delete;` | Direct results still build in place; a written `copy` method stays allowed |
+| `drop x;` | No direct equivalent; ending the scope early | Runs cleanup now; a later use of `x` is a compile-time error |
+| `forget x;` | No direct equivalent; `release()` on an owning handle | Ends the whole object without cleanup |
 | Fixed HUC destructive relocation | Move constructor/assignment | HUC ends the source lifetime and has no user hook |
 | Inactive source storage after relocation | Source remains alive after move construction | HUC source has no live object until reinitialized; C++ moved-from guarantees depend on the type, with standard-library types generally valid but unspecified |
 | Advanced binding from `*p`, including arguments and returns | Move construction from `std::move(*p)` | HUC ends the source lifetime without drop or source clearing; the programmer must prevent later source cleanup. Plain `T v = *p` in C++ normally copies instead |
@@ -1947,16 +2147,21 @@ The compiler must reject:
 - extraction of an Advanced value through a read-only `T*`;
 - `take` of a non-place, or Advanced `take` without writable access or a
   valid zero-argument constructor;
-- copying an Advanced structure that has no valid `clone`;
-- a `clone` with parameters, a writable receiver, or the wrong return type;
-- more than one `clone` in a structure;
-- direct calls to `clone`;
+- copying an Advanced structure that has no valid `copy` method, or one
+  marked `[nocopy]`;
+- a `copy` method with parameters, a writable receiver, or the wrong return
+  type;
+- more than one `copy` method in a structure, or one on a `[nocopy]` type;
+- direct calls to a `copy` method;
 - a `drop` with parameters or a non-`void` return;
 - a `drop` without a writable receiver;
 - more than one `drop` in a structure;
 - direct calls to `drop`;
 - attempts to declare a special move, relocation-constructor, or
   move-assignment hook;
+- relocating a `[norelocate]` type from any source;
+- `drop` or `forget` whose operand is not a mutable, Active, named local or
+  by-value parameter;
 - any named use of an Advanced local or by-value parameter that is Inactive
   or MaybeActive at that point, including a later argument of the same call
   (section 7.5);
@@ -1974,17 +2179,24 @@ The compiler must reject:
 - array literal count/type mismatches, or copying an uncopyable Advanced array;
 - `[nozero]` on a non-scalar, non-scalar-array type;
 - using the `void` result of `construct_at` as a value;
-- invalid type operands or value arguments for `size_of`, `align_of`, or `is_basic`.
+- invalid type operands or value arguments for `size_of`, `align_of`,
+  `is_basic`, `is_relocatable`, `is_copyable`, or `is_default_initializable`;
+- a type query evaluated during preparation about a structure whose body is
+  still being processed.
 
 Useful warnings include:
 
-- a `clone` that returns or embeds a raw resource address from the source;
+- a `copy` method that returns or embeds a raw resource address from the
+  source;
 - a `drop` that manually destroys an automatically destroyed field;
 - extraction that leaves an inactive field or element reachable by cleanup;
 - obvious self-assignment, overlapping Advanced assignment, or inputs that
   depend on the destroyed destination;
 - retaining a raw observer across value relocation or destruction;
-- placing a known self-addressing inline type in a relocating container.
+- placing a known self-addressing inline type that is not `[norelocate]` in a
+  relocating container;
+- `?:` selecting a named Advanced value into a temporary that is only observed
+  or discarded.
 
 Warnings do not turn HUC into a memory-safe language and may be disabled.
 
@@ -1994,7 +2206,8 @@ The HUC0-to-LLVM compiler must preserve these source semantics rather than
 assuming LLVM provides HUC value lifetimes:
 
 1. Basic/Advanced classification is decided by HUC semantic analysis.
-2. `clone` runs only for an evaluated `copy` that requires it.
+2. A `copy` method, written or generated, runs only for an evaluated `copy`
+   that requires it.
 3. Relocation transfers the representation, makes the whole source inactive,
    and requires no clearing of source bytes; it is non-failing and independent
    of user overloads.
@@ -2037,6 +2250,12 @@ assuming LLVM provides HUC value lifetimes:
     once, then constructs `T()` in the source slot before yielding its result.
     Keep that result separate from any retained assignment destination until
     the old destination has been destroyed. Source cleanup state is unchanged.
+18. A `[norelocate]` value is never moved by lowered code. Direct results,
+    including by-value arguments and conditional temporaries, keep their final
+    slots across calls.
+19. `drop` and `forget` update tracked root state like a transfer. `drop`
+    emits the full cleanup at the statement; `forget` emits none. A drop flag
+    is needed only where the local's state differs between paths.
 
 The middle-end makes construction, copy, relocation, activation, deactivation,
 and cleanup explicit before LLVM emission. Loads, stores, and memory-transfer

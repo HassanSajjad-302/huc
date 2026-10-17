@@ -120,18 +120,22 @@ overloaded. When an integer address is needed, use the explicit cast
 names; ordinary library APIs remain separate.
 
 **Basic values are copied; Advanced values are transferred.** Numbers, raw
-pointers, and structures containing only Basic fields with neither `clone()`
-nor `drop()` are Basic. Structures with an Advanced field, `clone()`, or
-`drop()` are Advanced. Fixed arrays `T[N]` have their element type's category
-and automatically clean up their elements. Use `copy value` for an explicit
-duplicate;
-Advanced structures support this by defining `clone()`.
+pointers, and structures containing only Basic fields are Basic, unless they
+declare a `copy()` or `drop()` method or are marked `[nocopy]` or
+`[norelocate]`. Other structures are Advanced. Fixed arrays `T[N]` have their
+element type's category and automatically clean up their elements. Use
+`copy value` for an explicit duplicate. Advanced structures support it with a
+`copy()` method, which the compiler generates when every field can be copied,
+unless the structure declares `drop()` or is marked `[nocopy]`.
 
 An Advanced transfer is bitwise relocation, not C++ move construction.
 It makes the entire source inactive: the source can no longer be used as a
 value until reinitialized. The transfer does not run the source's `drop` or
 clean up its fields, and it does not require clearing the source bytes.
-The destination becomes responsible for cleanup.
+The destination becomes responsible for cleanup. A type marked `[norelocate]`
+is never relocated; constructors and factory calls still build it in place.
+`drop name;` destroys a local early, and `forget name;` ends it without
+cleanup. Either makes the name unusable until it is assigned again.
 
 Unconsumed temporaries live until their full expression finishes, usually at
 the semicolon. A temporary used by `print(make_text().view())` stays alive
@@ -155,7 +159,7 @@ struct Widget {
     fn init(value: i32) : value = value {
     }
 
-    fn clone() -> Widget {
+    fn copy() -> Widget {
         return Widget(this->value);
     }
 }
@@ -217,7 +221,7 @@ The programmer must prevent cleanup of that old slot; the compiler does not
 cancel automatic cleanup through pointer aliases. For example, a container
 can remove the extracted slot from its initialized range.
 
-Use `copy *pointer` to clone an Advanced value that supports cloning while
+Use `copy *pointer` to copy an Advanced value that supports copying while
 leaving it active. The pointee must be live and accessible in either case.
 
 ### Permissions and cleanup
@@ -236,9 +240,10 @@ leaving it active. The pointee must be live and accessible in either case.
   never gained by ordinary pointer conversion.
 - Replacing an existing value requires a writable destination. An active
   Advanced destination uses destroy-first assignment: prepare RHS inputs,
-  destroy the old value, then construct, call, clone, or relocate into its
+  destroy the old value, then construct, call, copy, or relocate into its
   slot. Nested argument operations finish before destruction; a conditional
-  prepares only its selected arm and forwards the final destination. Prepare a separate replacement first when it needs the old value.
+  prepares only its selected arm and forwards the final destination. Prepare
+  a separate replacement first when it needs the old value.
 - Advanced self-assignment, including `x = copy x`, is undefined behavior,
   with no implicit alias check or fallback. Optional warnings are allowed;
   ordinary type and moved-value checks remain. Basic self-assignment is valid.

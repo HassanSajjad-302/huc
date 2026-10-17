@@ -856,9 +856,10 @@ their results in source import order, never worker completion order.
 
 The rules apply to pointers, structures, and allocations, not just scalars.
 Ordinary mutation permissions and lifetime checks still apply. Merging does not
-run `clone` or `drop`; actual HUC assignment and destruction still do. At the
-end of translation, each module state's live values are cleaned up in a private
-view of that state. Cleanup never changes another module's saved result.
+run a `copy` method or `drop`; actual HUC assignment and destruction still
+do. At the end of translation, each module state's live values are cleaned
+up in a private view of that state. Cleanup never changes another module's
+saved result.
 [Specification section 9.8.1](language-specification.md#981-isolated-compiler-state-and-ordered-imports)
 defines object identity, lifetime records, and cleanup.
 
@@ -2238,7 +2239,7 @@ The implementation must pass these tests. None has run yet.
 | Direct and pointer references identify one imported object | They resolve to the same version in the active state |
 | Branches create separate allocations with equal contents | Distinct logical objects; no content-based merging |
 | The winning version has an inactive slot or deallocated block | That lifetime state wins; subsequent invalid access diagnoses |
-| A noncopyable Advanced object is imported | State sharing needs no clone and does not deactivate the dependency's value |
+| A noncopyable Advanced object is imported | State sharing needs no `copy` method and does not deactivate the dependency's value |
 | A compiler helper reads or writes an imported let1 mut | It uses the active caller state, with lexical name lookup |
 | A retained generic definition or canonical type is first requested by an importer | Uses its defining module's state, not caller overrides |
 | A selected specialization reads its own module's object absent from the active state | Read-only fallback to that module's completed state |

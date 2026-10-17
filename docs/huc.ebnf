@@ -90,7 +90,16 @@ struct-decl-0     = "struct", [ attribute-list-0 ], identifier, "{",
                     { struct-member-0 }, "}", [ ";" ] ;
 struct-member-0   = field-decl-0
                   | function-decl-0
-                  | constructor-decl-0 ;
+                  | constructor-decl-0
+                  | lifecycle-method-decl-0 ;
+
+lifecycle-method-decl-0
+                  = "fn", [ attribute-list-0 ], ( "copy" | "drop" ),
+                    parameter-list-0, [ "mut" ], "->", type-0, block-0 ;
+
+(* copy and drop are reserved words, so the lifecycle methods use this form,
+   like fn init. The language specification fixes their signatures:
+   fn copy() -> T and fn drop() mut -> void. *)
 
 field-decl-0      = "let", [ attribute-list-0 ], [ "mut" ], identifier,
                     ":", type-0,
@@ -140,11 +149,16 @@ struct-decl-1     = "struct", [ attribute-list-1 ], identifier, "{",
 struct-member-1   = field-decl-1
                   | function-decl-1
                   | constructor-decl-1
+                  | lifecycle-method-decl-1
                   | generic-function-decl
                   | phase-control-item
                   | phase-expression-item
                   | compiler-assignment-item
                   | insertion-item ;
+
+lifecycle-method-decl-1
+                  = "fn", [ attribute-list-1 ], ( "copy" | "drop" ),
+                    parameter-list-1, [ "mut" ], "->", type-1, block-1 ;
 
 field-decl-1      = "let", [ attribute-list-1 ], [ "mut" ], identifier,
                     ":", type-1,
@@ -414,9 +428,10 @@ parameter-1       = [ attribute-list-1 ], [ "mut" ], identifier, ":", type-1 ;
    only where the language specification permits it, not an omitted type.
    Comma-separated lists allow one optional final comma after an item.
    An empty list has no comma. Conditions, grouped expressions, subscripts,
-   and the single type operand of as/ptr_as/size_of/align_of/is_basic are
-   not such lists. Array literals permit an optional trailing comma but
-   cannot be empty because zero-length arrays are not provided. *)
+   and the single type operand of as/ptr_as/size_of/align_of/is_basic/
+   is_relocatable/is_copyable/is_default_initializable are not such lists.
+   Array literals permit an optional trailing comma but cannot be empty
+   because zero-length arrays are not provided. *)
 
 block-0           = "{", { statement-0 }, "}" ;
 statement-0       = block-0
@@ -427,6 +442,7 @@ statement-0       = block-0
                   | return-statement-0
                   | "break", ";"
                   | "continue", ";"
+                  | end-statement
                   | expression-statement-0 ;
 
 local-let-binding-0
@@ -447,6 +463,11 @@ for-updates-0     = expression-0, { ",", expression-0 }, [ "," ] ;
 for-statement-0   = for-header-0, block-0 ;
 return-statement-0
                   = "return", [ expression-0 ], ";" ;
+end-statement     = ( "drop" | "forget" ), identifier, ";" ;
+
+(* drop and forget are reserved statement keywords. The operand names one
+   local or by-value parameter; language specification section 7.6 gives the
+   remaining rules. *)
 expression-statement-0
                   = expression-0, ";" ;
 
@@ -464,6 +485,7 @@ statement-1       = block-1
                   | return-statement-1
                   | "break", ";"
                   | "continue", ";"
+                  | end-statement
                   | expression-statement-1 ;
 
 local-let-binding-1
@@ -534,7 +556,9 @@ primary-expression-0
 array-literal-0   = "[", expression-0, { ",", expression-0 }, [ "," ], "]" ;
 
 type-intrinsic-call-0
-                  = ( "as" | "ptr_as" | "size_of" | "align_of" | "is_basic" ),
+                  = ( "as" | "ptr_as" | "size_of" | "align_of" | "is_basic"
+                    | "is_relocatable" | "is_copyable"
+                    | "is_default_initializable" ),
                     "<", type-0, ">", argument-list-0 ;
 
 expression-1      = assignment-expression-1 ;
@@ -577,7 +601,9 @@ primary-expression-1
 array-literal-1   = "[", expression-1, { ",", expression-1 }, [ "," ], "]" ;
 
 type-intrinsic-call-1
-                  = ( "as" | "ptr_as" | "size_of" | "align_of" | "is_basic" ),
+                  = ( "as" | "ptr_as" | "size_of" | "align_of" | "is_basic"
+                    | "is_relocatable" | "is_copyable"
+                    | "is_default_initializable" ),
                     "<", type-1, ">", argument-list-1 ;
 
 assignment-op     = "=" | "+=" | "-=" | "*=" | "/=" | "%="
@@ -608,8 +634,9 @@ binary-op         = "||" | "&&"
    and returns void. They have no angle-delimited type operand.
    ptr_as has exactly one value operand. It permits raw-pointer to raw-pointer,
    raw-pointer to usize, and usize to raw-pointer casts; other pairs are rejected.
-   size_of/align_of/is_basic take no value
-   operands and return target usize/usize/bool constants respectively.
+   size_of/align_of take no value operands and return target usize
+   constants. is_basic/is_relocatable/is_copyable/is_default_initializable
+   take no value operands and return bool constants.
    construct_at can end an old lifetime without cleanup; destruct_at still
    requires a live pointee. Array literals have contextual or inferred types. *)
 

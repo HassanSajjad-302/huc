@@ -22,7 +22,7 @@ struct TemporaryProbe {
     }
 }
 
-// Point is Basic: every field is Basic and it declares neither clone nor drop.
+// Point is Basic: every field is Basic and it declares neither copy nor drop.
 struct Point {
     let x: i32;
     let y: i32;
@@ -34,7 +34,7 @@ struct Point {
     }
 }
 
-// NativeBuffer is Advanced because it declares clone and drop.
+// NativeBuffer is Advanced because it declares copy and drop.
 struct NativeBuffer {
     let mut data: mut u8*;
     let size: usize;
@@ -57,7 +57,7 @@ struct NativeBuffer {
     }
 
     // Only an explicit copy expression calls this method.
-    fn clone() -> NativeBuffer {
+    fn copy() -> NativeBuffer {
         let mut result: NativeBuffer = NativeBuffer(this->size);
         memory::copy_bytes(result.data, this->data, this->size);
         return result;
@@ -72,7 +72,8 @@ struct NativeBuffer {
     }
 }
 
-// Packet is Advanced because of its Advanced field, despite having no clone or drop.
+// Packet is Advanced through its Advanced field; it declares no copy or drop.
+// Its fields can be copied, so it also gets a generated copy method.
 struct Packet {
     let tag: i32;
     let mut payload: NativeBuffer;
@@ -145,7 +146,7 @@ fn demonstrate_inline_relocation() -> void {
     let mut original: NativeBuffer = NativeBuffer(64);
     original.fill(7);
 
-    let duplicate: NativeBuffer = copy original; // calls clone
+    let duplicate: NativeBuffer = copy original; // calls the copy method
     // Bitwise relocation transfers the stored value without calling user code.
     // original becomes inactive: its lifetime ends, and neither its drop nor
     // its field cleanup runs.
@@ -155,8 +156,8 @@ fn demonstrate_inline_relocation() -> void {
     original = NativeBuffer(32); // reinitializes inactive storage
 
     let mut target: NativeBuffer = NativeBuffer(8);
-    // Drop old target, then call clone with target as its result slot.
-    // This clone returns an explicit local, so that local still relocates.
+    // Drop old target, then call copy with target as its result slot.
+    // NativeBuffer's copy returns an explicit local, which still relocates.
     target = copy duplicate;
 
     io::println(duplicate.first(), relocated.first(), target.first());

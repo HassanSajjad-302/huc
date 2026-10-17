@@ -204,7 +204,9 @@ Type mapping rules:
   imported after C's adjustment to pointer type. HUC `extern "C"` signatures
   cannot pass or return arrays by value; records containing them are allowed.
 - C types are Basic in HUC. They have no `drop`, and copying one is a bitwise
-  copy, exactly as in C.
+  copy, exactly as in C. They are never `[norelocate]`; when a foreign object
+  must stay at one address, such as a `pthread_mutex_t`, keep it in a HUC
+  structure marked `[norelocate]`.
 
 HUC never recomputes a C layout. Sizes, alignments, field offsets, and
 bit-field positions always come from Clang.

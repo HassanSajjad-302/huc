@@ -164,8 +164,11 @@ HUC0 contains:
 - unary `&` and `take`, `construct_at`, `destruct_at`, and the core
   type-operand intrinsics;
 - fixed arrays `T[N]`, array literals, byte-array storage, and `size_of`,
-  `align_of`, and `is_basic` queries;
-- constructors, methods, `clone`, and `drop`;
+  `align_of`, `is_basic`, `is_relocatable`, `is_copyable`, and
+  `is_default_initializable` queries;
+- constructors, methods, `copy` and `drop` methods, and the `drop` and
+  `forget` statements;
+- the `[nocopy]` and `[norelocate]` type attributes;
 - runtime expressions and control flow;
 - local `let name: auto` inference;
 - built-in attribute lists with literal arguments (layout expressions also
@@ -182,7 +185,9 @@ HUC0 does not contain:
 - unresolved `auto` parameters or inferred function results.
 
 The angle operands in `as<T>`, `ptr_as<Target>`, `size_of<T>()`, `align_of<T>()`,
-and `is_basic<T>()` are built-in type operands, not phase-family requests.
+`is_basic<T>()`, `is_relocatable<T>()`, `is_copyable<T>()`, and
+`is_default_initializable<T>()` are built-in type operands, not phase-family
+requests.
 These are the only angle forms accepted by HUC0. Arrays use postfix `[N]`,
 where HUC0 accepts a positive integer literal or a layout expression using
 `size_of`, `align_of`, `+`, `*`, and parentheses.
@@ -317,20 +322,20 @@ Basic types include:
 - scalar arithmetic and boolean types;
 - raw pointers;
 - arrays of Basic elements;
-- structures whose fields are all Basic and which declare neither `clone` nor
-  `drop`.
+- structures whose fields are all Basic, which declare neither a `copy` method
+  nor `drop`, and which are marked neither `[nocopy]` nor `[norelocate]`.
 
 Advanced types include:
 
 - arrays whose element type is Advanced, with automatic reverse element cleanup;
 - structures containing an Advanced field;
-- structures declaring `clone`;
-- structures declaring `drop`.
+- structures declaring a `copy` method or `drop`;
+- structures marked `[nocopy]` or `[norelocate]`.
 
 Classification is recursive through inline fields. Having `init()` alone does
 not make a structure Advanced. A raw `T*` remains Basic even when its pointee
-is Advanced. Explicit `copy` uses the existing `clone()` method when
-duplicating an Advanced structure.
+is Advanced. Explicit `copy` uses the structure's `copy` method, written or
+generated, when duplicating an Advanced structure.
 
 `Advanced` is the source-level transfer category. Its operation is **destructive
 relocation**, not C++ move construction. Relocating an Advanced value continues
@@ -340,15 +345,15 @@ storage. No source `drop` or field cleanup runs.
 Relocation transfers the stored representation using these fixed rules:
 
 1. Transfer the whole value's representation to the destination without
-   invoking `clone`, `drop`, or any user transfer hook.
+   invoking a `copy` method, `drop`, or any user transfer hook.
 2. Make the entire source, including all its field subobjects, inactive.
 3. Make the destination responsible for cleanup; do not clean up the source.
 
 Source fields become inactive as part of the same transfer; they receive
 no recursive transfer operation or cleanup, and need not be cleared. This
-rule applies whether the type is Advanced because of `clone`, `drop`, or an
-Advanced field. Ordinary Basic binding duplicates the value and leaves its
-source active.
+rule applies whether the type is Advanced because of a `copy` method, `drop`,
+`[nocopy]`, or an Advanced field. Ordinary Basic binding duplicates the value
+and leaves its source active.
 
 A fixed field cannot be assigned to directly, but it can be transferred as
 part of a whole writable source value.
@@ -382,18 +387,19 @@ programmer's responsibility.
 `copy expression` explicitly requests logical duplication:
 
 - a Basic type is copied;
-- an Advanced structure must supply a read-only `fn clone() -> T`;
+- an Advanced structure must have a read-only `fn copy() -> T`, written or
+  generated;
 - an Advanced array is copied elementwise when its element type supports `copy`;
 - a raw pointer copy duplicates only the address.
 
 Copying a null raw pointer remains valid; dereferencing a null pointer does not.
 
-Declaring `clone` opts an otherwise Basic structure into Advanced. This
-prevents an ordinary binding from bypassing custom logical-copy behavior.
-`clone` must duplicate owned resources or create another valid ownership
-share, so the original and its copy can be destroyed independently. It need
-not copy every reachable object: non-owning raw pointers and deliberately
-shared external state may remain shared.
+Declaring a `copy` method opts an otherwise Basic structure into Advanced.
+This prevents an ordinary binding from bypassing custom logical-copy behavior.
+A `copy` method must duplicate owned resources or create another valid
+ownership share, so the original and its copy can be destroyed
+independently. It need not copy every reachable object: non-owning raw
+pointers and deliberately shared external state may remain shared.
 
 Relocation cannot be overloaded. There is no HUC move constructor: one is not
 needed to restore a destructible moved-from state because no source
@@ -401,7 +407,7 @@ object remains alive. Advanced assignment follows a destroy-first order:
 
 1. Retain the destination, then prepare RHS arguments or source places.
 2. Drop the old destination if it remains active after preparation.
-3. Run the outer constructor, call, or clone directly in its slot, or relocate
+3. Run the outer constructor, call, or copy directly in its slot, or relocate
    the retained source. A conditional prepares only its selected arm by
    these rules. An array literal prepares all element inputs before drop,
    then builds in increasing index order. Other expressions finish first
@@ -422,12 +428,14 @@ within-call relocation and containing-root checks. They follow already tracked
 transfers, not dependencies through assignment destruction.
 
 An inline value that needs its address to stay unchanged cannot be safely
-relocated bitwise. HUC0 does not repair self-pointers. Such a value must be
-kept in directly constructed fixed read-only storage, redesigned to compute
-internal addresses, or placed in stable-address storage. Mutable
-address-dependent objects must likewise remain at their construction address
-while those invariants are needed; HUC0 has no first-class pinning qualifier.
-Relocating a value that violates this contract is undefined behavior.
+relocated bitwise. HUC0 does not repair self-pointers. Mark such a type
+`[norelocate]`: it becomes Advanced, and every relocation of it is a required
+error, while direct results still build in their final slot. The property
+propagates through inline fields and arrays, not pointers. A generated
+memberwise init that would relocate such a field is not generated, and an
+explicitly `[norelocate]` type gets no generated `copy` method. Without the
+attribute, relocating a value whose correctness depends on its address is
+undefined behavior.
 
 Bitwise relocation is the language rule, not an optimization of separate
 field transfers. It does not require a memory-copy instruction or give padding
@@ -495,7 +503,7 @@ types are allowed when the destination storage is valid and writable.
 Evaluate the destination pointer once before the initializer. Check the
 initializer as for a local of type `T`, without introducing a by-value `T`
 parameter: Basic values copy, eligible Advanced sources transfer, and explicit
-`copy` clones. A direct constructor or function result initializes the supplied
+`copy` copies. A direct constructor or function result initializes the supplied
 slot as its final destination; array literals and selected `?:` arms do too.
 Prepare the inputs first, then end any old lifetime without cleanup before
 finishing initialization. Enclosing objects stay alive. `destruct_at`
@@ -544,10 +552,15 @@ the byte region and form one-past pointers even before payload construction.
 Byte arrays are Basic and provide no payload cleanup. Relocating an enclosing
 Advanced value transfers live payloads at the same offsets; ordinary byte
 copies do not transfer their lifetimes. Library `drop` code manages live
-ranges. Cached pointers into the old region are not repaired.
+ranges. Cached pointers into the old region are not repaired. Relocating an
+enclosing object that carries a live `[norelocate]` payload is undefined
+behavior.
 
-`size_of<T>()`, `align_of<T>()`, and `is_basic<T>()` take no value
-operands and fold to target `usize`, `usize`, and `bool` constants.
+`size_of<T>()` and `align_of<T>()` take no value operands and fold to target
+`usize` constants. `is_basic<T>()`, `is_relocatable<T>()`, `is_copyable<T>()`,
+and `is_default_initializable<T>()` take no value operands and fold to `bool`
+constants. A query evaluated during preparation cannot ask about a structure
+whose body is still being processed.
 A copied Basic source can be reused by `construct_at` without an intervening
 `destruct_at`; an extracted Advanced source must not be destroyed again.
 One aligned region and a flag support an optional without a default payload.
@@ -570,11 +583,12 @@ HUC behavior rather than optional backend copy elision.
 
 Direct function and Advanced `copy` results use the same final slot. Forward
 it through `return T(...)`, `return call()`, and `return copy source`, including
-nested factories or clones at `-O0` and without inlining. Returning an explicit
+nested factories or copies at `-O0` and without inlining. Returning an explicit
 Advanced local still relocates it. A conditional forwards the result slot
-recursively to its selected arm, and an array literal builds in its element
-slots. Advanced assignment supplies its inactive destination after
-input preparation and old-value cleanup. Basic assignment is not changed.
+recursively to its selected arm, including its own temporary outside
+direct-result positions, and an array literal builds in its element slots.
+Advanced assignment supplies its inactive destination after input preparation
+and old-value cleanup. Basic assignment is not changed.
 
 A constructor is named `init`:
 
@@ -612,6 +626,8 @@ Rules:
   already has zero parameters, there is only one zero-argument init;
 - an explicit `init` suppresses both generated forms; unnamed padding gets
   no parameter; declaration initializers run in the normal field order;
+- a memberwise init that would relocate a `[norelocate]` field is not
+  generated;
 - fixed locals and globals require an initializer;
 - every constructor must initialize any fixed field that has no declaration
   initializer;
@@ -637,7 +653,10 @@ fn drop() mut -> void {
 ```
 
 `drop` cannot be called directly. It executes before fields are destroyed in
-reverse declaration order.
+reverse declaration order. The statements `drop name;` and `forget name;` end
+a mutable, Active local early, with full cleanup or none, and make it
+Inactive like a transfer. A Basic operand emits no code but still ends the
+binding. In a branch, the existing drop flags handle the join.
 
 Fixed Advanced arrays destroy their elements in decreasing index order.
 Library vectors track their live prefix and clean it up explicitly in that
@@ -647,16 +666,22 @@ An Advanced structure may customize explicit logical copying with exactly one
 read-only method:
 
 ```huc
-fn clone() -> T {
+fn copy() -> T {
     // return an independent T without modifying this
 }
 ```
 
-Only an evaluated `copy` expression selects `clone`; ordinary binding never
-does, and source code cannot call `clone` directly or take its address. Copy
+Only an evaluated `copy` expression selects the method; ordinary binding never
+does, and source code cannot call it directly or take its address. Copy
 assignment of an Advanced type is expressed as `destination = copy source`:
-retain the source, destroy the old destination, and clone into its final slot.
-The source and resources needed by the clone must survive that destruction.
+retain the source, destroy the old destination, and copy into its final slot.
+The source and resources needed by the copy must survive that destruction.
+
+The compiler generates a `copy` method for a structure that is Advanced on its
+own, declares no `copy` method or `drop`, is neither `[nocopy]` nor explicitly
+`[norelocate]`, and has only copyable fields. It copies the named fields in
+declaration order, directly into the destination fields. `[nocopy]` makes a
+type Advanced and move-only; a written `copy` method on it is an error.
 Users cannot customize relocation initialization or relocation assignment.
 
 The complete rules, diagnostics, and side-by-side C++20 examples are in
@@ -1040,8 +1065,8 @@ or until its compiler call finishes in evaluation mode. Save completed module
 states through translation. After output, clean each in a private view, in
 reverse module-processing order, with reverse initialization-order cleanup of
 its remaining live values and leak checks. Cleanup cannot change other saved
-states. State merging itself invokes no `clone` or `drop`; actual HUC assignment
-and destruction still do. Redeclaring a `let1` remains an error.
+states. State merging itself invokes no `copy` method or `drop`; actual HUC
+assignment and destruction still do. Redeclaring a `let1` remains an error.
 
 Register angle-header signatures without parsing or preparing their bodies.
 Parse the selected body on request; an unused body remains opaque. Each
@@ -1576,7 +1601,7 @@ Cover:
 - expressions and precedence;
 - constructor syntax;
 - interleaved pointer and array suffixes, array literals with optional trailing
-  commas, layout-expression counts, and layout/category query type operands;
+  commas, layout-expression counts, and type operands of type queries;
 - local `let name: auto`;
 - attribute lists after `struct`, `fn`, `let`, `if`, `else`, `while`, and
   `for`, and before parameters, with integer-literal and option-name
@@ -1616,8 +1641,9 @@ Implement:
   validation, category inference, and automatic element cleanup;
 - canonical type aliases and alias-cycle diagnostics;
 - local `auto` inference;
-- constant `size_of<T>()`, `align_of<T>()`, and `is_basic<T>()`, rejecting
-  invalid types and value operands;
+- constant `size_of<T>()`, `align_of<T>()`, `is_basic<T>()`,
+  `is_relocatable<T>()`, `is_copyable<T>()`, and
+  `is_default_initializable<T>()`, rejecting invalid types and value operands;
 - method receiver permissions;
 - constructor obligation checking;
 - `extern "C"` signatures limited to built-in scalars, `void` or `never`
@@ -1659,7 +1685,7 @@ HIR records:
 - value use: read, observe, copy, relocate, or place;
 - unary `&` of an eligible data place, including pointer slots;
 - per-element array construction, array indexing, byte-region object storage,
-  `[nozero]` declarations, and folded target layout/category queries;
+  `[nozero]` declarations, and folded target layout and type queries;
 - explicit raw-pointer/`usize` casts in both directions;
 - source origin;
 - explicit conversion selected by HUC.
@@ -1698,7 +1724,7 @@ Emit:
 - strict floating-point lowering by default, without contraction or
   reassociation, using ordinary LLVM operations for the fixed default
   environment; relaxed flags require an explicit HUC mode;
-- initialization, clone, and drop functions with explicit receivers and final
+- initialization, copy, and drop functions with explicit receivers and final
   destinations where needed;
 - attribute lowering: unaligned accesses for packed fields, shift-and-mask
   bit-field access, `alwaysinline`, `noinline`, `cold`, branch weights, loop
@@ -1769,10 +1795,14 @@ cleanup of the old slot. LLVM supplies no automatic HUC destruction.
 
 Implement:
 
-- structural Basic/Advanced classification, including `clone` opting into Advanced;
-- `copy` and `clone`;
+- structural Basic/Advanced classification, including a `copy` method,
+  `[nocopy]`, or `[norelocate]` opting into Advanced;
+- `copy` expressions with written and generated `copy` methods, and the
+  `is_copyable` query;
+- `[norelocate]` relocation checks, propagation, and the `is_relocatable` query;
+- `drop` and `forget` statements, including Basic operands and conditional use;
 - destroy-first Advanced assignment with a retained RHS preparation plan;
-- final result-slot forwarding through direct constructors, calls, and clones;
+- final result-slot forwarding through direct constructors, calls, and copies;
 - fixed bitwise relocation of Advanced values with no user transfer hook;
 - user `drop`;
 - reverse field cleanup;
@@ -1808,15 +1838,15 @@ Acceptance:
   or automatic destination cleanup registration;
 - manual destruction performs full drop/field cleanup without deallocation;
 - neither intrinsic updates automatic cleanup state through aliases;
-- ordinary binding never invokes `clone`;
+- ordinary binding never invokes a `copy` method;
 - constructor and factory arguments bind before destination drop; the outer
   operation runs afterward in the final slot;
-- direct copy assignment drops before cloning, while nested copy arguments
+- direct copy assignment drops before copying, while nested copy arguments
   complete before drop; conditionals prepare only the selected arm and
   forward the destination recursively;
-- `copy make_source()` keeps its separate source alive through the clone;
+- `copy make_source()` keeps its separate source alive through the copy;
 - `x = wrap(x)` uses post-preparation state and skips old-value destruction;
-- explicit replacement temporaries support valid self-cloning and factories
+- explicit replacement temporaries support valid self-copying and factories
   that need the old destination;
 - Basic self-assignment works without an identity branch;
 - otherwise well-typed Advanced self-assignment and dependent arguments have
@@ -2310,13 +2340,19 @@ Include:
 - `ptr_as` with incorrect arity or a source/target pair outside the three
   supported pointer/pointer and pointer/`usize` cases;
 - zero or invalid array counts, layout overflow, recursive inline layout,
-  literal count/type mismatches, and unsupported element cloning;
+  literal count/type mismatches, and unsupported element copying;
 - non-scalar/non-scalar-array `[nozero]`, using `construct_at` as a value,
   numeric literal fit failures, and invalid literal-only arithmetic;
-- incorrect query arity and incomplete/non-runtime query types;
+- incorrect query arity and incomplete/non-runtime query types, including a
+  query during preparation about a structure whose body is still being
+  processed;
 - mutation without `mut`;
-- copying an Advanced type without `clone`;
-- malformed or duplicate `clone` and `drop` methods;
+- copying an Advanced type without a `copy` method, or a `[nocopy]` type;
+- malformed or duplicate `copy` and `drop` methods, and a written `copy`
+  method on a `[nocopy]` type;
+- relocating a `[norelocate]` type from any source;
+- `drop` or `forget` on a field, pointee, temporary, global, fixed binding, or
+  Inactive or MaybeActive local;
 - attempted custom move or relocation hooks;
 - constructor obligation failures;
 - ambiguous partial specialization;
@@ -2382,16 +2418,16 @@ Verify LLVM IR, compile to objects, link, and test the implemented subset:
 - slot-address round trips and byte access without extra ownership operations;
 - conditional relocations;
 - Basic-value binding and assignment;
-- explicit copy/clone and destroy-first assignment, including the documented
+- explicit copy and destroy-first assignment, including the documented
   nested-expression sequencing differences;
 - copying null raw pointers;
 - bitwise relocation and whole-source deactivation;
-- Basic self-assignment, explicit preparation for self-cloning, and compile-only
+- Basic self-assignment, explicit preparation for self-copying, and compile-only
   acceptance tests for unchecked Advanced self-assignment;
 - relocation of nested Advanced aggregates with exactly-once destination
   cleanup and no inactive-source cleanup;
 - extraction from manually managed slots with initialized-range bookkeeping,
-  including a pop-style return without cloning or a replacement value;
+  including a pop-style return without copying or a replacement value;
 - single evaluation of pointer sources with unchanged pointer addresses and
   no source clearing or per-element flags;
 - direct field, nested-field, pointer-field, and element extraction followed
@@ -2410,7 +2446,17 @@ Verify LLVM IR, compile to objects, link, and test the implemented subset:
 - selected `?:` arms forwarding result slots, including nested conditionals,
   take arms, and factories; never execute self-copy through a selected arm;
 - array-literal assignment's prepare-all/drop-reverse/build-forward ordering;
-- manual construction from Basic, relocated Advanced, cloned, constructor,
+- generated `copy` methods in field order, and their suppression by a written
+  `drop`, `[nocopy]`, explicit `[norelocate]`, or a noncopyable field;
+- `is_copyable` and `is_default_initializable` answers, and generic types
+  whose `if1`-guarded `copy` and default-filling methods appear only for
+  element types that support them;
+- `[norelocate]` types built through constructors, factories, `copy`, array
+  literals, by-value arguments, and conditional temporaries, with final
+  `this` addresses at `-O0` and optimized;
+- `drop` and `forget` on locals and parameters, in branches and loops, with
+  exactly-once cleanup, reinitialization, and Basic operands;
+- manual construction from Basic, relocated Advanced, copied, constructor,
   and function-result initializers, including final `this` address checks;
 - construct/extract/reconstruct/destruct cycles in manually managed slots;
 - manual destruction of nested fields, unchanged pointer addresses, and

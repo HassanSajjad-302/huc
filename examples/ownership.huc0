@@ -15,8 +15,8 @@ struct Widget {
     {
     }
 
-    // This customizes explicit `copy`. Declaring clone makes Widget Advanced.
-    fn clone() -> Widget {
+    // This customizes explicit `copy`. Declaring it makes Widget Advanced.
+    fn copy() -> Widget {
         return Widget(this->value); // opens an independent native handle
     }
 
@@ -45,7 +45,7 @@ fn main() -> i32 {
     // Relocation transfers the representation and cleanup responsibility.
     // first and its fields become inactive; no source cleanup runs.
     let mut second: Widget = first;
-    let independent: Widget = copy second; // clone opens a separate handle
+    let independent: Widget = copy second; // the copy opens a separate handle
 
     let observer: Widget* = &second;
     let another_observer: Widget* = observer; // copies the address unchanged

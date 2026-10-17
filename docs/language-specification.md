@@ -283,6 +283,10 @@ not keywords.
 without changing its source, or extracts an Advanced value and constructs a
 replacement in the source slot (section 6.6.1).
 
+`drop` and `forget` are reserved statement keywords (section 7.6). `copy` and
+`drop` are also lifecycle method names, so the declarations `fn copy()` and
+`fn drop()` have their own grammar forms, like `fn init`.
+
 ### 3.2 Literals
 
 HUC has:
@@ -356,7 +360,16 @@ converts between raw-pointer types or between a raw pointer and `usize`.
 `size_of<T>()` and `align_of<T>()` are target-layout queries with one type
 operand and no value operands.
 `is_basic<T>()` queries the existing Basic/Advanced category at compile time.
-These names likewise cannot be overloaded or used as function values.
+`is_relocatable<T>()` reports whether `T` may be relocated (section 6.13),
+`is_copyable<T>()` whether it supports copying (section 6.6), and
+`is_default_initializable<T>()` whether it can be default-initialized
+(section 4.6). These names likewise cannot be overloaded or used as function
+values.
+
+During preparation, as in an `if1` condition, a type query cannot ask about
+a structure whose body is still being processed, such as from inside that
+body. That is an error. A query left in runtime code is answered in HUC0,
+where every type is complete.
 
 Address-taking uses unary `&`, not a named intrinsic call. Section 6.7
 specifies the manual-storage lifetime operations `construct_at` and `destruct_at`.
@@ -398,8 +411,9 @@ Assignment uses the same category rules, with destination cleanup when
 required. Basic and Advanced are category names, not source keywords.
 
 Built-in scalars and raw pointers are Basic. A structure is Basic when every
-field is Basic and it declares neither `clone` nor `drop`. Otherwise it is
-Advanced. Having `init()` alone does not make it Advanced. `T*` remains Basic
+field is Basic, it declares neither a `copy` method nor `drop`, and it is
+marked neither `[nocopy]` nor `[norelocate]`. Otherwise it is Advanced.
+Having `init()` alone does not make it Advanced. `T*` remains Basic
 regardless of the pointee's category. An array `T[N]` has the category of `T`
 (section 4.7). A byte array is Basic even when it provides manually managed
 storage for Advanced values (section 6.7.5).
@@ -421,12 +435,12 @@ struct Buffer {
 }
 ```
 
-The compiler derives copying for Basic types field by field. Declaring `clone`
-makes the type Advanced so an ordinary fieldwise copy cannot bypass custom
-logical-copy behavior.
+The compiler derives copying for Basic types field by field. Declaring a
+`copy` method makes the type Advanced so an ordinary fieldwise copy cannot
+bypass custom logical-copy behavior.
 
 An Advanced value may be duplicated only by the explicit `copy` expression,
-when it supports the clone protocol in section 6.6.
+when its type supports copying (section 6.6).
 
 ### 4.2 Raw pointers: `T*`
 
@@ -590,7 +604,8 @@ name and type. Advanced parameters are `mut` bindings so they can relocate
 into the fields. Other fields use their declaration initializers or remain
 unwritten when `[nozero]` applies. An initializer always takes precedence
 over `[nozero]`. Unnamed padding fields are not parameters. Fixed-field
-initialization requirements still apply.
+initialization requirements still apply. A memberwise init is not generated
+when it would relocate a `[norelocate]` field (section 6.13).
 
 It also gets a generated default init, with no arguments, if every named
 field has a declaration initializer or is mutable and can be default-initialized.
@@ -611,6 +626,16 @@ struct Options {
 }
 let mut options: Options; // generated default init: limit = 8, used = 0
 ```
+
+**Query.** `is_default_initializable<T>()` takes a complete runtime object
+type and no value operands, and returns a constant `bool`. It is true
+exactly when `T` can be default-initialized. Every scalar and raw pointer
+can be; a structure can be when it has a written or generated zero-argument
+init; an array can be when its element type can be. `[nozero]` does not
+change the answer, because it belongs to a binding, not a type. A generic
+body is checked for each specialization (section 9.5), so a generic type can
+wrap a method that default-initializes a `T` in an `if1` on this query
+(section 6.6 has an example).
 
 Methods receive an implicit non-owning `this`:
 
@@ -638,9 +663,11 @@ called directly; the compiler invokes it during destruction. Its implicit
 receiver is `this: mut T*`. The body runs before fields are destroyed in reverse
 order. HUC has no user-defined move constructor, relocation constructor,
 assignment operator, or C++-style destructor overload. Explicit logical copying
-is customized only by `clone`.
+is customized only by the `copy` method (section 6.6).
 
-Declaring `drop` makes the structure Advanced.
+Declaring `drop` makes the structure Advanced. The `drop` statement
+(section 7.6) runs this cleanup early for a local; it is not a call to the
+method.
 
 ### 4.7 Arrays
 
@@ -770,7 +797,7 @@ type meets that requirement through it. No source spelling such as
 
 - An Advanced array destroys its elements in decreasing index order.
 - `copy a` on an Advanced array requires each element to support `copy` and
-  clones each element directly into the destination's matching slot, in
+  copies each element directly into the destination's matching slot, in
   increasing index order. In `b = copy a`, the old elements of `b` are
   destroyed in decreasing order first, as for literal assignment.
 
@@ -895,14 +922,16 @@ the range is a diagnostic:
 - **Conflicts are checked.** `fn [inline, noinline]` is a diagnostic, and so is
   the same attribute given twice.
 - **Hints are hints.** `cold`, `likely`, `unlikely`, and `unroll` never change
-  what a program means. `align`, `pack`, `bits`, and `callconv` do, so they are
-  part of the declaration's type or signature.
+  what a program means. `align`, `pack`, `bits`, `callconv`, `nocopy`, and
+  `norelocate` do, so they are part of the declaration's type or signature.
 
 #### 4.9.4 Built-in attributes
 
 | Attribute | Applies to | Meaning | LLVM mapping |
 |---|---|---|---|
 | `nozero` | Scalar or scalar-array `let` | Leave omitted scalar defaults unwritten (section 4.9.11) | Omit default stores |
+| `nocopy` | `struct` | Forbid `copy`; the type is Advanced (section 6.6) | None |
+| `norelocate` | `struct` | Forbid relocation; the type is Advanced (section 6.13) | None |
 | `align(N)` | `struct`, `let` | Raise alignment to `N` (section 4.9.8) | Type layout; `align` on globals, allocas, and fields |
 | `pack(N)` | `struct` | Cap field alignment at `N`, like C's `#pragma pack(N)` (section 4.9.8) | Explicit field offsets in a packed struct type |
 | `bits(N)` | Field | Store an integer field in `N` bits, like C's `: N` (section 4.9.9) | Shifts and masks on the shared storage unit |
@@ -1330,7 +1359,9 @@ These are alternative examples with live inputs, not consecutive statements
 after the consuming example. Fixed Advanced operands cannot be transferred.
 Selecting a named Advanced value transfers it in every context. Direct-result
 positions can instead construct the selected arm in their destination,
-without an intermediate temporary (section 6.2).
+without an intermediate temporary (section 6.2). Elsewhere, a fresh selected
+arm constructs directly in the conditional's temporary. Section 8.4
+recommends a warning for the consuming receiver form above.
 
 ### 5.2 Arithmetic
 
@@ -1507,6 +1538,9 @@ Advanced value is supplied to a destination that stores that value:
 - return-value binding;
 - manual-storage initialization with `construct_at`.
 
+A value of a `[norelocate]` type is never relocated; only direct results can
+supply it to these destinations (section 6.13).
+
 Taking a value's address or calling a method does not transfer it. To observe
 an inline value through a raw-pointer parameter, pass `&value` explicitly.
 
@@ -1542,7 +1576,7 @@ the replacement phase of Advanced assignment. No intermediate result object
 is introduced between that operation and its destination.
 
 `return T(...)`, `return make(...)`, and `return copy source` forward the
-caller's result slot through direct calls and clones. A constructor reached
+caller's result slot through direct calls and copies. A constructor reached
 through that chain observes the final destination address, even without
 inlining or optimization. The language does not require a particular ABI.
 
@@ -1552,7 +1586,9 @@ when observable behavior is preserved. A selected `?:` arm that is a direct
 constructor, call, `copy`, array literal, or nested `?:` uses the supplied
 destination. An existing Advanced place instead relocates there; a Basic
 place is copied. Outside direct-result positions, `?:` still produces a
-temporary value, never a place.
+temporary value, never a place. That temporary is the selected arm's direct
+destination for every type: a fresh arm builds in it without relocation, and
+an existing place relocates or copies into it.
 Source and argument temporaries retain their normal lifetimes (section 6.5.1).
 
 ### 6.3 Destroy-first Advanced assignment
@@ -1564,7 +1600,7 @@ For an Advanced `T`, `destination = expression`:
    starting the next, in the ordinary left-to-right order.
 3. Destroy the old destination if it is still active after preparation. The
    destination becomes inactive before the replacement operation begins.
-4. Run the prepared constructor, call, or clone into the final destination,
+4. Run the prepared constructor, call, or copy into the final destination,
    or relocate the retained source/prepared value there. Record a tracked
    source's transfer before recording the new destination state.
 5. Mark the destination Active on normal completion, then perform the normal
@@ -1576,31 +1612,31 @@ Ignore parentheses around the RHS when selecting its form:
 |---|---|---|
 | `T(args)` | Evaluate and bind arguments | Construct in the destination |
 | Call returning `T` | Evaluate callee/receiver and bind arguments | Run call into final slot |
-| `copy expression` | Evaluate or retain the source, without the outer clone | Clone into final slot |
+| `copy expression` | Evaluate or retain the source; delay the copy itself | Copy into final slot |
 | Eligible existing Advanced place | Retain source location, without transferring | Relocate into final slot |
 | `condition ? a : b` | Evaluate condition once; recursively prepare only the selected arm by its own row | Complete that arm in the final slot |
 | Array literal | Prepare every element's inputs left to right | Build elements in increasing index order |
 | Other Advanced expression, including `take` | Evaluate completely | Relocate the prepared value |
 
-This does not delay nested operations. `dst = identity(copy src)` clones
+This does not delay nested operations. `dst = identity(copy src)` copies
 while binding `identity`'s parameter, then destroys `dst`, then runs `identity`.
 `dst = flag ? copy a : copy b` prepares the selected source, destroys `dst`,
-then clones into it. Nested conditionals prepare only their selected arms;
+then copies into it. Nested conditionals prepare only their selected arms;
 a selected `take` finishes completely before destruction. In
 `dst = copy make_source()`, the factory first creates a separate
-source that remains alive through the delayed clone. Inlining cannot change
+source that remains alive through the delayed copy. Inlining cannot change
 these orders.
 
 For an Advanced array destination, prepare all initializer inputs before
 destroying any old element. Destroy old elements in decreasing index order,
 then construct new elements in increasing index order. Array `copy` likewise
-destroys the old destination before cloning the source elements.
+destroys the old destination before copying the source elements.
 
 `dst = flag ? copy dst : copy other` is undefined behavior when `flag` is
 true. The false path can be valid if `other` satisfies the ordinary source
 requirements. A condition and the selected arm's argument expressions may
 observe the old destination during preparation; the selected outer call or
-clone must not use anything invalidated by its destruction.
+copy must not use anything invalidated by its destruction.
 
 An existing source place is retained, not snapshotted. If destination cleanup
 legally modifies a distinct live source, the delayed operation observes the
@@ -1631,13 +1667,13 @@ text = text.rebuilt();        // Calls a method on the now-inactive receiver.
 No assignment-specific diagnostic is required. Implementations may warn under
 section 8.4, but must not reject an otherwise well-typed program solely for
 these unchecked preconditions. There is no implicit identity check, no-op,
-clone-first fallback, or required runtime trap. Optional sanitizers remain
+copy-first fallback, or required runtime trap. Optional sanitizers remain
 separate from the language contract. Undefined behavior need not crash.
 This is a static acceptance rule for runtime code, not permission for compiler
 evaluation to corrupt its host. The evaluator's existing general invalid-access
 checks still apply when it executes code.
 
-The usual source eligibility, mutation permissions, clone availability, and
+The usual source eligibility, mutation permissions, copy availability, and
 section 6.12 checks remain. Source use is checked during preparation; its
 survival through destination destruction is not an additional required check.
 For bookkeeping, `text = text` records source transfer before destination
@@ -1679,8 +1715,9 @@ Relocating an Advanced value performs a fixed representation transfer:
 This is bitwise relocation, not recursive invocation of the individual fields'
 transfer operations. No source field remains an independently active value,
 and no source bytes need to be cleared.
-The rule applies whether `clone`, `drop`, or an Advanced field makes the type
-Advanced; ordinary binding of a Basic type still leaves its source active.
+The rule applies whether a `copy` method, `drop`, `[nocopy]`, or an Advanced
+field makes the type Advanced; ordinary binding of a Basic type still leaves
+its source active. A `[norelocate]` type is never relocated (section 6.13).
 
 Field fixedness restricts ordinary field assignment; it does not prevent the
 compiler from relocating that field as part of a writable containing source.
@@ -1779,7 +1816,7 @@ Unused bytes in byte-array backing storage are not inactive ordinary fields.
 Relocating an Advanced enclosing value may carry those bytes and any live
 payload objects under section 6.7.5.
 
-`copy place` remains valid for a live value that supports cloning and leaves
+`copy place` remains valid for a live value that supports copying and leaves
 it active. Basic fields, elements, and pointees are copied rather than extracted;
 their source lifetimes and cleanup are unchanged.
 
@@ -1799,16 +1836,13 @@ logical copy when supported. A writable observer parameter alone does not
 promise to preserve the pointee's lifetime: the function's contract must state
 any extraction and the required source cleanup or reconstruction.
 
-Inline values whose correctness depends on a stable address are an unchecked
-boundary of this model. For example, destructive relocation does not repair a
-self-pointer, an interior pointer into the source, or an address registered
-with an external API. A program that later relies on such stale addresses has
-undefined behavior. The programmer must instead keep the inline value in one
-directly constructed fixed read-only storage location and never relocate it,
-redesign the representation, or use storage whose address remains stable.
-A mutable address-dependent object must likewise stay at its construction
-address while those invariants are needed. HUC has no pinning qualifier,
-neither infers this restriction, nor provides a custom relocation hook.
+Destructive relocation does not repair a self-pointer, an interior pointer
+into the source, or an address registered with an external API. Mark a type
+whose correctness depends on a stable address `[norelocate]`; then every
+relocation of it is a compile-time error (section 6.13). Without the
+attribute, a program that later relies on such stale addresses has undefined
+behavior. HUC infers no such restriction and provides no custom relocation
+hook.
 
 ### 6.5 Destruction order
 
@@ -1913,13 +1947,18 @@ materialize a temporary or make `&make_text()` valid.
 `copy expression` requests a distinct logical value.
 
 - For a Basic type, it performs the ordinary copy.
-- For an Advanced structure, it calls a method with the effective signature
-  `fn clone() -> T`.
+- For an Advanced structure, it calls the type's `copy` method, with the
+  effective signature `fn copy() -> T`. The method is written by the user or
+  generated (below).
 - For an Advanced array, it copies each element directly into the matching
   destination slot, in increasing index order; every element must support
-  `copy` (section 4.7.7). The array needs no user-written `clone` method.
-- For a raw pointer, it copies the address and never clones the pointee;
+  `copy` (section 4.7.7). The array needs no `copy` method.
+- For a raw pointer, it copies the address and never copies the pointee;
   copying a null raw pointer is valid.
+
+A type **supports copying** when it is Basic, when it is an Advanced structure
+with a written or generated `copy` method, or when it is an array whose
+element type supports copying.
 
 ```huc
 struct Text {
@@ -1928,7 +1967,7 @@ struct Text {
     fn init(mut bytes: ByteArray) : bytes = bytes {
     }
 
-    fn clone() -> Text {
+    fn copy() -> Text {
         return Text(copy this->bytes);
     }
 }
@@ -1937,32 +1976,122 @@ let a: Text = make_text("hello");
 let b: Text = copy a;
 ```
 
-Declaring `clone` makes the type Advanced, even if all fields are Basic. The
-explicit syntax exposes that logical copying may allocate or execute arbitrary
-code.
-Source code cannot call `clone` directly or take its address; it requests the
-operation with `copy`. Destructive relocation itself remains fixed,
-non-overloadable, and non-failing. Full assignment, unchecked self-aliasing, and
-backend rules are specified in
-[Value Semantics and Special Operations](value-semantics.md).
+Declaring a `copy` method makes the type Advanced, even if all fields are
+Basic. The explicit syntax exposes that logical copying may allocate or
+execute arbitrary code. Source code cannot call the `copy` method directly or
+take its address; it requests the operation with a `copy` expression.
+Destructive relocation itself remains fixed, non-overloadable, and
+non-failing. Full assignment, unchecked self-aliasing, and backend rules are
+specified in [Value Semantics and Special Operations](value-semantics.md).
 
-A valid `clone` returns an independent logical duplicate: the original and
-its copy must each be destructible without invalidating the other. Owned
+A valid `copy` method returns an independent logical duplicate: the original
+and its copy must each be destructible without invalidating the other. Owned
 resources must be duplicated or given another valid ownership share. This is
-HUC's meaning of deep cloning; it need not copy every reachable object.
+HUC's meaning of deep copying; it need not copy every reachable object.
 Raw `T*` fields are non-owning and normally copy only their addresses.
 Deliberately shared or interned state may remain shared.
 
-`clone` must not modify the source object's inline storage or leave it invalid.
-It may allocate and update external bookkeeping, such as a reference count,
-through an explicitly writable observer. The compiler does not prove that
-custom code follows these rules.
+A `copy` method must not modify the source object's inline storage or leave
+it invalid. It may allocate and update external bookkeeping, such as a
+reference count, through an explicitly writable observer. The compiler does
+not prove that custom code follows these rules.
 
-For `let b: T = copy a`, the clone result is built in `b` under section 6.2.
-For Advanced `b = copy a`, retain the source, destroy old `b`, then clone into
-its slot under section 6.3. Every valid evaluated Advanced `copy` calls
-`clone`; there is no same-storage exception that skips it. Self-copy assignment
-is undefined behavior, not an exception to the clone contract.
+For `let b: T = copy a`, the copy result is built in `b` under section 6.2.
+For Advanced `b = copy a`, retain the source, destroy old `b`, then copy into
+its slot under section 6.3. Every valid evaluated Advanced `copy` calls the
+`copy` method; there is no same-storage exception that skips it. Self-copy
+assignment is undefined behavior, not an exception to the copy contract.
+
+**Generated copy method.** The compiler generates a `copy` method for a
+concrete structure only when:
+
+1. the structure is Advanced independently of the generated method;
+2. it declares neither a `copy` method nor `drop`;
+3. it is not marked `[nocopy]`, and not explicitly marked `[norelocate]`;
+4. every named field supports copying.
+
+The generated method initializes the destination's named fields in
+declaration order. Basic fields copy; Advanced fields are copied directly into
+the matching destination field. It does not call a constructor, rerun
+declaration initializers, or copy into a temporary and then relocate.
+Unwritten Basic storage follows the existing aggregate-copy rules, and unnamed
+bit-field padding is not a separate field. A Basic structure stays Basic, and
+a written `init` does not suppress generation. For a generic structure, the
+rules apply to each selected concrete body; they are not specialization
+predicates.
+
+```huc
+struct Packet {
+    let tag: i32;
+    let payload: HeapText; // HeapText has a copy method
+}
+
+let duplicate: Packet = copy packet; // generated copy method
+```
+
+Having no `drop` does not prove that field-wise copying is correct. A
+structure whose raw pointer refers into one of its own fields, such as a view
+into an owned buffer, needs a written `copy` method or `[nocopy]`. The compiler
+attempts no ownership or alias proof.
+
+**`[nocopy]`.** `struct [nocopy] S` makes `S` move-only on purpose. The
+attribute takes no arguments and applies only to structure declarations. The
+type is Advanced even when all its fields are Basic, so ordinary binding moves
+it. No `copy` method is generated, a written one is an error, and a `copy`
+expression on the type is rejected. A structure with a `[nocopy]` field gets
+no generated method, because that field does not support copying.
+
+```huc
+struct [nocopy] UniqueTicket {
+    let value: u64;
+}
+```
+
+A written `drop` also prevents generation, because a field-wise copy would
+duplicate whatever `drop` releases. Adding or removing copy support changes a
+public type's copying contract, as changing its category does.
+
+**Query.** `is_copyable<T>()` takes a complete runtime object type and no
+value operands, and returns a constant `bool`. It is true exactly when `T`
+supports copying. It is false for a `[nocopy]` type and for an Advanced
+structure with no written or generated `copy` method. A generic body is
+checked for each specialization (section 9.5). A generic type with a `drop`
+can therefore wrap its written `copy` method in an `if1`, so that only the
+specializations whose `T` supports copying have one:
+
+```huc
+struct Tracked<T: auto> {
+    let mut value: T;
+    let live: mut u32*;
+
+    fn init(mut value: T, live: mut u32*) : value = value, live = live {
+        *live += 1;
+    }
+
+    if1 (is_copyable<T>()) {
+        fn copy() -> Tracked<T> {
+            return Tracked<T>(copy this->value, this->live);
+        }
+    }
+
+    if1 (is_default_initializable<T>()) {
+        fn reset() mut -> void {
+            let mut fresh: T;
+            this->value = fresh;
+        }
+    }
+
+    fn drop() mut -> void {
+        *this->live -= 1;
+    }
+}
+```
+
+Without the first `if1`, `Tracked<File>` is invalid when `File` does not
+support copying, because its `copy` body is checked. With it, that
+specialization has no `copy` method, and a `copy` of it is rejected where it
+is written. The second `if1` does the same for a `T` that cannot be
+default-initialized.
 
 #### 6.6.1 Taking a value while keeping its source live
 
@@ -2058,18 +2187,18 @@ Type checking and initialization follow the same rules as `let local: T = value`
 
 - a Basic value is copied and its source remains active;
 - an eligible Advanced source is relocated, with the usual `mut` and source
-  cleanup rules; `copy source` explicitly requests cloning into the slot;
+  cleanup rules; `copy source` explicitly requests copying into the slot;
 - a direct `T(arguments)` expression constructs in the supplied slot, so
   `init` observes its final address. A direct function-result initializer
   likewise uses that slot as its result destination under section 6.2,
-  including through nested direct return calls or clones without inlining.
+  including through nested direct return calls or copies without inlining.
 
 The intrinsic evaluates the destination pointer once, prepares initializer
 inputs using the Advanced-assignment rules of section 6.3 (including array
 literals and selected conditional arms), then ends any old lifetime in the
 slot without cleanup. No old `drop` or field cleanup runs. Enclosing objects,
 such as a containing structure or backing byte array, remain alive. It then
-constructs, calls, clones, copies, or relocates into the slot and returns
+constructs, calls, copies, or relocates into the slot and returns
 `void`. The slot is live on normal completion.
 
 `construct_at(&item, Item(item.id))` reads the scalar argument before ending
@@ -2084,7 +2213,7 @@ Examples, each assuming `slot` is inactive before the call:
 ```huc
 construct_at(slot, File(handle)); // direct construction in slot
 construct_at(slot, existing); // Advanced transfer; existing requires binding mut
-construct_at(slot, copy existing); // explicit clone into new storage
+construct_at(slot, copy existing); // explicit copy into new storage
 construct_at(number_slot, 42); // Basic initialization; number_slot is mut i32*
 ```
 
@@ -2184,9 +2313,9 @@ known; HUC0 accepts the same queries on concrete types without staging.
 operands, and returns a constant `bool`. It is true for Basic types and false
 for Advanced types. An array has the category of its element type. The query
 reports the existing inferred category; it does not declare a trait, opt a
-type into copying, or generate `clone`. HUC1 can use `if1 (is_basic<T>())`
-to end a copied Basic source's lifetime without trying to destroy an
-extracted Advanced source.
+type into copying, or generate a `copy` method. HUC1 can use
+`if1 (is_basic<T>())` to end a copied Basic source's lifetime without trying
+to destroy an extracted Advanced source.
 
 #### 6.7.5 Byte arrays as object storage
 
@@ -2213,15 +2342,17 @@ any payload objects. Relocating an enclosing Advanced value, however,
 transfers the live payload objects at the same offsets into the destination
 and ends their source lifetimes without cleanup. Unwritten bytes may travel
 with the representation. No runtime payload map, clearing, or scan is needed.
-Pointers into the old storage are not updated.
+Pointers into the old storage are not updated. Relocating an enclosing object
+that carries a live payload of a `[norelocate]` type is undefined behavior
+(section 6.13).
 
 Byte-array cleanup does not destroy payload objects. Ending its lifetime ends
 any remaining payload lifetimes without cleanup, potentially leaking resources.
 The owning container must destroy or extract the live elements before that
 happens. A length or tag is a library responsibility. Its `drop` normally
-handles this and makes the containing type Advanced; even an empty `drop`
-prevents accidental Basic copying but does not clean up payloads. A container's
-`clone` constructs fresh storage and explicitly copies live elements.
+handles this and makes the containing type Advanced; a container that needs no
+cleanup can use `[nocopy]` to prevent accidental Basic copying. A container's
+`copy` method constructs fresh storage and explicitly copies live elements.
 
 One aligned slot plus a presence flag supports an inline optional. Separate
 byte arrays plus a tag support sum types without overlapping alternatives.
@@ -2307,34 +2438,40 @@ Values and pointers do not implicitly convert to each other. Use `&value`
 to observe addressable inline storage and `*pointer` to access a live
 pointee. Binding from `*pointer` copies a Basic value or relocates an Advanced
 value. Advanced extraction requires `mut T*` and programmer-managed source
-cleanup as described in section 6.4. Explicit `copy *pointer` may clone a
+cleanup as described in section 6.4. Explicit `copy *pointer` may copy a
 copyable pointee without making it inactive.
 
 ### 6.12 Checked use of relocated roots
 
 Before an Advanced local or by-value parameter is used, its tracked state
-must be Active. This is a required compile-time check in every compilation
-mode, not an optional warning. It follows direct transfers and control flow;
-it does not track lifetime changes through raw-pointer aliases.
+must be Active. The same holds for a Basic one after a `drop` or `forget`
+statement names it (section 7.6). This is a required compile-time check in
+every compilation mode, not an optional warning. It follows direct transfers
+and control flow; it does not track lifetime changes through raw-pointer
+aliases.
 
 #### Tracked state
 
-The compiler tracks the state of every Advanced local and by-value parameter
-at each point of a runtime function. For a constructor, this includes its
+The compiler tracks the state of every Advanced local and by-value parameter,
+and of every Basic one that a `drop` or `forget` statement names, at each
+point of a runtime function. For a constructor, this includes its
 initializer entries, which run in field declaration order before the block.
 `this` is a raw pointer and is not tracked; relocating `*this` is pointer
 extraction (section 6.4). Based on the transfers it tracks, the analysis assigns
 one of these states:
 
 - **Active**: the value is live on every path considered;
-- **Inactive**: the value has been transferred away on every path considered;
-- **MaybeActive**: some paths leave the value live and others transfer it away.
+- **Inactive**: the value has been transferred away, or ended by `drop` or
+  `forget`, on every path considered;
+- **MaybeActive**: some paths leave the value live and others transfer or end
+  it.
 
 Initialization, parameter binding, and assignment of a whole new value make
 the place Active. Direct relocation from the place makes it Inactive, including
 when its destination is indirect: a possible alias no longer adds a defined
-no-op path. Where control-flow paths with different states meet, the place is
-MaybeActive. During assignment, source transfer is recorded before destination
+no-op path. A `drop` or `forget` statement also makes it Inactive. Where
+control-flow paths with different states meet, the place is MaybeActive.
+During assignment, source transfer is recorded before destination
 activation. Thus `x = x` leaves the tracked root Active, although its execution
 is undefined for an Advanced value; `x = copy x` likewise ends with Active
 bookkeeping without making its execution valid.
@@ -2517,6 +2654,127 @@ behavior (sections 8.1 and 14). Pointer extraction (section 6.4) does not update
 aliased local's tracked state, so even a later use of that local by name can
 escape this check and have undefined behavior. The check is not a borrow
 checker and does not make HUC memory-safe.
+
+### 6.13 Non-relocatable types
+
+`struct [norelocate] S` declares that a live `S` is never destructively
+relocated. It stays in its construction storage until its lifetime ends. It
+may still be mutated, explicitly destroyed, or replaced by a new object at the
+same address. The attribute takes no arguments and applies only to structure
+declarations.
+
+```huc
+struct [norelocate] SelfLinked {
+    let value: i32;
+    let mut self: SelfLinked*;
+
+    fn init(value: i32) : value = value {
+        this->self = this;
+    }
+
+    fn copy() -> SelfLinked {
+        return SelfLinked(this->value);
+    }
+}
+
+fn make_linked(value: i32) -> SelfLinked {
+    return SelfLinked(value);
+}
+```
+
+**Category and propagation.**
+
+- An explicitly non-relocatable structure is Advanced, even if all its fields
+  are Basic. Otherwise an ordinary binding would silently copy it.
+- A structure with an inline non-relocatable field is non-relocatable.
+- An array of a non-relocatable element type is non-relocatable.
+- Pointers do not propagate the property: `SelfLinked*` stays Basic, and an
+  owner holding only a pointer to such an object stays relocatable.
+- The property applies to the whole type, even when an inline container
+  currently holds no such elements.
+
+**Relocation is an error.** Every relocation of a non-relocatable type is a
+compile-time error, whatever the source (local, parameter, temporary, `*p`,
+field, element, or `take`) and whatever the destination. Optional inlining or
+named return optimization cannot make such a program valid. Direct results
+still work, because they build in their final destination (section 6.2):
+
+```huc
+let mut first: SelfLinked = make_linked(1);
+let second: SelfLinked = copy first;
+let pair: SelfLinked[2] = [SelfLinked(2), make_linked(3)];
+let selected: SelfLinked = ready ? SelfLinked(4) : make_linked(5);
+let number: i32 = (ready ? SelfLinked(6) : make_linked(7)).value;
+```
+
+These need relocation and are errors:
+
+```huc
+let third: SelfLinked = first;
+let fourth: SelfLinked = take first;
+let invalid: i32 = (ready ? first : second).value;
+```
+
+A function cannot return an existing non-relocatable local by value; return a
+constructor, a direct call, or a `copy` instead. By-value parameters stay
+allowed: a direct-result argument is constructed in the parameter's storage,
+and the calling convention must not insert a hidden relocation. Passing an
+existing named value without `copy` is an error. A non-relocatable parent may
+still mutate, replace, or extract its relocatable fields under the existing
+rules.
+
+**Assignment and manual storage.** Destroy-first assignment replaces the
+value in place: `first = SelfLinked(8)`, `first = make_linked(9)`, and
+`first = copy second` end the old object and build a new one in the same
+storage. `first = second` is an error. `construct_at` and `destruct_at` work as
+usual, and `drop` and `forget` (section 7.6) end a non-relocatable local
+without moving it.
+
+**Generated inits and copy methods.** A generated memberwise init that would
+relocate a parameter into a non-relocatable field is not generated. The
+structure stays valid, other generated inits remain, and a written init can
+construct the field directly with an entry such as `item = SelfLinked(value)`.
+An explicitly `[norelocate]` structure gets no generated `copy` method,
+because copying its fields would copy its address-dependent state. A
+structure that is non-relocatable only through a field may still get one; it
+copies that field with the field's own `copy` method. `[norelocate]` does not
+forbid a written `copy` method; add `[nocopy]` to forbid copying too:
+
+```huc
+struct [norelocate, nocopy] Mutex {
+    let mut native: pthread_mutex_t; // used by address; never moved or copied
+}
+```
+
+**Byte storage and foreign code.** A byte array's type does not reveal its
+payloads. Relocating an enclosing object that carries a live payload of a
+non-relocatable type is undefined behavior; the evaluator diagnoses it. An
+inline owner of such payloads should itself be `[norelocate]`. An owner of
+allocated storage may move its handle but must not relocate the payloads.
+Foreign code that moves storage is the caller's responsibility, and C types
+are never implicitly non-relocatable.
+
+**Query.** `is_relocatable<T>()` takes a complete runtime object type and no
+value operands, and returns a constant `bool`. It is false exactly for
+non-relocatable types, including through propagation, so it is true for
+pointers to them. It reports the static property: a byte array stays
+relocatable even when it holds a non-relocatable payload. A library that must
+relocate can report a clear error:
+
+```huc
+import1 compiler;
+
+fn relocate_one<T: auto>(destination: mut T*, source: mut T*) -> void {
+    if1 (!is_relocatable<T>()) {
+        @compiler::error("relocate_one requires a relocatable element type");
+    } else {
+        construct_at(destination, *source);
+    }
+}
+```
+
+The property needs no runtime bit. It must survive HUC0 printing, and making a
+public type non-relocatable breaks clients that relocate it.
 
 ## 7. Functions and control flow
 
@@ -2707,6 +2965,91 @@ f([1, 2, 300]); // with f(x: u8[3]) and f(x: i32[3]): 300 doesn't fit u8, so i32
 f([1, 2]);      // with only f(x: i32[3]): wrong count, error
 ```
 
+### 7.6 Ending a local early: `drop` and `forget`
+
+```huc
+drop value;
+forget value;
+```
+
+Both are statements. Each ends a local's lifetime before its scope ends and
+makes it Inactive (section 6.12):
+
+- `drop` runs the complete cleanup now, as the scope end would have: the
+  type's `drop` method, then fields in reverse declaration order, or array
+  elements in decreasing index order.
+- `forget` runs no cleanup: no `drop` method, and no field or element cleanup.
+  It does not relocate, clear, or free anything, so owned resources leak
+  unless their ownership moved elsewhere.
+
+Neither moves the object, so both work on a non-relocatable local. The `drop`
+statement is the only source form that runs a destructor directly; calling the
+`drop` method stays forbidden (section 4.6.1).
+
+```huc
+fn update(mutex: mut Mutex*, path: c8*) -> void {
+    let mut guard: LockGuard = LockGuard(mutex);
+    let mut file: File = open_locked(path);
+    write_header(&file);
+    drop guard;        // unlock now; file stays open
+    write_body(&file); // runs without holding the lock
+}                      // file closes here; guard is already Inactive
+
+fn hand_off(mut file: File) -> void {
+    let handle: i32 = file.handle;
+    forget file;          // file's drop never closes the handle
+    adopt_handle(handle); // adopt_handle now owns it
+}
+```
+
+The rules for both statements:
+
+- The operand is one named, mutable local or by-value parameter whose tracked
+  state is Active. It is not `*p`, a field, an element, a temporary, or a
+  global; those keep the unchecked `destruct_at` and `construct_at`. Fixed,
+  Inactive, and MaybeActive operands are errors, so a fixed binding stays live
+  for its whole scope.
+- A Basic operand runs no code. The binding still becomes Inactive, so a later
+  use is an error until it is assigned again. Generic code can therefore write
+  `drop value;` for any `T`.
+- An array operand ends all its elements.
+- Either statement may appear in a runtime branch or loop body. At a join it
+  counts as a whole-root transfer: the root becomes MaybeActive, scope cleanup
+  runs only on paths where it is still Active, using a drop flag where needed,
+  and whole-root assignment can reinitialize it. They are statements, so they
+  cannot appear inside a condition or other expression.
+- In compiler execution, both apply to function-local `let1 mut` values with
+  ordinary scoped cleanup, but not to module-level `let1` values or
+  expression parameters. `forget` does not relax section 12.3: an unreachable
+  live compiler allocation is still a leak.
+
+```huc
+let mut file: File = File(handle);
+
+if (done_early) {
+    drop file; // closes the file on this path only
+}
+
+inspect(&file); // error: file is MaybeActive here
+```
+
+The root object must actually still be live. This is an unchecked
+precondition, because the tracked state does not see changes made through
+pointers:
+
+```huc
+destruct_at(&file); // Ends the actual lifetime; tracked state stays Active.
+forget file;       // Undefined behavior: the root is already dead.
+```
+
+`drop file;` there is undefined behavior too. No runtime check is required;
+the evaluator diagnoses an executed violation.
+
+The two statements differ for a live root with an extracted field
+(section 6.4). `forget` cancels the root's remaining cleanup without touching
+the inactive field. `drop` would destroy that field, which is undefined
+behavior, so restore it first.
+
 ## 8. Lifetime and safety model
 
 These rules define HUC's safety limits; they are language requirements, not
@@ -2767,6 +3110,13 @@ self-assignment, overlap, or destroy-first dependencies. Such warnings do not
 make the unchecked assignment cases required errors. Debug modes may insert
 checks. These facilities must not be presented as a language guarantee and
 their absence must not change the meaning of a well-defined program.
+
+Implementations are encouraged to warn when `?:` selects a named Advanced
+local or parameter into a temporary that is only observed through member
+access or discarded, as in `(c ? a : b).size()` (section 5.1). The warning
+should suggest `(c ? &a : &b)->size()`, or a named binding when consumption is
+intended. Initializing, returning, or passing an owned result through `?:`
+gets no such warning.
 
 The section 6.12 check on named locals and parameters is not one of these
 optional facilities. It is required in every compilation mode.
@@ -3848,7 +4198,8 @@ also absent from the active state. Active entries always take priority. Mark
 fallback entries read-only even if their types permit mutation. Direct writes,
 writes through aliases or methods, relocation out, construction, destruction,
 and deallocation of such entries are diagnostics. Explicit copying is allowed
-when the type supports it and its clone does not modify fallback storage.
+when the type supports it and its `copy` method does not modify fallback
+storage.
 
 Fallback entries are not owned by the working state: do not forward them as
 import-merge entries or destroy them during that state's teardown. Retain the
@@ -3884,9 +4235,12 @@ evaluator diagnostics still apply to the resulting state, including stale
 pointers and invalid ownership created by user code.
 
 Saving and merging state are compiler operations, not HUC value operations.
-They do not call `clone`, run `drop`, relocate the dependency's source, or
-require a type to be copyable. The compiler may share unchanged representations
-internally, provided writes remain isolated and aliases keep their meaning.
+They do not call a `copy` method, run `drop`, relocate the dependency's
+source, or require a type to be copyable. A `[norelocate]` value keeps its
+logical identity across them; the implementation may move host storage only
+when HUC code cannot observe the move. The compiler may share unchanged
+representations internally, provided writes remain isolated and aliases keep
+their meaning.
 
 #### Cleanup
 
@@ -4773,8 +5127,9 @@ The evaluator supports the runtime language, including:
 
 - `bool`, every integer type, `c8`, `f32`, and `f64`, with `void` results;
 - structures, Basic and Advanced: construction with `init`, fields, methods,
-  `copy`, destructive relocation, `drop`, and the checked-use rules of
-  section 6.12;
+  `copy`, destructive relocation, `drop`, the `drop` and `forget` statements,
+  and the checked-use rules of section 6.12. A `[norelocate]` value keeps a
+  stable logical identity, not a host address;
 - raw pointers to compile-time objects: `&`, `*`, `->`, `null`, equality, and
   arithmetic and ordering within one object or allocation;
 - arrays, byte-array backing storage, `construct_at`, `destruct_at`, `take`,
@@ -4803,6 +5158,8 @@ diagnostic with the evaluation call stack, never host undefined behavior:
   whole-aggregate representation copies can carry unwritten bytes;
 - destroying an inactive slot; constructing over a live value is allowed
   without cleanup, but leaked resources still follow section 12.3;
+- relocating an enclosing object that carries a live `[norelocate]` payload,
+  and `drop` or `forget` of a local whose lifetime already ended;
 - deallocation errors and leaks (section 12.3).
 
 An ordinary function cannot name `let1 mut` storage, which has no run-time
@@ -5051,6 +5408,10 @@ The following list is representative rather than exhaustive:
 - writing actually fixed storage through a cast pointer or integer-address round trip;
 - raw slot manipulation that violates ownership or cleanup obligations;
 - `destruct_at` on an inactive slot;
+- relocating an enclosing object that carries a live payload of a
+  `[norelocate]` type (section 6.13);
+- `drop` or `forget` on a local whose actual lifetime already ended, or `drop`
+  on one with an inactive field (section 7.6);
 - breaking a `noalias` parameter's rule (section 4.9.10);
 - a foreign function declared with result `never` returning normally;
 - reading uninitialized storage;
@@ -5097,10 +5458,15 @@ The closest C++ equivalents are conceptual, not the backend representation:
 | `mut T*` | `T*` for a non-pointer `T` |
 | `&value` | `std::addressof(value)` or `&value` |
 | `ptr_as<usize>(pointer)` | A raw data pointer converted to `std::uintptr_t` |
-| `copy a` | clone/copy construction, explicitly selected |
+| `copy a` | Copy construction, explicitly selected |
 | Advanced binding from `*p` | Move construction from `std::move(*p)`, except HUC ends the source lifetime and requires manual source cleanup management |
 | Advanced binding from `value.field`, `p->field`, or `items[i]` | Move construction from the corresponding `std::move(place)`, except HUC ends the source lifetime without cancelling enclosing cleanup |
 | `take place` | For Advanced values, extract and default-construct a replacement, conceptually like exchange; Basic values instead copy without resetting the source |
+| `fn copy() -> T` | A copy constructor that runs only for an explicit `copy` |
+| `struct [nocopy] S` | `S(const S&) = delete;` |
+| `struct [norelocate] S` | `S(S&&) = delete;`, with guaranteed elision for direct results |
+| `drop x;` | No direct equivalent; like ending `x`'s scope early |
+| `forget x;` | No direct equivalent; like `release()` on an owning handle, for a whole object |
 | `construct_at(p, value)` / `destruct_at(p)` | `std::construct_at` / `std::destroy_at`, with HUC initialization and cleanup rules |
 | `T[N]` | A fixed array value, conceptually like `std::array<T, N>` |
 | Aligned `u8[N]` / `c8[N]` backing storage | Byte storage with manually managed payload lifetimes |
@@ -5179,7 +5545,7 @@ struct Widget {
     fn init(value: i32) : value = value {
     }
 
-    fn clone() -> Widget {
+    fn copy() -> Widget {
         return Widget(this->value);
     }
 }

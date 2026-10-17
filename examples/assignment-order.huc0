@@ -9,7 +9,7 @@ fn record(event: u64) -> void {
     events = events * 10 + event;
 }
 
-// Events: 1 = argument, 2 = drop, 3 = factory, 4 = init, 5 = clone.
+// Events: 1 = argument, 2 = drop, 3 = factory, 4 = init, 5 = copy.
 struct Probe {
     let value: i32;
 
@@ -18,7 +18,7 @@ struct Probe {
         record(4);
     }
 
-    fn [noinline] clone() -> Probe {
+    fn [noinline] copy() -> Probe {
         record(5);
         return Probe(this->value);
     }
@@ -78,7 +78,7 @@ fn main() -> i32 {
     }
 
     events = 0;
-    current = identity(copy source); // Inner clone completes before old drop.
+    current = identity(copy source); // Inner copy completes before old drop.
     if (events != 542 || current.value != 10) {
         return 6;
     }
@@ -91,7 +91,7 @@ fn main() -> i32 {
     }
 
     events = 0;
-    current = copy make(11); // Source temporary survives through clone, then drops.
+    current = copy make(11); // Source temporary survives the copy, then drops.
     if (events != 342542 || last_constructed != ptr_as<usize>(&current)) {
         return 8;
     }
@@ -102,7 +102,7 @@ fn main() -> i32 {
         return 9;
     }
 
-    // Prepare the complete clone before replacing its source.
+    // Prepare the complete copy before replacing its source.
     events = 0;
     let mut replacement: Probe = copy current;
     current = replacement;
