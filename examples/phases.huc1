@@ -13,7 +13,7 @@ if1 (BuildDiagnostics) {
         return "diagnostic";
     }
 } else {
-    this skipped body is deliberately not valid HUC !!!
+    &self skipped body is deliberately not valid HUC !!!
 }
 
 // Phase control inside a type selects fields before its runtime layout is checked.
@@ -47,8 +47,8 @@ struct CountedCell<T: auto, Count: usize> {
     let mut value: T;
     let count: usize = Count;
 
-    fn capacity() -> usize {
-        return this->count;
+    fn capacity(&self) -> usize {
+        return self.count;
     }
 }
 
@@ -116,7 +116,7 @@ fn answer<>() -> i32 {
 }
 
 // At module scope, the generated declaration is inserted after this item.
-#compiler::module("fn generated_answer() -> i32 { return 42; }");
+@compiler::module("fn generated_answer() -> i32 { return 42; }");
 
 fn main() -> i32 {
     let left: i32 = 3;

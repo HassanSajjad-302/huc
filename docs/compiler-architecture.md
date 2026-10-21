@@ -22,10 +22,13 @@ Key terms:
   contains an active HUC value that may need cleanup.
 - **Program mode**: prepare code for the HUC0 program.
 - **Evaluation mode**: prepare a private function body for the compiler to run.
-- **Generation site**: the position of a `#` statement in the code being prepared.
-- **Insertion point**: the forward-only destination selected for generated code.
+- **Generation site**: the position of a `#` statement or direct module action
+  in the code being prepared.
+- **Insertion point**: the local site or module-anchor position selected for
+  generated code. Printed placement does not grant earlier source visibility.
 - **Module insertion anchor**: the original requesting top-level declaration;
-  its completion releases pending module output, including nested requests.
+  module-after output waits for its completion. Module-before declarations
+  print before it, with bodies after it; nested requests inherit the anchor.
 - **Module**: one source file, with its own namespace, name lookup, and
   private declarations; not a separate compilation unit.
 - **Visible module**: a module that a file may name: itself, its direct
@@ -33,7 +36,7 @@ Key terms:
 - **Compiler state**: the active module's values and lifetime records for
   logical compiler objects; imports merge completed states without changing them.
 - **Translation unit**: a root source and its once-processed import closure.
-- **Origin**: the `#` site and the call chain that built a generated span.
+- **Origin**: the generation site and the call chain that built a generated span.
 
 ## 1. Recommendation
 
@@ -505,8 +508,9 @@ typedef struct HucFunctionDecl {
 that is prepared on request. `HUC_PHASE_META` denotes compiler-only storage and
 compiler API entities, not a separate user function/type keyword. Determine
 runtime eligibility from the requested signature, fields, and retained body.
-These internal AST categories are not keyword suffix numbers. Record generic-header presence independently of binder count
-so a zero-binder `fn f<>()` remains distinguishable from ordinary `fn f()`.
+These internal AST categories are not keyword suffix numbers. Record
+generic-header presence independently of binder count so a zero-binder
+`fn f<>()` remains distinguishable from ordinary `fn f()`.
 
 Use stable arena-allocated IDs rather than pointers as persistent cross-pass
 identities. C pointers may be used temporarily within a pass, but definition records and
@@ -522,10 +526,10 @@ for the body.
 
 Only a selected `if1` branch, a reached phase-loop body, a chosen family
 body is then lexed and parsed. Register angle-header `fn` and `struct`
-headers without preparing their bodies, including zero-binder primaries. Ordinary `fn` bodies are parsed and
-prepared in program mode when encountered, including uncalled functions. A
-skipped body may contain invalid HUC; the scanner may report only that it
-cannot find the outer closing delimiter.
+headers without preparing their bodies, including zero-binder primaries.
+Ordinary `fn` bodies are parsed and prepared in program mode when encountered,
+including uncalled functions. A skipped body may contain invalid HUC; the
+scanner may report only that it cannot find the outer closing delimiter.
 Ordinary HUC0 code selected for output is kept by the translation-unit residualizer.
 The HUC0 translator checks it again after it has been written to a file.
 
@@ -540,16 +544,18 @@ literal arguments in HUC0. Omit a list that ends up empty.
 The syntax tree also has a phase-expression item node for standalone
 `@expression;` and an insertion item node for `#expression;`, both at module,
 type-body, function, or block scope. A phase-expression item must evaluate to
-compiler `void` or `never` and inserts nothing. A compiler assignment item
+compiler `void` or `never`; direct program-mode module actions may publish
+declarations. A compiler assignment item
 node holds a module-level or type-body assignment to compiler storage, such as
 `defaults::checks = false;`; the compiler executes it in the active state,
 in source order or while the type body is prepared, and erases it. An
 insertion item's expression must produce `compiler::Code`; preparation erases
-the node, inserts the code's local part at that position, queues its module
-part, and processes inserted text before the following source. When the code
+the node and processes the local text at that position before following source.
+Separate module-action nodes queue after-output or process before-output.
+When the code
 has a hole, the following braced source block fills it. Do not check that
-block's loop context prematurely. Reject numbered syntax, `@`, and `#` in
-inserted HUC0; insertion does not start another staging pass.
+block's loop context prematurely. Parse generated HUC1 in its actual context,
+including phase items and deferred bodies, before printing residual HUC0.
 
 Ordinary `import` exposes a module's `pub` declarations of every kind, under
 their phase rules; `import1` is compiler-only; `pub import` also re-exports
@@ -588,8 +594,8 @@ for prepared source and parsed generated text:
 Name resolution uses one global declaration registry but a separate lookup
 environment per source file. A qualified name must start from a visible
 module of the file that contains it, and a declaration from another file must
-be `pub`. A later namespace section may reopen the file's own namespace, or a
-visible module's namespace only to add specializations. Default `lower`
+be `pub`. A later source namespace section may reopen only the file's own namespace.
+A foreign family specialization uses the single-declaration `specialize` prefix. Default `lower`
 applies these source rules to handwritten HUC0 too; `lower --flattened`
 skips them for one complete flattened program.
 
@@ -598,17 +604,15 @@ raw pointers. It requires constant initializers for fixed globals, supplies
 zero/null only to omitted mutable initializers, and rejects structures,
 Advanced values, runtime initialization, and global cleanup in the current design.
 
-HUC1 additionally performs phase checking, family matching, and selected-body
-preparation before printing HUC0. Queue forward module output after its original
-requesting top-level declaration and collect relevant declarations before final
-body resolution. Defer unresolved forward references until collection is complete;
-compiler evaluation needs an available checked definition. Diagnose a missing
-definition or a dependency cycle rather than inventing one from suppressed
-evaluation-mode output. An active anchor's pending declarations remain
-unavailable through every nested compiler call, regardless of which function
-queued them. A completed nested preparation does not publish them early.
-Do not silently revise a finalized lookup or compiler
-decision after an insertion; diagnose conflicting insertion.
+HUC1 performs phase checking and selected-body preparation with declaration-
+before-use lookup. Save each deferred definition's lexical environment. At a
+request, add arguments and dependent members, not unrelated caller names.
+Track incomplete types independently of declaration visibility; defer runtime
+layout checks, never early compile-time queries. Resolve ordinary overloads
+once, record target IDs, and print distinct concrete names. HUC0 has no ordinary
+overload resolution; constructor selection uses the complete init set.
+Forwards and split definitions make printed names available without replaying
+lookup. Follow the normative [declaration/preparation rules](declarations-and-preparation.md).
 
 The HUC0 translator independently reparses and checks the emitted text exactly
 as it checks handwritten HUC0. No generic HIR or specialization record crosses
@@ -642,10 +646,27 @@ decides privacy and which files may specialize a family or type. A symbol
 inserted by `#` belongs to the file of that `#`.
 
 Scopes form an explicit tree. HUC1 origin records may point back to stable
-symbol IDs, but emitted HUC0 names are ordinary text and are resolved again by
-the HUC0 translator.
+symbol IDs. HUC0 resolves ordinary text names to the same explicitly printed
+targets, never reconstructing an HUC1 overload set.
 
 ### 6.2 Canonical types
+
+Track declared/incomplete/complete states and inline-layout dependencies.
+Pointers are complete independently of their pointees. All six type queries
+reject incomplete operands during preparation. Lifecycle declarations in the
+structure determine category/copy/default-init facts; never scan ahead for impls.
+Register generic impls against an exact primary/specialization header before
+any applicable request. Process selected items sequentially. Reject captures
+of enclosing block let1 values by methods. Completion cycles report dependency
+edges rather than guessed answers.
+
+Encode receiver kind separately from ordinary parameter types. Borrowed self
+is an untracked place; owned self is a tracked first parameter. Bind it before
+other arguments and preserve final-slot construction. Mutability controls
+onward relocation/drop/forget. Pointer-owned calls use ordinary unchecked
+extraction. Reject receiver-only overloads and method/static name mixtures.
+Resolve static calls through a type, and emit self syntax in HUC0 as well.
+
 
 Types are interned: equivalent types share one canonical compiler record.
 
@@ -915,7 +936,7 @@ Replace(destination, rhs_preparation_plan)
 `ConstructInPlace` is not shorthand for “construct a temporary, then
 relocate.” When `T(arguments)` initializes a local, field, by-value parameter,
 or return result, HIR names that final place as the constructor destination.
-This preserves the final `this` address for constructors and avoids an observable
+This preserves the final `&self` address for constructors and avoids an observable
 relocation. Direct calls and Advanced copies likewise use the final result
 place, forwarding it through nested direct returns even without inlining.
 Array literals build in the final element slots. A conditional forwards the
@@ -1077,10 +1098,10 @@ not an evaluator error. Relocating an enclosing object that carries a live
 already ended, are evaluator errors. Whole-aggregate transfers carry
 unwritten bytes without typed reads. Pointer arithmetic follows
 array/allocation slots or the whole byte-storage region, including one-past
-addresses. A pointer to
-any other object behaves like a pointer into a one-element sequence. Ordering pointers into different blocks
-and converting a pointer to an integer are diagnostics. Actual `u8` and `c8`
-objects are ordinary values; viewing an object of another type through `u8*`
+addresses. A pointer to any other object behaves like a pointer into a
+one-element sequence. Ordering pointers into different blocks and converting
+a pointer to an integer are diagnostics. Actual `u8` and `c8` objects are
+ordinary values; viewing an object of another type through `u8*`
 or `c8*` remains a diagnostic until representation inspection is supported.
 This does not prohibit constructing and using typed objects in byte-array
 backing storage; that only needs target offsets and typed payload records. Integers use
@@ -1104,8 +1125,9 @@ Operations behave as follows:
   scope, tests the condition, and prepares and inserts its body once per
   iteration; after each completed iteration it evaluates the update list in
   order before testing again. Neither the binding nor its scope is emitted;
-- `#` statements insert code values under the forward insertion rules in
-  section 10, in the mode of the body being prepared.
+- `#` statements insert local code values in the mode of the body being
+  prepared; module actions require program mode and follow the anchor rules
+  in section 10.
 
 This is a small partial evaluator, not C++ template substitution. It has no
 bootstrap syntax-object, quote, splice, or structural emit value. Expression
@@ -1160,14 +1182,14 @@ assignment; their runtime requests must still reject compiler-only signatures
 and residual operations.
 
 Support local mutation, control flow, and nested calls with shared instruction
-and recursion budgets. Apply the same rules in callees, including concrete
+and the fixed 512-active-call limit. Apply the same rules in callees, including concrete
 generic `fn` bodies. Check executed operations, not merely the outer
 signature. An untaken ordinary branch may contain an unsupported operation,
 but must still pass ordinary syntax and type checking. Never invoke arbitrary
 native or foreign code. Reject accesses to runtime storage, an ordinary
 function naming `let1 mut` storage, and untracked external inputs. An ordinary
-function may change `let1` objects through pointers it receives, including
-`this`. Immutable compiler-known constants are readable and become
+function may change `let1` objects through pointers or borrowed receivers it
+receives. Immutable compiler-known constants are readable and become
 dependencies.
 
 Use target-width integer operations: unsigned overflow wraps, while signed
@@ -1179,8 +1201,8 @@ runtime execution.
 Prepare the function's phase work and `#` insertions in evaluation mode before
 executing it; never insert into its caller. Parse inserted local code into that
 private body and apply the same rules to its executed operations.
-Compile-time operations may use compiler text while preparing it. Suppress
-inserted module code; it supplies no declarations. Later program-mode
+Compile-time operations may use compiler text while preparing it. Reject
+module actions in evaluation mode; do not silently discard output. Later program-mode
 preparation must still produce and publish its module output. None of this
 permits execution of arbitrary native code.
 
@@ -1368,11 +1390,12 @@ is no new cleanup-sharing analysis. Avoid destructor work for Basic values;
 report the affected state on a cleanup failure. Stop at the first failure or
 group equivalent diagnostics without accepting a failed translation.
 
-Fix each module's names when it finishes. For declarations generated later,
+Fix ordinary module name availability when it finishes. For ordinary declarations generated later,
 record the preparations that generated them (including identical-declaration
 sharing). Such names are visible only within those preparations; state merging
-does not broaden their visibility. Evaluation-mode preparation suppresses module
-code and does not join that set.
+does not broaden their visibility. Evaluation-mode module actions are errors.
+Late specializations and impls apply prospectively under the late-request rules;
+they can make request/import order observable.
 
 Future package serialization preserves per-module state, shared logical object
 IDs, aliases, lifetime records, and existing prepared definitions. Its content
@@ -1485,16 +1508,15 @@ specializations from the files it depends on. Two that unify, with neither
 matching a strict subset of the other and no specialization for exactly
 their overlap, are a diagnostic in the finishing file. Only the selected body
 is parsed.
-Concrete generic `struct` and generic `let` specializations are printed as required by their
-retained declarations; a generic `fn` specialization is printed only when retained
-runtime code requires its definition. Print concrete definitions at their family
-declaration sites, including methods within their containing type. This is
-distinct from module code inserted with `#` in those functions, which follows
-the original program-mode request's anchor. A function-local generic `let` result therefore
-initializes on each runtime execution that reaches that declaration; staging
-never inserts a lazy runtime
-flag. Merely evaluating a generic `fn` at compile time does not require its runtime
-definition.
+Print concrete function declarations before the original requesting top-level
+item and bodies after it, before queued module-after output. Print concrete
+structures and module variables before it; move structure method bodies into
+impl blocks after it. Local generic variables stay at the family position and
+initialize each time runtime execution reaches it. Nested requests inherit
+the original anchor. The printer records deterministic concrete names and
+source-header comments; it never repeats lookup. Compiler-only use does not
+demand runtime emission. See normative section 3.5 for deferred members and
+dependency ordering.
 
 ### 9.1 Keys
 
@@ -1595,9 +1617,9 @@ source context of the file that wrote the selected definition: the family's
 file for the primary, or the owning file for a specialization. That file's
 import environment, aliases, and private declarations apply, and its `#`
 statements belong to it. Unqualified names resolve in the family's
-namespace. The concrete function keeps the family's namespace and
-declaration position in the shared translation unit.
-Its module output follows the first runtime request's anchor instead. Reopen
+namespace. The concrete function keeps the family's namespace; declarations
+and bodies follow the first runtime request's placement rules. Module actions
+use the same original anchor. Reopen
 namespace sections for that output and print canonical references; do not
 invent caller-side lookup for the function body.
 
@@ -1607,14 +1629,13 @@ The flattened output depends on the complete runtime-needed specialization
 closure and its publication order. Construct that closure afresh for each
 compilation, including requests from importing sources.
 
-## 10. Text generation and forward insertion
+## 10. Text generation and insertion
 
 The bootstrap compiler-supplied `import1 compiler` module provides the
-compiler-only `compiler::Code` type, three constructors, and `+`:
+compiler-only `compiler::Code` type, two local constructors, and `+`:
 
 ```huc
 compiler::local(text)
-compiler::module(text)
 compiler::around(before, after)
 ```
 
@@ -1629,11 +1650,11 @@ A `#` statement inserts a code value:
 #compiler::local("let mut generated: i32;");
 ```
 
-Represent a code value as an ordered list of local fragments, module fragments,
-and at most one hole marker, each with its origin. Building or joining values
-has no effect; only an insertion item inserts. Evaluate the `#` operand like an
-`@` value, then insert its local fragments at the item and queue its module
-fragments.
+Represent a code value as ordered local fragments and at most one hole, with
+diagnostic origins. Building/joining code has no effect; `#` inserts locally.
+Represent `compiler::module` and `compiler::module_before` as void compiler
+actions, allowed only in program-mode preparation. User compiler calls run in
+evaluation mode, so builders return Text for the action at the caller's site.
 
 Maintain a preparation context with mode, generation site, lexical namespace,
 body owner, original module insertion anchor, and ordered local/module queues.
@@ -1649,8 +1670,8 @@ across compiler and runtime requests.
 
 | Generation mode | Local code | Module code |
 |---|---|---|
-| Program mode | Parsed into retained code | Published after the original request's anchor |
-| Evaluation mode | Parsed into a private evaluated body | Suppressed |
+| Program mode | Parsed into retained code | Published under the action's before/after anchor rules |
+| Evaluation mode | Parsed into a private evaluated body | Action is an error |
 
 The bootstrap query `compiler::emitting()` returns
 `true` in program mode and `false` in evaluation mode, read from the active
@@ -1675,50 +1696,26 @@ parse the text before the hole, the block, and the text after the hole as
 complete items. Reject a second hole, a hole inside an expression, and other
 partial fragments or unmatched braces.
 
-In program mode, queue module code after the original module insertion anchor.
-For an ordinary `fn`, use its top-level declaration (the whole containing type
-for a method), prepared when encountered even if uncalled. A first runtime
-generic `fn` request inherits the active anchor; all nested specialization
-requests retain it. Thus `main -> A -> B` queues module code inserted in either
-function after `main`. Registering deferred bodies runs no `#`. A method
-encountered while preparing a requested generic `struct` keeps the requesting
-anchor too. A `#` at module scope anchors its own output.
+For module-after output, finish the original anchor before publishing its queue.
+An ordinary method anchors at its structure or impl; nested generic requests
+inherit the original requesting item. A module-scope action anchors itself.
+For module-before output, process text after the generating computation;
+publish names from that source point onward, then print declarations before
+the anchor and bodies after it. Reject further module generation while
+processing before-output, including through a newly requested specialization.
 
-Finish the anchor's compiler-stage work, retain the anchor declaration, then
-parse and publish module code in insertion order before the next original item.
-Inserted code uses the namespace and lexical context of its `#` site,
-independently of the anchor's namespace. Use namespace sections when these
-differ. Do not publish a nested function's output just because that nested
-preparation completed. No queue may move fragments ahead of its anchor or
-append them all at end of file.
+Generated text uses the HUC1 parser: allow phase items, families, impls, and
+specialize. Keep skipped bodies opaque, run selected compile-time items in
+order, and enforce all resource limits. Resolve canonical module paths at the
+site without import aliases; preserve aliases in the original around block.
+Enforce file ownership, privacy, and foreign-specialization module-action bans.
+An action in evaluation mode is an error. Pending output cannot satisfy a call.
+Late ordinary names are preparation-local; late specializations and impls
+apply prospectively, with the usual late-request checks. Preserve source and
+request order; do not promise import-order independence for late generation.
+See normative sections 3.4 and 4.3 for private-state let1 lifetimes.
 
-In evaluation mode, do not insert, parse, or register module code and do not
-mark it published. Neither placement supports backward insertion or modifying
-previously prepared source. Missing declarations from suppressed code diagnose
-when needed. Resolve evaluated bodies using declarations already published and
-checked. Pending code is unavailable even through another function;
-already published code is usable even by the evaluated body of the
-function that inserted it, unless it was generated after its module
-finished (section 8.6). If completing an active anchor requires evaluating
-its pending code, diagnose the dependency cycle rather than draining the queue
-early.
-
-Share HUC0 lexing/parsing and semantic rules with HUC1's inserted-code path.
-Reject numbered constructs, `import1`, `@`, and `#` in generated HUC0 during
-HUC1 preparation. Resolve generated and original source together, allowing
-module forward references but rejecting changes to finalized compiler
-decisions. A `#` belongs to the file that wrote its body; reject module code
-from a `#` in a specialization written in another file's namespace. Mark each
-generated span so that its module paths are resolved
-as canonical names, without consulting import aliases, and only through
-modules visible to the file that owns the `#` site. Generated code may name
-only `pub` declarations of other files. Declarations it inserts belong to the
-`#` site's file and are private unless the text says `pub`. A block that
-fills a hole is authored code and keeps its file's aliases. Print only
-checked program-mode output into `.huc0` artifacts; the standalone HUC0
-translator independently validates those files.
-
-Record generated-buffer spans, `#` site, module insertion anchor, namespace,
+Record generated-buffer spans, generation site, module insertion anchor, namespace,
 import chain, the call chain that built the code, specialization chain, and
 mode. Syntax nodes can have multiple spans. Diagnostics in original blocks point
 to original source; generated errors show their text and origin chain. Output
@@ -1840,9 +1837,10 @@ flow model without giving its undefined execution a meaning.
 Lower `InitializeAt` by preparing inputs, ending any old lifetime without
 cleanup, then initializing the retained indirect destination. Use the existing
 value operations, but return `void` and register no automatic cleanup for that
-slot. Do not end enclosing structure or byte-array lifetimes. Lower `DestructAt` to `Drop` of an indirect manual place with
-its required-live precondition. Do not consult or update aliased root flags,
-even for `&local`; preserve that cleanup mode through inlining. Basic
+slot. Do not end enclosing structure or byte-array lifetimes. Lower `DestructAt`
+to `Drop` of an indirect manual place with its required-live precondition.
+Do not consult or update aliased root flags, even for `&local`; preserve that
+cleanup mode through inlining. Basic
 destruction needs no runtime call but ends the pointee lifetime in HUC.
 Neither operation adds allocation/deallocation or source/pointer-clearing
 code. Invalid runtime preconditions are not required to be checked.
@@ -2509,7 +2507,7 @@ symbol hashes must be identical across processes for identical inputs.
   types giving no ownership, and the end-of-file clash check with and without
   a specialization for the overlap;
 - specialization source context: a specialization written in a type's file
-  uses that file's imports and private helpers, and module code from its `#`
+  uses that file's imports and private helpers, and a module action there
   is rejected;
 - rejection of parenthesized generic binders, removed suffix-2 spellings,
   declaration-level `if1` conditions, and mixed generic-family/ordinary-overload names;
@@ -2637,7 +2635,7 @@ failure. Run it without optimization and with optimization, retaining its
 Compile and run small programs that record:
 
 - argument evaluation and by-value parameter-binding order;
-- direct-construction `this` addresses for locals, fields, parameters, and results;
+- direct-construction `&self` addresses for locals, fields, parameters, and results;
 - temporary receivers staying live through an outer observing call, followed
   by reverse-order temporary destruction;
 - cleanup after discarded results, declaration initializers, condition
@@ -2723,8 +2721,7 @@ Compile and run small programs that record:
   emission, transitive runtime dependencies, and uncalled ordinary `fn` retention;
 - parsed generation at local, type-body, and forward module insertion points;
 - local generation in both modes, with the evaluator's checks on the prepared
-  evaluation body; suppressed module output evaluates arguments but introduces
-  no names;
+  evaluation body; module actions in evaluation mode diagnose;
 - evaluation-first/program-later preparation still publishing module output;
 - once-per-owner program publication, distinct emissions/iterations preserved,
   identical generated declarations inserted once, and other duplicates
@@ -2772,8 +2769,8 @@ Compile and run small programs that record:
 - code with a hole filled by the following block, correct loop control and
   scoping, and errors for a missing block, a second hole, or a hole inside an
   expression;
-- immutable source locations, mixed-origin syntax nodes, forward module name
-  resolution, and rejection of retroactive semantic changes;
+- immutable source locations, mixed-origin syntax nodes, explicit forward
+  declarations, and rejection of retroactive semantic changes;
 - argument-driven bindings with exact pointer permissions, no marker in the
   grammar, no binding-kind overload ranking, and ordinary runtime calls;
 - the same parameter binding as a value for `let1`/evaluator locals and as an
@@ -2795,7 +2792,7 @@ Compile and run small programs that record:
   ordinary lookup, and successful same-type shadowing without hidden bindings;
 - generated one-time bindings, repeated insertion with repeated side effects,
   and normal Advanced temporary ownership and destruction;
-- HUC1 rejection of numbered syntax in inserted text and independent HUC0
+- HUC1 preparation of generated phase syntax and independent HUC0
   rejection if such syntax is supplied directly;
 - acceptance of every successful flattened translation unit by the standalone HUC0
   translator.
@@ -2959,8 +2956,9 @@ The following should be enforced in code review and tests:
    only the active state; a saved dependency state remains unchanged.
 6. HUC1 produces written flattened HUC0; HUC0 never consumes a private HUC1
    AST or HIR.
-7. Text generation uses parsed, forward-only insertion in program mode or
-   evaluation mode; no structural-generation API is implied.
+7. Local `#` insertion works in program and evaluation modes. Module actions
+   require program mode and follow before/after anchor rules without making
+   names visible retroactively. No structural-generation API is implied.
 8. Backend output preserves HUC left-to-right argument evaluation and
    by-value parameter initialization.
 9. Source inactivity and cleanup state do not add fields to nominal value types.

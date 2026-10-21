@@ -387,7 +387,7 @@ programmer's responsibility.
 `copy expression` explicitly requests logical duplication:
 
 - a Basic type is copied;
-- an Advanced structure must have a read-only `fn copy() -> T`, written or
+- an Advanced structure must have a read-only `fn copy(&self) -> T`, written or
   generated;
 - an Advanced array is copied elementwise when its element type supports `copy`;
 - a raw pointer copy duplicates only the address.
@@ -513,10 +513,11 @@ lifetime without user code.
 The caller supplies valid storage with sufficient size and alignment and
 manages its live/inactive state. A live slot may be reused without cleanup,
 possibly leaking resources. Null pointers, overlapping source/destination
-storage, and destruction of an inactive value violate unchecked preconditions. Neither construction nor Advanced assignment
-has a self-relocation no-op. Neither intrinsic deallocates destination storage,
-nulls the pointer, or registers automatic cleanup. User constructors/destructors
-may manage their own resources.
+storage, and destruction of an inactive value violate unchecked preconditions.
+Neither construction nor Advanced assignment has a self-relocation no-op.
+Neither intrinsic deallocates destination storage, nulls the pointer, or
+registers automatic cleanup. User constructors/destructors may manage their
+own resources.
 
 Do not update an aliased root's drop flags, even for `&local`. A directly
 named Advanced source transferred into `construct_at` still becomes Inactive
@@ -597,13 +598,13 @@ struct Widget {
     let id: i32;
     let mut visits: i32;
 
-    fn init(id: i32) : id = id {
+    fn init(&mut self, id: i32) : id = id {
         // visits defaults to zero
     }
 }
 ```
 
-An `init` body has an implicit writable `this: mut T*`. All initializer entries
+An `init` declares `&mut self`; its body uses `self` and `&self`. All initializer entries
 and defaults complete before the body begins. The body may assign mutable
 fields but cannot assign a fixed field in place of its required initializer.
 
@@ -637,17 +638,18 @@ Rules:
 
 ### 5.6 Methods and destruction
 
-Methods are read-only by default. A trailing `mut` grants a writable receiver:
+Methods declare an explicit receiver; these examples borrow read-only and
+writable storage respectively:
 
 ```huc
-fn value() -> i32 { ... }
-fn increment() mut -> void { ... }
+fn value(&self) -> i32 { ... }
+fn increment(&mut self) -> void { ... }
 ```
 
 An Advanced structure may define:
 
 ```huc
-fn drop() mut -> void {
+fn drop(&mut self) -> void {
     // release non-field resources
 }
 ```
@@ -666,7 +668,7 @@ An Advanced structure may customize explicit logical copying with exactly one
 read-only method:
 
 ```huc
-fn copy() -> T {
+fn copy(&self) -> T {
     // return an independent T without modifying this
 }
 ```
@@ -726,7 +728,8 @@ short-circuit, and only the selected arm of `?:` executes.
 The conditional produces a value: selecting an Advanced local transfers it,
 even when the result is only a method receiver. Its unconsumed result is
 destroyed at the enclosing full-expression boundary. Selecting pointers with
-`(condition ? &a : &b)->method()` observes without transferring either value.
+`(condition ? &a : &b)->method()` observes without transfer when the method has
+a borrowed receiver; an owned receiver instead performs pointer extraction.
 
 The backend must initialize each typed by-value parameter before evaluating
 the next argument. Keeping only a pointer to the source expression is not
@@ -737,7 +740,7 @@ program behaves the same.
 
 ### 5.8 Runtime overloading
 
-Ordinary `fn` overloads are selected by:
+HUC1 ordinary `fn` overloads are selected by:
 
 1. exact type match;
 2. lossless built-in numeric promotion;
@@ -745,6 +748,11 @@ Ordinary `fn` overloads are selected by:
 
 User-defined implicit conversions do not participate. Values and pointers do
 not implicitly convert to each other; observing an inline value requires `&`.
+
+HUC0 admits no ordinary overload sets. Print unique selected-target names;
+constructor overloads remain, with candidate sets fixed by type completion.
+Reject receiver-only overloads, and check receiver permissions after ordinary
+parameter ranking without retrying another candidate. No ADL is performed.
 
 ### 5.9 Source syntax and formatting
 
@@ -889,8 +897,8 @@ The primary must precede its specializations. Every specialization
 must be declared in the primary's namespace, in an owning file: the file that
 declares the family, or a file that declares a type in the pattern when no
 binder comes before that type in a left-to-right reading of the pattern,
-including nested arguments. Another owning file reopens the family's
-namespace to specialize it; the family must be `pub`. When a file finishes,
+including nested arguments. Another owning file uses specialize with the
+canonical module name; the family must be `pub`. When a file finishes,
 check its specializations against the same family's specializations in the
 files it depends on: two that can match one request, with neither more
 specific and no specialization for exactly their overlap, are an error in
@@ -901,7 +909,7 @@ one afterwards is an error. The
 
 Any family may be requested from an importing source with a caller-defined
 type; no reverse import is required. A concrete definition keeps its family's
-namespace and declaration position, not separate compilation ownership. Its
+namespace, with request-anchored printing, not separate compilation ownership. Its
 body is checked in the file that wrote the selected definition: the family's
 file for the primary, or the owning file for a specialization, with that
 file's imports, aliases, private declarations, and `#` ownership. Flattened
@@ -1073,8 +1081,8 @@ Parse the selected body on request; an unused body remains opaque. Each
 compiler call prepares a fresh private body and performs its `#` insertions
 and other compiler operations again.
 Ordinary `fn` bodies are instead parsed and prepared in program mode as they
-are encountered, even if never called. Runtime forward-name checks can wait
-for declaration collection; compiler-stage work is not postponed until a call.
+are encountered, even if never called. Names must already be declared; only
+runtime completeness checks can wait. Compiler work is not postponed until a call.
 
 A compiler evaluation can call an ordinary `fn` without another `@` when the
 call meets specification section 12.1. No marker is needed: ordinary value
@@ -1186,9 +1194,9 @@ or text. Only the binding-kind metadata is available through
 
 A standalone `@expression;` is an erased phase-expression item. It is legal at
 module, type-body, function, and nested-block scope, must evaluate completely
-at translation time, and must have type `void` or `never`. It never inserts
-code; a
-`compiler::Code` result is rejected with a hint to use `#`. Every `@` call,
+at translation time, and must have type `void` or `never`. Direct module actions
+are its program-mode code-generation exception; a
+`compiler::Code` result is rejected with a hint to use `#`. Every user-function `@` call,
 including one in an initializer, argument, condition, or return expression,
 uses a private evaluation body and inserts nothing into its caller. Compiler
 intrinsics query or operate on the active preparation without a private
@@ -1244,14 +1252,14 @@ declaration. Importing one module twice in a file, by any form or alias, is a
 diagnostic, and `as _` binds no alias. A file may name only its visible
 modules (itself, its direct imports, and modules reached through `pub import`
 edges) and only `pub` declarations of other files. A later namespace section
-may reopen the file's own namespace, or a visible module's namespace only to
-add specializations. A module saves its completed compiler state for importers
+may reopen only the file's own namespace. Foreign specializations use the
+specialize prefix. A module saves its completed compiler state for importers
 to merge without changing it (section 6.8). The
 [compilation model](compilation-model.md) explains these rules with examples.
 
 A root and its imports form one translation unit. Both import forms disappear
 from flattened HUC0. Repeated `module name;` sections select or reopen naming
-scopes, preserving forward insertion across namespace boundaries; canonical
+scopes, preserving generated placement across namespace boundaries; canonical
 `a::b::name` references replace imported aliases. The first section names the
 root. Original and imported sources retain their own buffers and locations.
 The same namespace-section grammar is accepted by the standalone HUC0 parser;
@@ -1263,78 +1271,29 @@ Import cycles are rejected with the complete cycle path.
 
 ### 6.11 Text generation and generation modes
 
-Generated code is a compiler-only value of type `compiler::Code`. The bootstrap
-`compiler` module provides three constructors, and `+` joins values in order:
+`compiler::Code` holds local fragments and one optional around hole; `+`
+joins values and `#` inserts locally. Module builders return compiler::Text.
+The void actions `compiler::module(text)` and `compiler::module_before(text)`
+run directly in program-mode preparation, usually at an @ item. Every user
+compiler function runs in evaluation mode and cannot call an action.
 
-```huc
-compiler::local(text)
-compiler::module(text)
-compiler::around(before, after)
-```
+Implement the normative [generation rules](declarations-and-preparation.md#34-generated-code):
 
-A `#` statement inserts a code value where it appears:
-
-```huc
-#compiler::local("let mut generated: i32;");
-```
-
-Program mode prepares HUC0 program code; evaluation mode prepares a private
-body for compiler execution. Both run during compilation. A `#` always inserts
-into the body that contains it, in that body's mode; a compiler call prepares
-its callee separately and never inserts into its caller. The two modes are not
-different mangled function names. The bootstrap query
-`compiler::emitting()` returns `true` in program mode and `false` in
-evaluation mode, so `if1` can choose a mode-specific branch. Structural
-specialization selection does not evaluate conditions.
-
-A `#` runs while its body is prepared, once per occurrence; inside a runtime
-loop it inserts once, into the loop body. Local code takes the place of the
-`#` statement and is parsed before subsequent source. If the code has a hole,
-the next braced source block fills it, and the text around the hole and that
-block must together form complete items. Other incomplete fragments are
-rejected.
-
-In program mode, module code is queued after the **module insertion anchor**:
-the original requesting top-level declaration, or the `#` item itself at module
-scope. An ordinary `fn` is its own anchor (its containing top-level type for a
-method) and is prepared when encountered. A first runtime generic `fn` request
-inherits the active anchor; nested requests, including methods prepared inside
-a requested generic `struct`, keep it. Thus `main -> A -> B` queues module code
-after `main`, not after the deferred families or a completed private
-preparation of `B`.
-
-Inserted code uses the namespace and lexical context of its `#` site,
-independently of the anchor's namespace. Finish the anchor's compiler-stage
-work before parsing and publishing its ordered module queue, then resume the
-following source. No insertion prints before its anchor or appends all output
-to the file's end. Local code stays within the body that contains the `#`.
-
-Module paths in inserted text are canonical names: import aliases are not
-consulted for them, and the module must be visible from the file that
-contains the `#`. Inserted text may name only `pub` declarations of other
-files, and declarations it adds are private unless the text says `pub`. A
-source block that fills a hole is authored code and keeps its aliases.
-A module's names are fixed when it finishes: a declaration that one of its
-deferred bodies generates into it later can be named only by the preparation
-that generated it, or by one that generates the identical declaration
-(specification section 11.2). An evaluation inserts no module code, so it
-cannot use such a declaration; a body that needs one at compile time takes
-its own path with `compiler::emitting()`.
-
-In evaluation mode, module code is not inserted or parsed and creates no
-names. Pending code is unavailable to all evaluations until publication,
-including through nested function calls. Already published, checked code can be
-used by later evaluations, including the function whose body inserted it,
-unless it was generated after its module finished. Apart from that case,
-this is an availability rule, not an origin-based ban.
-
-HUC1 parses generated HUC0 and checks it with surrounding source. Numbered
-constructs, `@`, and `#` in inserted text are errors, not recursive staging.
-Module forward references wait for declaration collection; compiler evaluation
-needs an available checked definition. Missing definitions and
-generation/evaluation cycles diagnose, as do insertions that would change
-finalized compiler decisions. The independent HUC0 translator still checks the
-final printed artifact.
+- Module-after queues publish when the original top-level anchor completes.
+- Module-before names publish after the site computation, only from that
+  point onward; print declarations before the anchor and bodies after it.
+- Processing before-output cannot itself generate module output, directly or
+  through a new instantiation. Local generation remains allowed.
+- Ordinary methods anchor at their structure/impl; nested requests inherit
+  the original anchor. Module-scope actions anchor themselves.
+- Generated text is HUC1, including phase constructs, families, specialize,
+  and impl. Process it in order and enforce limits on recursive generation.
+- Canonical module paths, site ownership, privacy, and original-block aliases
+  follow spec section 11.2. Foreign specializations cannot emit module helpers.
+- Evaluation-mode actions fail; they are not silently suppressed. Pending
+  declarations cannot satisfy calls. Late ordinary names remain preparation-
+  local; late specializations/impls affect later requests under late checks.
+- Print resolved targets; never redo lookup after moving a definition.
 
 Publish program-mode module output once per translation unit and owning
 function or specialization. Distinct `#` statements and phase-loop iterations
@@ -1397,7 +1356,8 @@ The eventual compiler library is exposed through a versioned, inspectable
 generated interface unit that the HUC1 frontend loads before user modules—the
 language-level equivalent of an always-included header. `import1 compiler`
 binds that already loaded interface under the `compiler` name. The bootstrap
-interface declares `compiler::Code`, its three constructors, `compiler::expr`,
+interface declares `compiler::Code`, its two local constructors, the void
+`compiler::module` and `compiler::module_before` actions, `compiler::expr`,
 `compiler::is_expr_param`,
 `compiler::emitting()`, `compiler::error(message)`, `compiler::allocate`, and
 `compiler::deallocate`; later versions add the
@@ -1547,8 +1507,9 @@ build/llvm/
 ```
 
 One HUC translation unit produces an LLVM module with deterministic symbols
-for namespace-qualified declarations and overloads. Source imports do not
-create object-file boundaries. The target triple and data layout are explicit.
+for namespace-qualified concrete declarations; HUC1 overloads have distinct
+names. Source imports do not create object-file boundaries. The target triple
+and data layout are explicit.
 Object emission uses LLVM; linking is a separate driver step. Neither generated
 C headers nor an external C compiler is part of HUC lowering.
 
@@ -1945,7 +1906,7 @@ is an implementation choice, not language-level cloning.
 Enforce:
 
 - instruction limit;
-- recursion limit;
+- fixed limit of 512 active HUC calls (including preparation and cleanup);
 - allocation limit;
 - generated-byte limit;
 - specialization-depth limit;
@@ -2047,7 +2008,7 @@ Implement:
 A request from an importer may supply its own type without a reverse import.
 Substitution carries canonical identities; it does not change where body
 names are looked up, which is the file that wrote the selected definition.
-Specialization definitions retain family positions, while generated module
+Specialization placement follows the original request anchor; generated module
 output follows the original request's anchor.
 
 Acceptance:
@@ -2095,20 +2056,21 @@ Implement:
 - argument-driven value/expression bindings, exact-type deduction, unchanged
   forwarding, `compiler::is_expr_param(parameter)` available to `if1`, and
   `compiler::expr(parameter)` returning expression text during execution;
-- `compiler::Code` with `local`, `module`, and `around` constructors and `+`;
+- local `compiler::Code` with `local`, `around`, and `+`, plus void module actions;
 - `#` insertion statements, including holes filled by the next block;
 - `compiler::emitting()` and `compiler::error(message)`;
 - `compiler::allocate` and `compiler::deallocate`, with allocations that can
   persist in `let1` storage, leak checks at the end of each top-level
   evaluation and of the translation unit, and rejection of retained runtime
   calls;
-- generation modes and forward insertion points;
+- local insertion in both generation modes and program-only module actions;
 - immutable generated buffers parsed before following source;
-- ordered module output after the original request's top-level anchor;
+- ordered module output under before/after rules for the original request's
+  top-level anchor, without retroactive name visibility;
 - fresh private preparation for each compiler call, program definition records,
   once-per-owner publication, and shared identical generated declarations.
 
-HUC1 parses and checks inserted HUC0 together with original source. Reuse the
+HUC1 prepares inserted HUC1 together with original source. Reuse the
 runtime frontend rules while retaining a printable, independently checked HUC0
 boundary. A code value is built before its `#` inserts it; queued declarations
 are not visible to the call that built them. Code with a hole joins the next
@@ -2121,8 +2083,8 @@ on early exit. Cleanup must use ordinary value destruction. No range-based
 loop syntax is introduced.
 
 Program-mode preparation retains a checked body and ordered module output;
-each compiler call prepares a fresh private evaluation-mode body and suppresses
-module output without consuming publication state. A later runtime request must
+each compiler call prepares a fresh private evaluation-mode body without
+consuming publication state. Module actions in that mode are errors. A later runtime request must
 obtain the program definition even if evaluation has already succeeded.
 Repeated runtime uses do not rerun a definition's `#` insertions. Code builders
 execute on every compiler call, like other functions; insertion is the effect
@@ -2166,7 +2128,7 @@ Acceptance:
 - nested calls inside an `@` or `#` operand, and compiler API calls in code
   executing in a compiler call, need no further `@`; inside a body, `@` cannot
   read parameters or `let` locals;
-- every `@` call uses a private body and inserts nothing into its caller; a
+- every user-function `@` call uses a private body and inserts nothing into its caller; a
   standalone `@` must have type `void` or `never`, and a `compiler::Code` result is
   rejected with a hint to use `#`;
 - `fn answer<>()` with a generated local works as both `@answer()` in a value
@@ -2179,11 +2141,11 @@ Acceptance:
   even when called only at compile time or not called;
 - a `#` inserts into the body that contains it; a code builder called from
   another body inserts nothing until that body's `#`;
-- nested local/module output is forward-only and ordered; an ordinary method's
-  output follows its type, while deferred requests inherit their original anchor;
+- local output is in-place; module-after output follows the anchor and
+  module-before output uses split declarations/bodies; deferred requests inherit anchors;
 - `main -> A -> B` keeps all pending module output unavailable until after
   `main`, even to a compiler evaluation through a different function;
-- module suppression evaluates arguments but registers no names or publication;
+- evaluation-mode module actions diagnose rather than silently discarding output;
 - `compiler::emitting()` selects mode-specific `if1` branches;
   evaluation after publication can use generated declarations,
   including those generated by the evaluated function itself;
@@ -2193,8 +2155,8 @@ Acceptance:
 - code with a hole joins the following block, with correct `break` and
   `continue` handling, generated names scoped to the inserted block, and
   diagnostics for missing blocks and second holes;
-- generated HUC1 syntax is rejected by HUC1, and standalone HUC0 still rejects it;
-- forward module references resolve after collection; missing/cyclic compile-time
+- generated HUC1 is prepared by HUC1; standalone HUC0 rejects residual phase syntax;
+- names require prior declarations; missing/cyclic compile-time
   dependencies and retroactive changes diagnose;
 - diagnostics preserve mixed original/generated spans without renumbering input;
 - `compiler::error` reports user text and call/request origins in both modes;
@@ -2314,7 +2276,7 @@ Include:
 - another file, or a later evaluation, naming a declaration that a deferred
   body generated into its module after that module finished;
 - invalid lifetime operations or leaks during a state's private teardown;
-- module code from a `#` in a specialization written in another file's
+- a module action in a specialization written in another file's
   namespace;
 - malformed selected code;
 - malformed but skipped code;
@@ -2453,11 +2415,11 @@ Verify LLVM IR, compile to objects, link, and test the implemented subset:
   element types that support them;
 - `[norelocate]` types built through constructors, factories, `copy`, array
   literals, by-value arguments, and conditional temporaries, with final
-  `this` addresses at `-O0` and optimized;
+  `&self` addresses at `-O0` and optimized;
 - `drop` and `forget` on locals and parameters, in branches and loops, with
   exactly-once cleanup, reinitialization, and Basic operands;
 - manual construction from Basic, relocated Advanced, copied, constructor,
-  and function-result initializers, including final `this` address checks;
+  and function-result initializers, including final `&self` address checks;
 - construct/extract/reconstruct/destruct cycles in manually managed slots;
 - manual destruction of nested fields, unchanged pointer addresses, and
   continued use of the backing allocation after the value is destroyed;
@@ -2544,3 +2506,221 @@ because one pipeline example works.
 
 Each commit must leave existing tests passing. Generated artifacts and IDE
 state are not committed.
+
+## Declaration and preparation implementation checklist
+
+Implement the normative [declaration/preparation rules](declarations-and-preparation.md)
+in the shared frontend, staged parser, evaluator, and HUC0 printer:
+
+1. Declaration-before-use lookup and lexical environments for deferred bodies;
+   structure/function/family forwards and completion dependencies.
+2. Same-file impl registration, lifecycle declarations, sequential processing,
+   explicit receivers, static calls, and block-let1 capture restrictions.
+3. Single-declaration specialize, owning-file checks, pointer deduction with
+   exact captured-expression matching, and no ADL.
+4. Resolved-target printing, split forward/body placement, namespace sections,
+   and one-line source-header comments. Reparse every positive HUC0 artifact.
+5. Program-only module actions and generated HUC1, including late output.
+6. A semantic depth counter: first call is 1; reject entry to 513. Count all
+   HUC lifecycle calls, not intrinsic/automatic field-cleanup frames. Arguments
+   precede callee entry; preparation and cleanup remain within its frame.
+   Report five inner/five outer frames, skipped count, and initiating site.
+
+### Declaration and preparation acceptance cases
+
+These are compiler acceptance requirements, not claims of tests run by the
+documentation checker. Positive smoke sources live in
+[declarations-and-impl.huc1](../examples/declarations-and-impl.huc1) and its
+[standalone HUC0 form](../examples/declarations-and-impl.huc0).
+
+
+- incomplete and complete types: self pointers, mutual pointer references,
+  forward declarations, a never-defined opaque type used only behind
+  pointers, a structure that holds a never-defined type inline, rejected,
+  and an inline field of a later type that nothing asks about early;
+- rejected inline self fields, recursive inline arrays, and preparation-time
+  queries about incomplete types; accepted queries about pointers;
+- declaration order:
+  - a call to a later function, rejected and then fixed by a forward
+    declaration;
+  - mutual recursion through a forward declaration;
+  - an overload declared after a call, ignored by both HUC1 and printed
+    HUC0;
+  - an inline method naming a later member;
+  - a generic body calling a function declared below it but above its point
+    of call, rejected, with a note on the later declaration;
+  - a better overload declared below a generic, ignored, also when
+    `#compiler::local` inserts the call;
+  - a local inserted by `#compiler::local` in a generic body, used later in
+    that body;
+  - a method of a type argument and a specialization, each declared below a
+    generic but above its point of call, found;
+  - a local generic variable naming a local declared after its family,
+    rejected, and one reading an earlier `let1 mut` at its point of call;
+  - a compile-time call to a forward-declared function before its
+    definition;
+- function forward declarations: a repeated forward declaration, and
+  `callconv` repeated on every declaration, accepted; and, rejected, a
+  direct call to a `gpu_kernel` function above its definition, a missing
+  definition, a mismatched signature, an attribute other than `callconv` on
+  a forward declaration, and `callconv` missing from one declaration;
+- generic forward declarations: mutually recursive generic functions;
+  generic structures that point to each other; a repeated forward
+  declaration, accepted; a request before the selected definition,
+  rejected; a specialization between a forward declaration and its
+  definition, accepted; and a missing definition, a mismatched header,
+  binder defaults on a later declaration or the definition, and an
+  attribute other than `callconv` on a forward declaration, rejected;
+- direct module code: `compiler::module` and `compiler::module_before`
+  called from an `@` item and an `@` statement, with text that a builder
+  returns, each placed for its generation site; `compiler::emitting()`,
+  true at those sites and false inside the builder; a body that guards its
+  actions with `if1 (compiler::emitting())`, also called at compile time;
+  and, rejected, an action in evaluation mode: inside a builder, and in a
+  body prepared for a compile-time call;
+- generated text: module code containing a generic family, `if1`, `let1`,
+  and a call that generates more module code, processed when it is
+  published; local code containing `if1` and `#`; a generated family body
+  whose `if1` runs when it is selected; and text that generates itself
+  again, stopped by a limit;
+- `compiler::module_before`: a helper placed above a function and called
+  by it, also from a generic body; a forward declaration placed above with
+  its definition after; a structure definition with methods placed above;
+  an `impl` placing a module-level `let1` that its deferred method names;
+  a helper whose body reads a field of the current structure; code in the
+  item above the generating code, which cannot name what it placed; and,
+  rejected, placed code that generates module code directly or through an
+  instantiation it causes, and an imported generic `impl` that places a
+  `let1` in a late private view, then a deferred method that names it;
+- generated module code: a call above its insertion point, rejected; the
+  same call below it, accepted; a forward declaration that a generated
+  definition fulfills; late module output containing a specialization and
+  an `impl`, which only code after its insertion point sees; and a late
+  specialization that would change an earlier request, rejected;
+- accepted pointer-only `Links<Node>`; rejected query-bearing `Vector<Node>`,
+  including the `is_basic` method-body case and `Vector<B>` before `B`;
+- method declarations:
+  - lifecycle declarations with `impl` bodies;
+  - mutually recursive ordinary and generic methods, through a declaration
+    in the structure;
+  - a call from code between a structure and its `impl`;
+  - missing, duplicate, and mismatched definitions, rejected;
+  - an `impl` defining an undeclared lifecycle member, rejected;
+  - a body-less declaration inside a type-level `if1`, defined inside an
+    `if1` in the `impl`, and one that the `impl`'s branch leaves undefined,
+    rejected;
+  - attributes other than `callconv` on a declaration in the structure,
+    rejected;
+- `impl` order: a method calling one defined below it in its block,
+  rejected and then fixed by a declaration in the structure; a later
+  block's method unavailable to an earlier block; an ordinary method's
+  attributes evaluated once, at its header; a deferred method's attributes
+  that use its own binder, evaluated per specialization; a compiler call to
+  an `impl` method evaluating its attributes again; and a compile-time call
+  in the block to a method defined above it;
+- compile-time items in an `impl`: `if1`, `for1`, `let1`, a compiler
+  assignment, a standalone `@` item, and `#`, for a non-generic and a
+  generic target; methods they select or insert, called by later methods;
+  module code generated in the block, published after it, or before it
+  with `compiler::module_before`; and, rejected,
+  selected or inserted code that adds a field, an attribute, a body-less
+  declaration, or an undeclared lifecycle member;
+- `let1` lifetime: in an `impl` and in a structure body, a `let1` used by
+  the block's `if1` and `#`, accepted; a deferred and an ordinary method
+  naming it, rejected; an Advanced value destroyed at the closing brace; a
+  pointer to it, saved in a module-level `let1` and used after the brace,
+  rejected; and a deferred function in a module-scope `for1` that names
+  the loop's header `let1`, rejected;
+- borrowed receivers: methods with `&self` and `&mut self`, inline and in
+  an `impl`, including `init`, `copy`, and `drop`; `self.x`, `self.f()`,
+  `&self`, and `copy self`; a write through `&mut self`, accepted, and
+  through `&self`, rejected; `*self.target = 5` through a `mut i32*` field
+  in an `&self` method, accepted; a field moved out of `&mut self` and
+  refilled; a bare name that matches both a field and a module-level name,
+  finding the module-level one; and, rejected, `this`, a trailing `mut`,
+  `drop self;` and `forget self;`, a bare name that matches only a field,
+  and a compile-time method call whose receiver is an expression binding;
+- owned receivers: `self` and `mut self` methods called on a `mut` local
+  of an Advanced type, which the caller cannot use afterwards, and on a
+  Basic object, which is copied; `drop self;` and `forget self;` only with `mut self`; both
+  `p->finish()` and `(*p).finish()` as unchecked extraction from writable
+  Advanced storage; rejected fixed Advanced roots, read-only Advanced pointees,
+  and owned lifecycle receivers. Check `&self` mutability in all four forms,
+  onward transfer from fixed versus mutable owned self, receiver binding before
+  arguments (`x.consume(x.field)`), `x = x.transform()` skipping destruction
+  after an owned transfer, and final-slot direct-result/norelocate receivers;
+- static functions: calls such as `Counter::make(10)`,
+  `geo::Point::origin()`, `Box<i32>::make()`, and `T::make()` in a generic
+  body; a deferred static function declared only in an `impl`, printed
+  like a deferred method; static functions selected by `if1` and inserted
+  by `#` in an `impl`; and, rejected, `self` in a static function, a
+  static function called through an object, a method called through its
+  type, a static `init`, `copy`, or `drop`, and a name used for both a
+  method and a static function in one structure;
+- deduction and `mut`: a `mut Robot*` argument for a `T*` parameter,
+  deducing `T = Robot` with a read-only parameter; one specialization
+  shared with a caller that passes a `Robot*`; a read-only pointer for a
+  `mut T*` parameter, rejected; `P` bound to a whole pointer type, keeping
+  `mut`; and, rejected, a captured expression of type `mut Robot*` for a
+  `T*` parameter in a compiler call;
+- selected and generated `impl` blocks: one selected by a module-scope
+  `if1`, and one generated by a module-scope `@` item, whose methods code
+  below its insertion point can call; and, rejected, a generated `impl`
+  whose generation site is in another file or namespace than its target,
+  and a generated generic `impl` published after a point of call it
+  applies to;
+- generic `impl` blocks for a primary and a partial specialization, a header
+  that matches no declaration, and an `impl` after a point of call it
+  applies to;
+- a query in an `impl` body after completion, the same query in an inline
+  method, an inline method requesting a querying helper, and an inline
+  method passing `&self` to a helper that names members declared above;
+- compile-time calls, including implicit `drop` and `copy`, before a
+  definition is available, and a deferred `impl` method prepared by its
+  first compile-time call;
+- recursive `NodeList` copying and cleanup;
+- printed HUC0 compiling on its own under declaration order and meaning
+  what HUC1 resolved:
+  - renamed overloads, including a member overload declared after the call,
+    as in the `Item` example, and an `impl` block that adds an overload
+    after the calling method;
+  - unchanged constructions with overloaded inits;
+  - comments with the specialized source header before each specialization
+    and renamed overload, including generated ones;
+  - `impl` blocks;
+  - function specializations after the requesting declaration and before
+    its queued module code, with forward declarations before it;
+  - structure specializations before it, with method bodies after it;
+  - specializations of a deferred method family declared only in an
+    `impl`, declared at the end of the printed structure, with their
+    bodies after it, including one whose signature names a later type;
+  - placed code before it, with function and method bodies after it,
+    including a helper that reads a field of the current structure;
+  - module-scope variable specializations before it, and local ones at
+    their family;
+  - nested requests, and the added `struct Node;` for `Links<Node>`;
+- HUC0 without overloading: two functions or two methods sharing a name in
+  handwritten HUC0, rejected; and a HUC0 construction that chooses between
+  a structure's generated memberwise and default inits;
+- `specialize`:
+  - full and partial function specializations, a structure specialization
+    with its `impl`, and a variable specialization, each written in a
+    type's file;
+  - names inside resolving in the family's namespace, with the file's own
+    type and a private helper named by qualified names;
+  - printed HUC0 placing such a specialization in a section of its family's
+    namespace;
+  - a function specialization, and a structure specialization with its
+    `impl`, generated in the type's file;
+  - rejected: an ordinary declaration after `specialize`, an import alias
+    as the module name, the file's own module, a module that is not
+    visible, a family that is not `pub`, a file that owns neither the
+    family nor a type in the pattern, whether it writes or generates the
+    specialization, module code generated inside such a specialization,
+    and a `module` line that names another module;
+- depth 512 accepted and 513 rejected through recursion, mutual recursion,
+  preparation, cleanup, and lifecycle calls, with the skipped-frame line in
+  the error.
+
+- receiver-only overloads rejected for every pair of receiver forms; distinct
+  ordinary-parameter overloads use no ownership-based ranking or fallback.

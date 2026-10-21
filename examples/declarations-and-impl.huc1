@@ -1,0 +1,97 @@
+module examples.declarations_and_impl;
+
+import1 compiler;
+
+let mut drops: i32 = 0;
+
+struct Node;
+
+struct Links<T: auto> {
+    let mut next: mut T*;
+}
+
+struct Node {
+    let value: i32;
+    let links: Links<Node>;
+}
+
+struct Ticket {
+    let mut value: i32;
+
+    fn drop(&mut self) -> void;
+    fn read(&self) -> i32;
+}
+
+impl Ticket {
+    fn drop(&mut self) -> void {
+        drops += 1;
+    }
+
+    fn read(&self) -> i32 {
+        return self.value;
+    }
+
+    fn renew(mut self) -> Ticket {
+        self.value += 1;
+        return self;
+    }
+
+    fn finish(self) -> i32 {
+        return self.value; // Automatic cleanup also applies to fixed owned self.
+    }
+
+    fn close(mut self) -> void {
+        drop self;
+    }
+
+    fn make(value: i32) -> Ticket {
+        return Ticket(value);
+    }
+}
+
+struct Cell<T: auto> {
+    let value: T;
+}
+
+impl Cell<T: auto> {
+    fn address(&self) -> T* {
+        return &self.value;
+    }
+}
+
+fn read<T: auto>(value: T*) -> T {
+    return *value;
+}
+
+fn helper_text<>() -> compiler::Text {
+    return "fn answer() -> i32 { return 42; }";
+}
+
+fn descend<>(remaining: usize) -> usize {
+    if (remaining == 0) {
+        return 0;
+    }
+    return descend(remaining - 1);
+}
+
+let1 deepest: usize = @descend(511); // Exactly 512 active HUC calls.
+
+fn main() -> i32 {
+    @compiler::module_before(helper_text());
+    #compiler::local("if1 (true) { let expected: i32 = 42; }");
+
+    let mut first: Ticket = Ticket::make(1);
+    first = first.renew(); // Receiver transfer leaves no old value to destroy.
+    let pointer: mut Ticket* = &first;
+    let two: i32 = pointer->finish(); // Unchecked extraction, one cleanup.
+    construct_at(pointer, Ticket(3)); // Restore before first's tracked cleanup.
+    let three: i32 = (*pointer).finish(); // Same rule as pointer->finish().
+    construct_at(pointer, Ticket(4));
+    first.close(); // A tracked owned transfer, then explicit cleanup.
+
+    let cell: Cell<i32> = Cell<i32>(7);
+    let mut number: i32 = *cell.address();
+    let copied: i32 = read(&number); // Drop pointer permission during deduction.
+    return answer() == expected && two == 2 && three == 3
+        && copied == 7 && drops == 3 ? 0 : 1;
+}

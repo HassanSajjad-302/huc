@@ -99,13 +99,17 @@ ownership or lifetime extension. See the
 Text generation has two [generation modes](docs/language-specification.md#111-program-mode-and-evaluation-mode):
 **program mode** prepares the HUC0 program; **evaluation mode** prepares a private
 body for the compiler to execute. Inserted local code is parsed and checked
-in both. Module code is inserted forward in program mode and suppressed in
-evaluation mode. Repeated runtime uses publish a function or specialization's
-generated declarations only once; compile-time evaluation does not consume
-that opportunity. Nested specialization requests share the original requesting
-top-level declaration as their module insertion anchor: a request inside `main`
-publishes module output after `main`. Compiler evaluation cannot use that output
-while it is pending, but later evaluations can use it once published.
+in both. `compiler::module(text)` and `compiler::module_before(text)` are
+explicit program-mode actions; calling them in evaluation mode is an error.
+Builders return text and their callers choose the action. Local `Code` values
+still insert with `#`, including `around` blocks. Generated text is HUC1 and
+is prepared at its insertion point. All names must be declared before use.
+
+[Declarations and preparation](docs/declarations-and-preparation.md) define
+forward declarations, incomplete types, `impl` blocks, explicit receivers,
+static functions, and `specialize` for another module's family. HUC1 resolves
+overloads once and prints distinct names in HUC0. Compiler execution permits
+at most 512 active HUC calls.
 
 [Every compile-time call runs again](docs/language-specification.md#122-repeated-compiler-calls),
 even with identical arguments; only an explicit `let1` keeps a result. The
@@ -156,11 +160,11 @@ import std.io as io;
 struct Widget {
     let value: i32;
 
-    fn init(value: i32) : value = value {
+    fn init(&mut self, value: i32) : value = value {
     }
 
-    fn copy() -> Widget {
-        return Widget(this->value);
+    fn copy(&self) -> Widget {
+        return Widget(self.value);
     }
 }
 
@@ -314,6 +318,11 @@ needed. Its specification can be developed before the compiler implements it;
 it is not a prerequisite for the first implementation slice.
 
 ## Documents
+
+- [Declarations and preparation](docs/declarations-and-preparation.md): normative
+  rules for incomplete types, impls, receivers, lookup, and generated output.
+- [Declaration/receiver smoke example](examples/declarations-and-impl.huc1)
+  and [standalone runtime counterpart](examples/declarations-and-impl.huc0).
 
 - [Controlling implementation plan](docs/implementation-plan.md)
 - [Value semantics and special operations](docs/value-semantics.md)

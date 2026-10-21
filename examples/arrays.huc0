@@ -6,11 +6,11 @@ let mut drop_order: i32;
 struct Probe {
     let id: i32;
 
-    fn init(id: i32) : id = id {
+    fn init(&mut self, id: i32) : id = id {
     }
 
-    fn drop() mut -> void {
-        drop_order = drop_order * 10 + this->id;
+    fn drop(&mut self) -> void {
+        drop_order = drop_order * 10 + self.id;
     }
 }
 
@@ -18,30 +18,30 @@ struct InlineProbes {
     let [align(align_of<Probe>()), nozero] mut storage: u8[2 * size_of<Probe>()];
     let mut length: usize;
 
-    fn init() {
+    fn init(&mut self) {
         // No Probe is constructed. length starts at zero.
     }
 
     // Precondition: length < 2. The parameter is consumed by this call.
-    fn push(mut value: Probe) mut -> void {
-        let slots: mut Probe* = ptr_as<mut Probe*>(&this->storage[0]);
-        construct_at(slots + this->length, value);
-        this->length += 1;
+    fn push(&mut self, mut value: Probe) -> void {
+        let slots: mut Probe* = ptr_as<mut Probe*>(&self.storage[0]);
+        construct_at(slots + self.length, value);
+        self.length += 1;
     }
 
     // Precondition: length > 0.
-    fn pop() mut -> Probe {
-        let last: usize = this->length - 1;
-        let mut result: Probe = *(ptr_as<mut Probe*>(&this->storage[0]) + last);
-        this->length = last; // exclude the inactive source slot
+    fn pop(&mut self) -> Probe {
+        let last: usize = self.length - 1;
+        let mut result: Probe = *(ptr_as<mut Probe*>(&self.storage[0]) + last);
+        self.length = last; // exclude the inactive source slot
         return result;
     }
 
-    fn drop() mut -> void {
-        let slots: mut Probe* = ptr_as<mut Probe*>(&this->storage[0]);
-        while (this->length > 0) {
-            this->length -= 1;
-            destruct_at(slots + this->length);
+    fn drop(&mut self) -> void {
+        let slots: mut Probe* = ptr_as<mut Probe*>(&self.storage[0]);
+        while (self.length > 0) {
+            self.length -= 1;
+            destruct_at(slots + self.length);
         }
         // Automatic byte-array field cleanup performs no Probe drops.
     }

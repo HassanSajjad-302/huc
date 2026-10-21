@@ -13,17 +13,17 @@ fn record(event: u64) -> void {
 struct Probe {
     let value: i32;
 
-    fn [noinline] init(value: i32) : value = value {
-        last_constructed = ptr_as<usize>(this);
+    fn [noinline] init(&mut self, value: i32) : value = value {
+        last_constructed = ptr_as<usize>(&self);
         record(4);
     }
 
-    fn [noinline] copy() -> Probe {
+    fn [noinline] copy(&self) -> Probe {
         record(5);
-        return Probe(this->value);
+        return Probe(self.value);
     }
 
-    fn drop() mut -> void {
+    fn drop(&mut self) -> void {
         record(2);
     }
 }

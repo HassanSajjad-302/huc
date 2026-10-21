@@ -136,11 +136,11 @@ Otherwise ordinary binding could silently bypass the custom copy behavior:
 struct Ticket {
     let id: u64;
 
-    fn init(id: u64) : id = id {
+    fn init(&mut self, id: u64) : id = id {
     }
 
-    fn copy() -> Ticket {
-        return Ticket(probable_issue_related_ticket(this->id));
+    fn copy(&self) -> Ticket {
+        return Ticket(probable_issue_related_ticket(self.id));
     }
 }
 
@@ -159,7 +159,7 @@ author wants to prevent copying:
 struct [nocopy] UniqueTicket {
     let value: u64;
 
-    fn init(value: u64) : value = value {
+    fn init(&mut self, value: u64) : value = value {
     }
 }
 ```
@@ -173,15 +173,15 @@ rules above.
 HUC lets a type define three lifecycle methods:
 
 ```huc
-fn init(...) : field = initializer, ... {
+fn init(&mut self, ...) : field = initializer, ... {
     // construction body
 }
 
-fn copy() -> T {
+fn copy(&self) -> T {
     // return an independent logical duplicate
 }
 
-fn drop() mut -> void {
+fn drop(&mut self) -> void {
     // release non-field resources
 }
 ```
@@ -192,11 +192,11 @@ Their roles are:
 |---|---|---|
 | Construction | `fn init(...)` | `T(...)` |
 | Fieldwise copy of a Basic type | None | Ordinary binding or `copy` |
-| Logical copy of an Advanced structure | `fn copy() -> T`, or a generated one | Only requested by `copy` |
+| Logical copy of an Advanced structure | `fn copy(&self) -> T`, or a generated one | Only requested by `copy` |
 | Logical copy of an Advanced array | None | `copy` applies logical copy to each element |
 | Destructive relocation initialization | None | Ordinary binding of an Advanced value |
 | Destructive relocation assignment | None | Ordinary assignment of an Advanced value |
-| Destruction | `fn drop() mut -> void` | Inserted by the compiler, or `drop name;` for a local |
+| Destruction | `fn drop(&mut self) -> void` | Inserted by the compiler, or `drop name;` for a local |
 | Field destruction | None | Inserted after `drop`, in reverse field order |
 | Ending a local without cleanup | None | `forget name;` |
 
@@ -216,7 +216,7 @@ struct Point {
     let x: i32;
     let y: i32;
 
-    fn init(x: i32, y: i32)
+    fn init(&mut self, x: i32, y: i32)
         : x = x,
           y = y,
     {
@@ -275,7 +275,7 @@ struct ScaledPoint {
     let x: i32;
     let y: i32;
 
-    fn init(source: Point, scale: i32)
+    fn init(&mut self, source: Point, scale: i32)
         : x = source.x * scale,
           y = source.y * scale,
     {
@@ -294,7 +294,7 @@ struct Point {
     let x: i32;
     let y: i32;
 
-    fn init(x: i32, y: i32)
+    fn init(&mut self, x: i32, y: i32)
         : x = x,
           y = y,
     {
@@ -367,14 +367,14 @@ copying by declaring exactly one method with this signature, or by getting a
 generated one (section 6.4):
 
 ```huc
-fn copy() -> T;
+fn copy(&self) -> T;
 ```
 
 Rules:
 
 - it is an ordinary runtime `fn`, without an angle header;
-- it has no explicit parameters;
-- its receiver is read-only because it has no trailing `mut`;
+- it has no ordinary parameters besides its explicit receiver;
+- its receiver is explicitly read-only (`&self`);
 - it returns the same structure type in which it is declared;
 - it must not modify the source object's own storage or leave the source invalid;
 - it cannot be called directly or have its address taken;
@@ -456,25 +456,25 @@ struct HeapText {
     let mut data: mut u8*;
     let size: usize;
 
-    fn init(source: text::View)
+    fn init(&mut self, source: text::View)
         : data = memory::allocate_raw_bytes(source.size()),
           size = source.size(),
     {
-        memory::copy_bytes(this->data, source.data(), this->size);
+        memory::copy_bytes(self.data, source.data(), self.size);
     }
 
-    fn view() -> text::View {
-        return text::View(this->data, this->size);
+    fn view(&self) -> text::View {
+        return text::View(self.data, self.size);
     }
 
-    fn copy() -> HeapText {
-        return HeapText(this->view());
+    fn copy(&self) -> HeapText {
+        return HeapText(self.view());
     }
 
-    fn drop() mut -> void {
-        if (this->data) {
-            memory::free_raw_bytes(this->data, this->size);
-            this->data = null;
+    fn drop(&mut self) -> void {
+        if (self.data) {
+            memory::free_raw_bytes(self.data, self.size);
+            self.data = null;
         }
     }
 }
@@ -591,9 +591,9 @@ uses a clearly named writable method:
 struct ReusableBuffer {
     // fields, init, copy, and drop omitted
 
-    fn assign_from(source: ReusableBuffer*) mut -> void {
-        probable_resize_in_place(this, source->size());
-        probable_copy_payload(this, source);
+    fn assign_from(&mut self, source: ReusableBuffer*) -> void {
+        probable_resize_in_place(&self, source->size());
+        probable_copy_payload(&self, source);
     }
 }
 
@@ -684,7 +684,7 @@ struct Packet {
     let tag: i32;
     let payload: HeapText;
 
-    fn init(tag: i32, mut payload: HeapText)
+    fn init(&mut self, tag: i32, mut payload: HeapText)
         : tag = tag,
           payload = payload,
     {
@@ -794,17 +794,17 @@ example. Mark such a type `[norelocate]`:
 ```huc
 struct [norelocate] SelfIndexed {
     let mut payload: i32;
-    let mut self: SelfIndexed*;
+    let mut self_pointer: SelfIndexed*;
 
-    fn init(payload: i32)
+    fn init(&mut self, payload: i32)
         : payload = payload,
-          self = null,
+          self_pointer = null,
     {
-        this->self = this;
+        self.self_pointer = &self;
     }
 
-    fn has_expected_address() -> bool {
-        return this->self == this;
+    fn has_expected_address(&self) -> bool {
+        return self.self_pointer == &self;
     }
 }
 
@@ -989,14 +989,14 @@ module examples.file_value;
 struct File {
     let mut handle: i32;
 
-    fn init(handle: i32)
+    fn init(&mut self, handle: i32)
         : handle = handle {
     }
 
-    fn drop() mut -> void {
-        if (this->handle >= 0) {
-            probable_os_close(this->handle);
-            this->handle = -1;
+    fn drop(&mut self) -> void {
+        if (self.handle >= 0) {
+            probable_os_close(self.handle);
+            self.handle = -1;
         }
     }
 }
@@ -1137,7 +1137,7 @@ document.absorb(document); // error: relocates the call's own receiver
 attach(&document, document); // error: earlier argument points at document
 ```
 
-In the last two calls, `this` or the pointer argument would refer to storage
+For a borrowed absorb receiver, that observer or the pointer argument would refer to storage
 whose value has already moved. The same holds when the transfer happens
 inside a nested argument, as in `document.absorb(wrap(document))`.
 
@@ -1299,13 +1299,13 @@ pending automatic cleanup reaches the slot.
 A structure may declare at most one destructor body:
 
 ```huc
-fn drop() mut -> void;
+fn drop(&mut self) -> void;
 ```
 
 It must:
 
 - be an unnumbered runtime method;
-- have no explicit parameters;
+- have no ordinary parameters besides its explicit receiver;
 - return exactly `void`;
 - have a writable receiver;
 - not be overloaded.
@@ -1329,17 +1329,17 @@ struct Session {
     let socket: Socket;
     let mut native_transaction: i64;
 
-    fn init(mut log: Logger, mut socket: Socket, native_transaction: i64)
+    fn init(&mut self, mut log: Logger, mut socket: Socket, native_transaction: i64)
         : log = log,
           socket = socket,
           native_transaction = native_transaction,
     {
     }
 
-    fn drop() mut -> void {
-        if (this->native_transaction != 0) {
-            probable_abort_transaction(this->native_transaction);
-            this->native_transaction = 0;
+    fn drop(&mut self) -> void {
+        if (self.native_transaction != 0) {
+            probable_abort_transaction(self.native_transaction);
+            self.native_transaction = 0;
         }
     }
 }
@@ -1462,7 +1462,7 @@ For the replacement:
   inactive. A named source needs binding `mut`.
 - `copy value` explicitly copies into the slot when supported.
 - `T(arguments)` constructs directly in the slot; it does not first create
-  and move a temporary. This also preserves the final `this` address.
+  and move a temporary. This also preserves the final `&self` address.
 - Direct call results forward the slot through nested direct returns, as
   described in section 8.2, without requiring inlining.
 - Array literals build in the element slots; `?:` forwards the destination
@@ -1632,6 +1632,27 @@ by-value helper would relocate with undefined behavior. Rust's `mem::drop` and
 
 ## 10. Parameters and argument order
 
+Methods declare their receiver explicitly. `&self` and `&mut self` borrow
+caller storage; `self` and `mut self` bind an owned first parameter before
+ordinary arguments. Owned self is fixed unless marked mut. Both get automatic
+cleanup, but only mut self supports onward Advanced relocation, drop, or forget.
+The expression self is an object place; &self has writable pointee permission
+only for the two mutable receiver forms. Bare names never implicitly find fields.
+
+An owned call on a named Advanced root transfers it and updates its tracked
+state. Pointer calls `p->finish()` and `(*p).finish()` both use unchecked
+extraction for Advanced pointees: require mut T*, leave the slot inactive, and
+do not cancel the caller's automatic cleanup. Restore the slot or exclude its
+cleanup. Basic owned receivers copy. Direct-result receivers construct in the
+parameter's final slot, including non-relocatable types.
+
+In `x = x.transform()`, an owned receiver transfers x before assignment's
+destruction step; no old value remains to destroy. A borrowed receiver has the
+existing destroy-first lifetime hazard. Receiver-only overloads are forbidden;
+the call cannot choose ownership behavior as an overload tie-breaker.
+See [receiver rules](declarations-and-preparation.md#45-the-receiver-self-and-static-functions).
+
+
 Parameters are passed by value. Their behavior follows their type:
 
 ```huc
@@ -1699,7 +1720,7 @@ Both original locals are then MaybeActive, so later named use is rejected.
 Compilers are encouraged to warn about this form (language specification
 section 8.4).
 
-To observe one without transferring it, use either of these alternatives:
+For a borrowed `size` receiver, observe one without transferring it using either form:
 
 ```huc
 (condition ? &first : &second)->size();
@@ -1881,26 +1902,26 @@ struct Vector<T: auto> {
     // init, reserve, push, and drop as usual
 
     if1 (is_copyable<T>()) {
-        fn copy() -> Vector<T> {
+        fn copy(&self) -> Vector<T> {
             let mut result: Vector<T> = Vector<T>();
-            result.reserve(this->length);
-            while (result.length < this->length) {
-                result.push(copy *(this->data + result.length));
+            result.reserve(self.length);
+            while (result.length < self.length) {
+                result.push(copy *(self.data + result.length));
             }
             return result;
         }
     }
 
     if1 (is_default_initializable<T>()) {
-        fn resize(count: usize) mut -> void {
-            this->reserve(count);
-            while (this->length < count) {
+        fn resize(&mut self, count: usize) -> void {
+            self.reserve(count);
+            while (self.length < count) {
                 let mut fresh: T; // default initialization
-                this->push(fresh);
+                self.push(fresh);
             }
-            while (this->length > count) {
-                this->length -= 1;
-                destruct_at(this->data + this->length);
+            while (self.length > count) {
+                self.length -= 1;
+                destruct_at(self.data + self.length);
             }
         }
     }
@@ -1933,6 +1954,14 @@ This is the same container-level value model as C++ RAII, with two policy
 changes: HUC makes expensive logical copying explicit and makes relocation of
 an Advanced type automatic and non-overridable.
 
+A recursively embedded container must not query its incomplete element type
+during preparation. Pointer-only Links<Node> works, but a Vector<Node> whose
+selected body queries Node does not. Declare unconditional lifecycle members
+on a concrete pointer-backed NodeList, then define their bodies in impl blocks
+after Node completes. Moving a generic querying method into its generic impl
+does not defer preparation past the structure request. See the worked
+[recursive-container examples](declarations-and-preparation.md#5-recursive-containers).
+
 ## 13. A complete resource-managing value example
 
 The following HUC program combines construction, observation, mutation,
@@ -1951,7 +1980,7 @@ struct Image {
     let height: usize;
     let stride: usize;
 
-    fn init(width: usize, height: usize)
+    fn init(&mut self, width: usize, height: usize)
         : pixels = memory::allocate_zeroed_bytes(width * height * 4),
           width = width,
           height = height,
@@ -1959,28 +1988,28 @@ struct Image {
     {
     }
 
-    fn byte_count() -> usize {
-        return this->stride * this->height;
+    fn byte_count(&self) -> usize {
+        return self.stride * self.height;
     }
 
-    fn fill(value: u8) mut -> void {
-        memory::fill_bytes(this->pixels, value, this->byte_count());
+    fn fill(&mut self, value: u8) -> void {
+        memory::fill_bytes(self.pixels, value, self.byte_count());
     }
 
-    fn copy() -> Image {
-        let mut result: Image = Image(this->width, this->height);
+    fn copy(&self) -> Image {
+        let mut result: Image = Image(self.width, self.height);
         memory::copy_bytes(
             result.pixels,
-            this->pixels,
-            this->byte_count(),
+            self.pixels,
+            self.byte_count(),
         );
         return result;
     }
 
-    fn drop() mut -> void {
-        if (this->pixels) {
-            memory::free_raw_bytes(this->pixels, this->byte_count());
-            this->pixels = null;
+    fn drop(&mut self) -> void {
+        if (self.pixels) {
+            memory::free_raw_bytes(self.pixels, self.byte_count());
+            self.pixels = null;
         }
     }
 }
@@ -2115,8 +2144,8 @@ relocation behavior, C++ references, or C++ value-category overloads.
 | `mut T*` | `T*` | Writable pointee |
 | `T**` and longer chains | Nested raw pointers with corresponding access permissions | HUC permits chains, including through aliases; none of the levels owns its pointee |
 | `&value`, including a pointer slot | `std::addressof(value)` | HUC accepts addressable data places and cannot overload `&`; it does not materialize a temporary |
-| `fn copy() -> T` | Copy constructor | Invoked only by explicit logical copying; generated for eligible structures |
-| `fn drop() mut -> void` | Destructor body | Both run the body before reverse member cleanup; HUC has no inheritance cleanup or exception unwinding |
+| `fn copy(&self) -> T` | Copy constructor | Invoked only by explicit logical copying; generated for eligible structures |
+| `fn drop(&mut self) -> void` | Destructor body | Both run the body before reverse member cleanup; HUC has no inheritance cleanup or exception unwinding |
 | `struct [nocopy] S` | `S(const S&) = delete;` | The type still moves, by fixed relocation |
 | `struct [norelocate] S` | `S(S&&) = delete;` | Direct results still build in place; a written `copy` method stays allowed |
 | `drop x;` | No direct equivalent; ending the scope early | Runs cleanup now; a later use of `x` is a compile-time error |

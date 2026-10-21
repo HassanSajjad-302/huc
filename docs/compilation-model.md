@@ -111,7 +111,7 @@ diagnostics. These are design examples, not compiler-verified programs.
 | Import aliases | Lexical aliases, with no wildcard imports | Keep in authored source; generated module paths use canonical names |
 | `as _` | Binds an ordinary alias named `_` | Import without binding an alias |
 | Repeated direct imports | A repeated import can bind another alias | Reject duplicate direct imports in one file |
-| Namespace sections | Can introduce ordinary declarations in other namespaces | Own namespace, or a visible imported module's namespace for specializations only |
+| Namespace sections | Can introduce ordinary declarations in other namespaces | Own namespace only; specialize prefixes foreign specializations |
 | Specialization placement | Any file may specialize a family in the family's namespace | Only the family's file, or a type's file when no binder comes before that type |
 | Compiler calls | Execute freshly under the staging rules | Keep |
 | Module-level `let1` | One shared compiler object per declaration | One declaration identity with module-local state; later imports replace earlier values |
@@ -148,7 +148,7 @@ This model adds or changes these spellings:
 |---|---|---|---|
 | Mutable variable | `let mod count: i32 = 0;` | `let mut count: i32 = 0;` | `let mut count = 0;` |
 | Writable pointer | `mod T*` | `mut T*` | `*mut T` |
-| Method that changes `this` | `fn reset() mod -> void` | `fn reset() mut -> void` | `fn reset(&mut self)` |
+| Method that changes its receiver | `fn reset() mod -> void` | `fn reset(&mut self) -> void` | `fn reset(&mut self)` |
 
 Rust uses `mod` to declare modules and `mut` for mutability. HUC declares
 modules with `module`, so `mod` never clashed in HUC itself. But Rust readers
@@ -458,25 +458,24 @@ generated fragments cannot use them to change their insertion site's imports.
 
 An ordinary or generic function retains its source lookup environment when
 called from another module. A later caller does not replace its aliases or
-add all of the caller's modules to that environment.
+add all of the caller's modules to that environment. Outside names must be
+declared before the definition; the request supplies arguments, dependent
+members, applicable specializations, and the active compiler state. It does
+not add later ordinary functions or locals. Local generic variables likewise
+retain the names visible at their family's declaration.
 
 The compiler can keep one global declaration registry while applying these
 separate lookup environments. Knowing that a declaration exists does not
 automatically make it a valid source-level reference from every file.
 
-### 6.4 A file opens only its own or visible imported namespaces
+### 6.4 Own namespace and explicit foreign specializations
 
-The existing repeated `module name;` sections still select namespaces. They
-do not reload source or reset variables.
-
-The source provider owns exactly the namespace named by its initial module
-declaration. Later sections may open only:
-
-- That same namespace, to add ordinary declarations or specializations.
-- Another module visible through the file's imports or re-exports, to add
-  full or partial specializations of existing families. The file must also
-  declare a type in each specialization's pattern, with no binder before it
-  (section 9.5).
+A source `module` line names only the file's own module. Later sections may
+reopen that same namespace but do not reload it. A foreign specialization uses
+`specialize canonical.module` before one fn, struct, or let specialization,
+or its same-file impl. The module must be visible and the family public; the
+owning-file rules still apply. No ordinary declaration can use this prefix.
+See [Declarations and Preparation §7](declarations-and-preparation.md#7-specializing-another-modules-family).
 
 An arbitrary namespace with no visible module owner is not allowed. Owning
 `app.common` does not also mean owning `app.common.detail`:
@@ -495,7 +494,7 @@ from conflicting with a namespace claimed by this file. The same restriction
 applies to generated module sections before flattening; section 11 explains
 why already-flattened HUC0 does not use source-file ownership rules.
 
-A foreign section cannot add new ordinary functions, variables, types,
+A specialize declaration cannot add new ordinary functions, variables, types,
 aliases, or primary families. It also does not expose the other module's
 private imports.
 
@@ -518,20 +517,20 @@ because an importer loaded `app.plugin`. Put the helper in the owning module
 or pass an explicit value/interface to its code.
 
 Ownership follows the source provider, not the current namespace spelling.
-It also applies to generated module declarations: a caller's `#` cannot add
+It also applies to generated module declarations: a module action cannot add
 ordinary declarations to a foreign namespace by emitting a `module` line.
-A `#` inside a deferred body belongs to the file that wrote that body, even
-when its output anchor follows a caller in another file. For a primary, that
-is the family's file; for a specialization, it is the owning file that wrote
-it. Code returned by a builder and inserted by a caller belongs to that
-caller's `#` context instead. Text origins alone grant no declaration
-ownership.
+A generation site inside a deferred body belongs to the file that wrote that
+body, even when its output anchor is a caller in another file. For a primary,
+that is the family's file; for a specialization, it is the owning file that
+wrote it. Text returned by a builder and published by a caller's module action
+belongs to that action's context instead. Text origins alone grant no
+declaration ownership.
 
 An allowed specialization keeps its defining source context: the imports,
 aliases, and private declarations of the file that wrote it, not those of
-the family's file. Its canonical name and output position still come from
-the family's namespace. Unqualified names resolve in that namespace, where
-another file's private declarations stay hidden:
+the family's file. Its canonical name keeps the family's namespace, while
+its printed position follows the original request anchor. Unqualified names
+resolve in that namespace, where another file's private declarations stay hidden:
 
 ```huc
 module app.point;
@@ -546,8 +545,7 @@ fn mix(value: i32) -> u64 { // Private to app/point.huc1.
     return as<u64>(value) * 31;
 }
 
-module library.hash;
-
+specialize library.hash
 fn hash<><app::point::Point>(value: app::point::Point*) -> u64 {
     return app::point::mix(value->x); // Allowed: the same file wrote mix.
 }
@@ -555,16 +553,18 @@ fn hash<><app::point::Point>(value: app::point::Point*) -> u64 {
 
 A specialization may contain the members and locals of its own definition,
 but namespace-level helpers belong in the specializing module, as `mix` does.
-A `#` in a specialization may insert local code, but module code it inserts
+A `#` in a specialization may insert local code, but a module action there
 would land in the family's namespace, which this file does not own, so it is
 rejected. Section 9.5 says which files may write specializations.
 
 ### 6.5 Forward references do not bypass the dependency boundary
 
-Runtime forward references remain allowed within permitted source scopes:
+Names require declarations before use. A forward declaration permits recursion:
 
 ```huc
 module app.math;
+
+fn later() -> i32;
 
 fn first() -> i32 {
     return later();
@@ -576,7 +576,7 @@ fn later() -> i32 {
 ```
 
 A later declaration in an unrelated module does not become available just
-because runtime name resolution finishes after source loading.
+because the module was loaded elsewhere; declaration order and visibility both apply.
 
 Compiler execution still needs an available checked definition. This model
 does not make future declarations or pending generated output available early.
@@ -920,7 +920,7 @@ pub struct Pair {
     let mut x: u64;
     let mut y: u64;
 
-    fn init(x: u64, y: u64) : x = x, y = y {}
+    fn init(&mut self, x: u64, y: u64) : x = x, y = y {}
 }
 
 pub let1 mut pair: Pair = Pair(1, 2);
@@ -1097,7 +1097,7 @@ import library.read;
 struct Point {
     let value: i32;
 
-    fn init(value: i32) : value = value {}
+    fn init(&mut self, value: i32) : value = value {}
 }
 
 fn main() -> i32 {
@@ -1146,8 +1146,7 @@ import library.width;
 pub struct Point {}
 let1 point_width: usize = 8;
 
-module library.width;
-
+specialize library.width
 fn width_of<><app::point::Point>() -> usize {
     return app::point::point_width;
 }
@@ -1300,8 +1299,7 @@ pub struct Point {
     let x: i32;
 }
 
-module library.hash;
-
+specialize library.hash
 // Allowed: this file owns Point.
 fn hash<><app::point::Point>(value: app::point::Point*) -> u64 {
     return as<u64>(value->x);
@@ -1316,8 +1314,7 @@ module app.fast_hash;
 import library.hash;
 import app.point;
 
-module library.hash;
-
+specialize library.hash
 // Error: this file owns neither the family nor Point.
 fn hash<><app::point::Point>(value: app::point::Point*) -> u64 {
     return 1;
@@ -1325,6 +1322,11 @@ fn hash<><app::point::Point>(value: app::point::Point*) -> u64 {
 ```
 
 #### Why every request sees the same specializations
+
+This argument covers declarations processed before their owning modules finish.
+Late generated specializations and impls have the explicit limits in section
+10.7: they can make request/import order observable, and still must pass late-
+request checks. State isolation alone does not remove those effects.
 
 To request `hash<Point>`, code must name both the family and `Point`. So its
 file must see both owning files, through imports or re-exports, and those
@@ -1338,7 +1340,8 @@ program:
 
 - A side file like `app/fast_hash.huc1` cannot change how `hash<Point>`
   behaves elsewhere, depending on whether some unrelated file imports it.
-- Import order cannot cause a late-specialization error. The error in
+- Without late generated specializations, import order cannot cause a
+  late-specialization error. The error in
   section 9.3 can now come only from inside one owning file, when that file
   uses a specialization before declaring it.
 
@@ -1621,8 +1624,8 @@ Code values stored and later inserted elsewhere must satisfy the later
 insertion site's rules. Creating a fragment does not validate its names,
 preserve local bindings, or extend the lifetime of a represented object.
 
-Reopening a namespace in generated module text changes the declaration's
-destination, not its source dependency permissions or ownership. Section 6.4
+A specialize prefix in generated module text changes the specialization's
+namespace, not its source dependency permissions or ownership. Section 6.4
 also restricts foreign-namespace additions. Function-owned insertion anchors
 and program/evaluation modes otherwise retain their existing rules.
 
@@ -1663,11 +1666,11 @@ different prepared constants or different referenced declarations must not
 be hidden by merging text. When sharing cannot be established under the
 specified rule, diagnose the conflict rather than selecting the first body.
 
-### 10.7 A finished module gains no names
+### 10.7 Late names and late specializations
 
 State isolation keeps a completed module's values unchanged. A module's names
 need the same protection. A deferred body can be prepared
-long after its module finished, and a `#` in it can add declarations to that
+long after its module finished, and a module action can add declarations to that
 module's namespace:
 
 ```huc
@@ -1676,7 +1679,7 @@ module library.gen;
 import1 compiler;
 
 pub fn install<>() -> void {
-    #compiler::module("pub fn generated() -> i32 { return 7; }");
+    @compiler::module("pub fn generated() -> i32 { return 7; }");
 }
 ```
 
@@ -1694,7 +1697,7 @@ let1 seven: i32 = @gen::generated(); // Error: generated was added later.
 
 Without a rule, this would work if the root imported `app.a` before `app.b`,
 and fail the other way round. No saved value changed; what differed was
-which names existed. So a module's names are fixed when it finishes:
+which ordinary names existed. Late ordinary names are therefore restricted:
 
 - A declaration that a deferred body generates into its module after the
   module finished is visible only to the preparation that generated it.
@@ -1702,7 +1705,7 @@ which names existed. So a module's names are fixed when it finishes:
 - Another preparation can name it only by generating the identical
   declaration itself. Section 10.6's sharing rule then keeps one copy.
 
-An evaluation never inserts module code, so it cannot use a late-generated
+An evaluation rejects module actions, so it cannot use a late-generated
 helper either. Otherwise `@read::read_value<T>(&item)` would work or fail
 depending on whether another module had requested `read_value<T>` at run
 time first. A body that needs such a helper at compile time takes its own
@@ -1715,6 +1718,13 @@ each request for `read_value<T>` generates the same `bonus` helper and calls
 it. Code that other files should use belongs in the module's own source, or
 in a builder that returns code for the caller's `#`, so that it lands in the
 caller's file.
+
+Late specializations and impl blocks are different: they apply to code after
+their insertion point. A specialization that would change an earlier request
+is rejected, as is a generic impl after an applicable request. A late ordinary
+impl can change later overload choices. Request/import order may therefore
+affect programs using late module generation; per-module state isolation does
+not promise order independence for such generated declarations.
 
 ## 11. Flattened HUC0 remains a real source boundary
 
@@ -2263,7 +2273,7 @@ The implementation must pass these tests. None has run yet.
 | Two files' specializations of one family can match one request, and neither is more specific | Diagnostic in the later file when it finishes |
 | That later file also writes the specialization for exactly the overlap | Accepted |
 | A specialization written in a type's file calls that file's private helper | Accepted; the body is checked in the file that wrote it |
-| A # in such a specialization inserts module code | Diagnostic; the family's namespace belongs to another file |
+| A module action in such a specialization | Diagnostic; the family's namespace belongs to another file |
 | A deferred body adds a pub declaration to its finished module, and another file names it | Diagnostic, whatever the import order |
 | Two requests of one generic generate the same helper after its module finished | One shared declaration; each preparation may name it |
 | An evaluation calls a deferred body that uses a helper generated after its module finished | Diagnostic, whatever the import order |

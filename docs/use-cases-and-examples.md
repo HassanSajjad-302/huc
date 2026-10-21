@@ -148,7 +148,7 @@ The examples below cover these use cases:
 | HUC1 | Turning compile-time data into runtime code with `for1` and `@` |
 | HUC1 | Undefined behavior and leaks reported as compile-time errors |
 | HUC1 | Compiler-only helper functions and state |
-| HUC1 | Generated code as values, inserted forward with `#` in program and evaluation modes |
+| HUC1 | Local code values inserted with `#` in program and evaluation modes; module text published by program-only actions |
 | Pipeline | One flattened HUC1-to-HUC0 translation unit, with module namespaces |
 | Pipeline | Standalone hand-written HUC0 |
 | Pipeline | LLVM IR with explicit evaluation sequencing and cleanup |
@@ -201,15 +201,15 @@ module examples.pointer_permissions;
 struct Counter {
     let mut value: i32;
 
-    fn init() {
+    fn init(&mut self) {
     }
 
-    fn read() -> i32 {
-        return this->value;
+    fn read(&self) -> i32 {
+        return self.value;
     }
 
-    fn increment() mut -> void {
-        this->value += 1;
+    fn increment(&mut self) -> void {
+        self.value += 1;
     }
 }
 
@@ -300,17 +300,17 @@ module examples.consume;
 struct FileHandle {
     let mut native: i32;
 
-    fn init(native: i32) : native = native {
+    fn init(&mut self, native: i32) : native = native {
     }
 
-    fn valid() -> bool {
-        return this->native >= 0;
+    fn valid(&self) -> bool {
+        return self.native >= 0;
     }
 
-    fn drop() mut -> void {
-        if (this->native >= 0) {
-            probable_os_close(this->native);
-            this->native = -1;
+    fn drop(&mut self) -> void {
+        if (self.native >= 0) {
+            probable_os_close(self.native);
+            self.native = -1;
         }
     }
 }
@@ -352,7 +352,7 @@ struct Session {
     let input: FileHandle;
     let output: FileHandle;
 
-    fn init(id: i32, mut input: FileHandle, mut output: FileHandle)
+    fn init(&mut self, id: i32, mut input: FileHandle, mut output: FileHandle)
         : id = id,
           input = input,
           output = output,
@@ -384,20 +384,20 @@ struct ByteBuffer {
     let mut data: mut u8*;
     let size: usize;
 
-    fn init(size: usize)
+    fn init(&mut self, size: usize)
         : data = memory::allocate_zeroed_bytes(size),
           size = size,
     {
     }
 
-    fn copy() -> ByteBuffer {
-        let mut result: ByteBuffer = ByteBuffer(this->size);
-        memory::copy_bytes(result.data, this->data, this->size);
+    fn copy(&self) -> ByteBuffer {
+        let mut result: ByteBuffer = ByteBuffer(self.size);
+        memory::copy_bytes(result.data, self.data, self.size);
         return result;
     }
 
-    fn drop() mut -> void {
-        memory::free_raw_bytes(this->data, this->size);
+    fn drop(&mut self) -> void {
+        memory::free_raw_bytes(self.data, self.size);
     }
 }
 
@@ -425,7 +425,7 @@ struct Configuration {
     let mut accepted_connections: i32;
     let mut scratch: u8*;
 
-    fn init(port: i32, secure: bool)
+    fn init(&mut self, port: i32, secure: bool)
         : port = port,
           secure = secure,
     {
@@ -460,15 +460,15 @@ struct PixelBuffer {
     let mut bytes: mut u8*;
     let size: usize;
 
-    fn init(size: usize)
+    fn init(&mut self, size: usize)
         : bytes = memory::allocate_raw_bytes(size),
           size = size,
     {
     }
 
-    fn drop() mut -> void {
-        memory::free_raw_bytes(this->bytes, this->size);
-        this->bytes = null;
+    fn drop(&mut self) -> void {
+        memory::free_raw_bytes(self.bytes, self.size);
+        self.bytes = null;
     }
 }
 
@@ -476,16 +476,16 @@ struct Texture {
     let mut gpu_id: u32;
     let staging: PixelBuffer;
 
-    fn init(gpu_id: u32, mut staging: PixelBuffer)
+    fn init(&mut self, gpu_id: u32, mut staging: PixelBuffer)
         : gpu_id = gpu_id,
           staging = staging,
     {
     }
 
-    fn drop() mut -> void {
-        if (this->gpu_id != 0) {
-            probable_gpu_delete_texture(this->gpu_id);
-            this->gpu_id = 0;
+    fn drop(&mut self) -> void {
+        if (self.gpu_id != 0) {
+            probable_gpu_delete_texture(self.gpu_id);
+            self.gpu_id = 0;
         }
     }
 }
@@ -505,8 +505,8 @@ HUC lets a type define three lifecycle methods:
 | Declaration | What it customizes |
 |---|---|
 | `fn init(...)` | Construction |
-| `fn copy() -> T` | Explicit `copy` of an Advanced structure |
-| `fn drop() mut -> void` | Cleanup before automatic field destruction |
+| `fn copy(&self) -> T` | Explicit `copy` of an Advanced structure |
+| `fn drop(&mut self) -> void` | Cleanup before automatic field destruction |
 
 `Advanced` is a type category, not the name of a user-overridable constructor.
 Transferring a value in that category performs **destructive relocation**:
@@ -532,23 +532,23 @@ struct NativeLease {
     let mut handle: i32;
     let identity: u64;
 
-    fn init(handle: i32, identity: u64)
+    fn init(&mut self, handle: i32, identity: u64)
         : handle = handle,
           identity = identity,
     {
     }
 
-    fn copy() -> NativeLease {
+    fn copy(&self) -> NativeLease {
         return NativeLease(
-            probable_duplicate_handle(this->handle),
-            this->identity,
+            probable_duplicate_handle(self.handle),
+            self.identity,
         );
     }
 
-    fn drop() mut -> void {
-        if (this->handle >= 0) {
-            probable_close_handle(this->handle);
-            this->handle = -1;
+    fn drop(&mut self) -> void {
+        if (self.handle >= 0) {
+            probable_close_handle(self.handle);
+            self.handle = -1;
         }
     }
 }
@@ -677,18 +677,18 @@ can then safely establish a self-pointer:
 module examples.address_dependent;
 
 struct [norelocate] SelfIndexed {
-    let mut self: SelfIndexed*;
+    let mut self_pointer: SelfIndexed*;
     let key: u64;
 
-    fn init(key: u64)
-        : self = null,
+    fn init(&mut self, key: u64)
+        : self_pointer = null,
           key = key,
     {
-        this->self = this;
+        self.self_pointer = &self;
     }
 
-    fn read_key_through_self() -> u64 {
-        return this->self->key;
+    fn read_key_through_self(&self) -> u64 {
+        return self.self_pointer->key;
     }
 }
 
@@ -771,31 +771,31 @@ struct OptionalFile {
     let [align(align_of<File>()), nozero] mut storage: u8[size_of<File>()];
     let mut present: bool;
 
-    fn init() {
+    fn init(&mut self) {
         // storage has no live File; present starts false.
     }
 
-    fn set(mut value: File) mut -> void {
-        let slot: mut File* = ptr_as<mut File*>(&this->storage[0]);
-        if (this->present) {
-            this->present = false;
+    fn set(&mut self, mut value: File) -> void {
+        let slot: mut File* = ptr_as<mut File*>(&self.storage[0]);
+        if (self.present) {
+            self.present = false;
             destruct_at(slot);
         }
         construct_at(slot, value);
-        this->present = true;
+        self.present = true;
     }
 
     // Precondition: present is true.
-    fn remove() mut -> File {
-        let mut result: File = *ptr_as<mut File*>(&this->storage[0]);
-        this->present = false;
+    fn remove(&mut self) -> File {
+        let mut result: File = *ptr_as<mut File*>(&self.storage[0]);
+        self.present = false;
         return result;
     }
 
-    fn drop() mut -> void {
-        if (this->present) {
-            this->present = false;
-            destruct_at(ptr_as<mut File*>(&this->storage[0]));
+    fn drop(&mut self) -> void {
+        if (self.present) {
+            self.present = false;
+            destruct_at(ptr_as<mut File*>(&self.storage[0]));
         }
     }
 }
@@ -905,11 +905,11 @@ module examples.copy_then_transfer;
 struct Item {
     let value: i32;
 
-    fn init(value: i32) : value = value {
+    fn init(&mut self, value: i32) : value = value {
     }
 
-    fn copy() -> Item {
-        return Item(this->value);
+    fn copy(&self) -> Item {
+        return Item(self.value);
     }
 }
 
@@ -935,10 +935,10 @@ module examples.conditional_relocation;
 
 struct Job {
     let id: i32;
-    fn init(id: i32) : id = id {}
+    fn init(&mut self, id: i32) : id = id {}
 
-    fn drop() mut -> void {
-        probable_finish_job(this->id);
+    fn drop(&mut self) -> void {
+        probable_finish_job(self.id);
     }
 }
 
@@ -1027,12 +1027,12 @@ struct CopyStats {
     let mut bytes: usize;
     let mut chunks: usize;
 
-    fn init() {
+    fn init(&mut self) {
     }
 
-    fn add(count: usize) mut -> void {
-        this->bytes += count;
-        this->chunks += 1;
+    fn add(&mut self, count: usize) -> void {
+        self.bytes += count;
+        self.chunks += 1;
     }
 }
 
@@ -1172,14 +1172,14 @@ struct PacketHeader {
         let checksum: u32;
     }
 
-    fn init(
+    fn init(&mut self,
         kind: u16,
         length: if1 (compact_header) u16 else u64,
     ) : kind = kind,
         length = length,
     {
         if1 (!compact_header) {
-            this->checksum = 0;
+            self.checksum = 0;
         }
     }
 }
@@ -1196,7 +1196,7 @@ struct PacketHeader {
     if1 (compact_header) {
         let length: u16;
 
-        fn init(kind: u16, length: u16)
+        fn init(&mut self, kind: u16, length: u16)
             : kind = kind,
               length = length,
         {
@@ -1205,7 +1205,7 @@ struct PacketHeader {
         let length: u64;
         let mut checksum: u32;
 
-        fn init(kind: u16, length: u64)
+        fn init(&mut self, kind: u16, length: u64)
             : kind = kind,
               length = length,
         {
@@ -1221,7 +1221,7 @@ struct PacketHeader {
     let kind: u16;
     let length: u16;
 
-    fn init(kind: u16, length: u16)
+    fn init(&mut self, kind: u16, length: u16)
         : kind = kind,
           length = length,
     {
@@ -1244,7 +1244,7 @@ if1 (building_linux) {
         return "linux";
     }
 } else {
-    this branch is deliberately not valid HUC !!!
+    &self branch is deliberately not valid HUC !!!
     future_windows_syntax {
         tokens that the current parser does not understand;
     }
@@ -1382,40 +1382,40 @@ module examples.storage;
 struct Storage<T: auto> {
     let value: T;
 
-    fn init(mut value: T) : value = value {
+    fn init(&mut self, mut value: T) : value = value {
     }
 
-    fn get() -> T* {
-        return &this->value;
+    fn get(&self) -> T* {
+        return &self.value;
     }
 }
 
 struct Storage<T: auto><T*> {
     let value: T*;
 
-    fn init(value: T*) : value = value {
+    fn init(&mut self, value: T*) : value = value {
     }
 
-    fn get() -> T* {
-        return this->value;
+    fn get(&self) -> T* {
+        return self.value;
     }
 }
 
 struct Storage<><u8> {
     let value: u8;
 
-    fn init(value: u8) : value = value {
+    fn init(&mut self, value: u8) : value = value {
     }
 
-    fn get() -> u8 {
-        return this->value;
+    fn get(&self) -> u8 {
+        return self.value;
     }
 
-    fn hexadecimal_digit() -> c8 {
-        if (this->value < 10) {
-            return as<c8>('0' + this->value);
+    fn hexadecimal_digit(&self) -> c8 {
+        if (self.value < 10) {
+            return as<c8>('0' + self.value);
         }
-        return as<c8>('a' + this->value - 10);
+        return as<c8>('a' + self.value - 10);
     }
 }
 ```
@@ -1441,7 +1441,7 @@ struct Buffer<T: auto, N: usize> {
     let mut values: T[N];
     let mut used: usize;
 
-    fn init() {
+    fn init(&mut self) {
     }
 }
 
@@ -1453,7 +1453,7 @@ struct Buffer<T: auto, N: usize><T*, N> {
         let mut used: usize;
     }
 
-    fn init() {
+    fn init(&mut self) {
     }
 }
 ```
@@ -1517,7 +1517,7 @@ module examples.specialized_slot;
 
 struct Widget {
     let id: i32;
-    fn init(id: i32) : id = id {}
+    fn init(&mut self, id: i32) : id = id {}
 }
 
 fn run() -> i32 {
@@ -1749,9 +1749,9 @@ fn fixed_width() -> u32 {
 }
 ```
 
-The deferred `field_width` definition is not needed in HUC0. Calling `count_digits` only at compile time
-does not suppress its ordinary runtime definition. Writing
-`@count_digits(12345)` directly would use the same evaluator.
+The deferred `field_width` definition is not needed in HUC0. Calling
+`count_digits` only at compile time does not suppress its ordinary runtime
+definition. Writing `@count_digits(12345)` directly would use the same evaluator.
 
 The evaluator runs the runtime language: scalars including `c8` and floats,
 structures with constructors, methods, `copy`, relocation, and `drop`, pointers
@@ -2051,12 +2051,12 @@ module examples.module_insert;
 
 import1 compiler;
 
-fn health_check_decl<>() -> compiler::Code {
-    return compiler::module("fn health_check() -> i32 { return 200; }");
+fn health_check_decl<>() -> compiler::Text {
+    return "fn health_check() -> i32 { return 200; }";
 }
 
 fn run() -> i32 {
-    #health_check_decl();
+    @compiler::module_before(health_check_decl());
     return health_check();
 }
 
@@ -2069,6 +2069,8 @@ Generated HUC0:
 
 ```huc
 module examples.module_insert;
+
+fn health_check() -> i32;
 
 fn run() -> i32 {
     return health_check();
@@ -2083,13 +2085,10 @@ fn next_function() -> i32 {
 }
 ```
 
-Module code inserted in a function follows the enclosing top-level declaration:
-here, after `run`, before `next_function`. Module-level function references may
-refer forward, so the call in `run` is valid. For a method, the insertion point
-would be after its whole top-level type. At module scope, it would be after the
-`#` item itself. `run` is an ordinary `fn`, so this happens when its declaration
-is processed, even if no code ever calls it. No insertion goes before its
-anchor or rewrites already processed source.
+The module-before action makes `health_check` visible from its site onward.
+The printer puts its declaration before `run` and its body after `run`.
+An ordinary `run` is prepared even when uncalled. Using `module` instead would
+publish after `run`, too late for this call without a source forward declaration.
 
 ### 7.3 Program mode and evaluation mode
 
@@ -2103,7 +2102,9 @@ import1 compiler;
 
 fn generated_value<Extra: i32>() -> i32 {
     #compiler::local("let local: i32 = 40;");
-    #compiler::module("fn generation_marker() -> i32 { return 1; }");
+    if1 (compiler::emitting()) {
+        @compiler::module("fn generation_marker() -> i32 { return 1; }");
+    }
     return local + Extra;
 }
 
@@ -2116,8 +2117,8 @@ fn main() -> i32 {
 ```
 
 - The forced call prepares a private evaluation-mode body. The local insertion
-  declares `local`, so evaluation returns `42`. The module insertion introduces
-  no `generation_marker` declaration and does not mark it as emitted.
+  declares `local`, so evaluation returns `42`. The false phase branch skips the
+  action, so no `generation_marker` is published.
 - The runtime calls require the same specialization in program mode. Its local
   declaration appears inside the emitted function, and `generation_marker`
   appears after `main`, the original requesting top-level declaration. There
@@ -2125,10 +2126,11 @@ fn main() -> i32 {
 - This remains true if the evaluation request is processed first. If only the
   forced call existed, neither function would be emitted for that request.
 
-Suppressed module code is not parsed as declarations and makes no names
-available. Evaluation cannot use a helper while its declaration is pending
-after the active anchor. Once that declaration has been published and checked,
-later evaluation can use it. An ordinary `fn` follows the same mode rules, but
+An unguarded module action in evaluation mode is an error. Skipped phase
+branches are not parsed and make no names available. Evaluation cannot use a
+helper while its declaration is pending after the active anchor. Once that
+declaration has been published and checked, later evaluation can use it.
+An ordinary `fn` follows the same mode rules, but
 independently retains its normal HUC0 definition even when it is never called
 at runtime.
 
@@ -2150,13 +2152,13 @@ module examples.mode_query;
 
 import1 compiler;
 
-fn square_decl<>() -> compiler::Code {
-    return compiler::module("fn square(x: i32) -> i32 { return x * x; }");
+fn square_decl<>() -> compiler::Text {
+    return "fn square(x: i32) -> i32 { return x * x; }";
 }
 
 fn area<Scale: i32>(side: i32) -> i32 {
     if1 (compiler::emitting()) {
-        #square_decl();
+        @compiler::module_before(square_decl());
         return Scale * square(side);
     } else {
         return Scale * side * side;
@@ -2174,13 +2176,18 @@ Generated HUC0:
 ```huc
 module examples.mode_query;
 
-fn __huc_area_2(side: i32) -> i32 {
-    return 2 * square(side);
-}
+fn square(x: i32) -> i32;
+// fn area<2>(side: i32) -> i32
+fn __huc_area_2(side: i32) -> i32;
 
 fn main() -> i32 {
     let live: i32 = __huc_area_2(4);
     return 18 + live;
+}
+
+// fn area<2>(side: i32) -> i32
+fn __huc_area_2(side: i32) -> i32 {
+    return 2 * square(side);
 }
 
 fn square(x: i32) -> i32 {
@@ -2188,12 +2195,10 @@ fn square(x: i32) -> i32 {
 }
 ```
 
-The generated `square` follows `main`, which requested `area<2>`. The evaluated
-`area<2>` takes the other branch, so `@area<2>(3)` becomes `18`. Without the
-query, the forced call would be rejected even though `area<2>(4)` emits
-`square`: the declaration is still queued after `main`. Finishing a nested
-function's preparation does not publish it early. An evaluation requested in a
-later declaration, after `square` is published, could use it without the query.
+The declaration of `square` is printed before `main`; its body follows it.
+The evaluated `area<2>` takes the other branch, so `@area<2>(3)` becomes `18`.
+Without the guard, its module action is an evaluation-mode error, even if a
+runtime request has already published an identical helper.
 
 The compiler does not compare the two branches; keeping their results
 consistent is the programmer's responsibility. As with macros, builders that
@@ -2536,22 +2541,21 @@ provides cleanup. As elsewhere in HUC, panic does not guarantee cleanup. The exa
 assumes the caller does not use the helper's `__lock_guard` name; `around`
 does not provide automatic name hygiene.
 
-### 7.5 Generated text must be HUC0
+### 7.5 Generated text is prepared as HUC1
 
 ```huc
-#compiler::module("if1 (true) { fn illegal() -> i32 { return 1; } }");
+@compiler::module("if1 (true) { fn generated() -> i32 { return 1; } }");
 ```
 
-In program mode, HUC1 rejects the generated `if1` while parsing the inserted
-text. Insertion does not run staging a second time: inserted code must already
-be valid HUC0. The standalone HUC0 translator independently rejects numbered
-constructs if handed such a file. In evaluation mode, this particular module
-insertion is suppressed; its text is not parsed or inserted.
+At a module-level program-preparation site this is valid. HUC1 prepares the
+generated phase branch and retains an ordinary function. It may also process
+generated families, impls, or specialize declarations valid at that position.
+Local generation can contain phase constructs too. Resource limits terminate
+unbounded recursive generation. HUC0 independently rejects residual phase
+constructs: only the prepared runtime result crosses the textual boundary.
 
-Errors in generated text point to that text, its `#` site, and the call chain
-that built it. Errors in an original block still point to the original source. Original
-and generated buffers keep their own immutable locations; printing final HUC0
-adds an output map rather than changing those locations.
+Errors retain the generated span, action/# site, and builder call chain. The
+original block wrapped by around keeps its original locations and aliases.
 
 ### 7.6 Nested requests share the original module insertion anchor
 
@@ -2560,12 +2564,16 @@ module examples.nested_generation;
 
 import1 compiler;
 
+fn generated() -> i32; // Available to B's lexical lookup, before its body.
+
 fn B<Tag: i32>() -> i32 {
     return generated() + Tag;
 }
 
 fn A<Tag: i32>() -> i32 {
-    #compiler::module("fn generated() -> i32 { return 42; }");
+    if1 (compiler::emitting()) {
+        @compiler::module("fn generated() -> i32 { return 42; }");
+    }
     return B<Tag>();
 }
 
@@ -2578,21 +2586,13 @@ fn later() -> i32 {
 }
 ```
 
-Registering `A` and `B` does not prepare their bodies. Preparing `main` requests
-`A<0>`, whose `#` queues `generated` and which requests `B<0>`. Both requests use `main`
-as their module insertion anchor. The runtime call in `B` may refer forward,
-but `generated` is not available for compiler execution yet.
-
-After `main` finishes its compiler-stage work, `generated` is parsed and
-published before `later`. The forced call in `later` can therefore return
-`42`. Moving that forced call into `main` would be an error: it would require
-a declaration still queued after `main`. It does not matter that `A`, rather
-than `B`, generated that declaration. No origin-based exception bypasses the
-insertion boundary.
-
-Concrete `A<0>` and `B<0>` definitions occupy their family declaration positions
-in printed HUC0. This ordinary specialization step is separate from the module
-code inserted with `#`, which places `generated` after `main`.
+The forward makes B's runtime call valid without seeing a later declaration.
+Preparing main requests A, then B; both inherit main's anchor. The definition
+of generated is published after main, so a compiler call to B inside main
+would fail: it needs the body. The call in later succeeds. A's placed names
+would not otherwise become B's lexical names, so module-before alone cannot
+replace this source forward. A/B forwards print before main; their bodies print
+after it, before the queued generated definition.
 
 ### 7.7 Imported families can use caller-defined types
 
@@ -2604,7 +2604,7 @@ module library.read;
 import1 compiler;
 
 pub fn read_value<T: auto>(item: T*) -> i32 {
-    #compiler::module("fn bonus() -> i32 { return 1; }");
+    @compiler::module_before("fn bonus() -> i32 { return 1; }");
     return item->value + bonus();
 }
 ```
@@ -2618,7 +2618,7 @@ import library.read;
 
 struct UserType {
     let value: i32;
-    fn init(value: i32) : value = value {}
+    fn init(&mut self, value: i32) : value = value {}
 }
 
 fn main() -> i32 {
@@ -2634,7 +2634,7 @@ carries the caller's type; ordinary names such as `bonus` still resolve in
 
 `read_value` is `pub`, so `app.main` may call it. `UserType` stays private to
 `app.main`: the library receives it as a type argument and never names it.
-The `#` in the generic body belongs to `library.read`, so the generated
+The action in the generic body belongs to `library.read`, so the generated
 `bonus` is a private declaration of that file, which the body may call.
 
 Flattened HUC0, with a shortened specialization name:
@@ -2642,17 +2642,19 @@ Flattened HUC0, with a shortened specialization name:
 ```huc
 module app.main;
 
+struct UserType;
+
 module library.read;
 
-fn __huc_read_user(item: app::main::UserType*) -> i32 {
-    return item->value + bonus();
-}
+fn bonus() -> i32;
+// fn read_value<app::main::UserType>(item: app::main::UserType*) -> i32
+fn __huc_read_user(item: app::main::UserType*) -> i32;
 
 module app.main;
 
 struct UserType {
     let value: i32;
-    fn init(value: i32) : value = value {}
+    fn init(&mut self, value: i32) : value = value {}
 }
 
 fn main() -> i32 {
@@ -2662,12 +2664,19 @@ fn main() -> i32 {
 
 module library.read;
 
+// fn read_value<app::main::UserType>(item: app::main::UserType*) -> i32
+fn __huc_read_user(item: app::main::UserType*) -> i32 {
+    return item->value + bonus();
+}
+
 fn bonus() -> i32 {
     return 1;
 }
 ```
 
-`bonus` follows the requesting `main` but belongs to the library namespace.
+`bonus` is declared before main and defined after it, in the library namespace.
+The unguarded action makes a compiler call to read_value invalid; a dual-mode
+version would use an emitting guard and a separate evaluation path.
 Repeated `module` sections simply select naming scopes; they do not reload
 files. Imports and their short aliases have been resolved away. The standalone
 HUC0 translator accepts this entire file without access to the original HUC1.
@@ -2706,17 +2715,17 @@ struct HeapArray<T: auto> {
     let mut values: mut T*;
     let capacity: usize;
 
-    fn init(capacity: usize)
+    fn init(&mut self, capacity: usize)
         : capacity = capacity {
         if (capacity != 0) {
-            this->values = memory::allocate_raw_items<T>(capacity);
+            self.values = memory::allocate_raw_items<T>(capacity);
         }
     }
 
-    fn drop() mut -> void {
-        if (this->values) {
-            memory::free_raw_items<T>(this->values, this->capacity);
-            this->values = null;
+    fn drop(&mut self) -> void {
+        if (self.values) {
+            memory::free_raw_items<T>(self.values, self.capacity);
+            self.values = null;
         }
     }
 }
@@ -2727,69 +2736,69 @@ struct SmallVector<T: auto, Inline: usize> {
     let mut size: usize;
     let mut capacity: usize;
 
-    fn init()
+    fn init(&mut self)
         : heap_values = HeapArray<T>(0),
           capacity = Inline,
     {
     }
 
-    fn using_heap() -> bool {
-        return this->heap_values.values != null;
+    fn using_heap(&self) -> bool {
+        return self.heap_values.values != null;
     }
 
-    fn data() -> T* {
-        if (this->using_heap()) {
-            return this->heap_values.values;
+    fn data(&self) -> T* {
+        if (self.using_heap()) {
+            return self.heap_values.values;
         }
 
-        return ptr_as<T*>(&this->inline_values[0]);
+        return ptr_as<T*>(&self.inline_values[0]);
     }
 
-    fn data_mut() mut -> mut T* {
-        if (this->using_heap()) {
-            return this->heap_values.values;
+    fn data_mut(&mut self) -> mut T* {
+        if (self.using_heap()) {
+            return self.heap_values.values;
         }
 
-        return ptr_as<mut T*>(&this->inline_values[0]);
+        return ptr_as<mut T*>(&self.inline_values[0]);
     }
 
-    fn reserve(requested: usize) mut -> void {
-        if (requested <= this->capacity) {
+    fn reserve(&mut self, requested: usize) -> void {
+        if (requested <= self.capacity) {
             return;
         }
 
         let next_capacity: usize =
-            memory::growth_capacity<T>(this->capacity, requested);
+            memory::growth_capacity<T>(self.capacity, requested);
 
         let mut replacement: HeapArray<T> =
             HeapArray<T>(next_capacity);
 
         let mut index: usize = 0;
-        while (index < this->size) {
-            let source: mut T* = this->data_mut() + index;
+        while (index < self.size) {
+            let source: mut T* = self.data_mut() + index;
             construct_at(replacement.values + index, *source);
             index += 1;
         }
 
-        this->heap_values = replacement;
-        this->capacity = next_capacity;
+        self.heap_values = replacement;
+        self.capacity = next_capacity;
     }
 
-    fn push(mut value: T) mut -> void {
-        this->reserve(memory::checked_add(this->size, 1));
-        construct_at(this->data_mut() + this->size, value);
-        this->size += 1;
+    fn push(&mut self, mut value: T) -> void {
+        self.reserve(memory::checked_add(self.size, 1));
+        construct_at(self.data_mut() + self.size, value);
+        self.size += 1;
     }
 
-    fn get(index: usize) -> T* {
+    fn get(&self, index: usize) -> T* {
         // Bounds remain unchecked in the core language.
-        return this->data() + index;
+        return self.data() + index;
     }
 
-    fn drop() mut -> void {
-        while (this->size > 0) {
-            this->size -= 1;
-            destruct_at(this->data_mut() + this->size);
+    fn drop(&mut self) -> void {
+        while (self.size > 0) {
+            self.size -= 1;
+            destruct_at(self.data_mut() + self.size);
         }
         // heap_values later frees its allocation; inline_values adds no drops.
     }
@@ -2799,18 +2808,18 @@ struct [nocopy] SmallVector<T: auto><T*, 4> {
     let [nozero] mut values: T*[4];
     let mut size: usize;
 
-    fn init() {
+    fn init(&mut self) {
     }
 
-    fn push(value: T*) mut -> void {
+    fn push(&mut self, value: T*) -> void {
         // This compact specialization deliberately has no spill path.
         // Writing past four slots is undefined in the unchecked profile.
-        construct_at(&this->values[0] + this->size, value);
-        this->size += 1;
+        construct_at(&self.values[0] + self.size, value);
+        self.size += 1;
     }
 
-    fn get(index: usize) -> T* {
-        return this->values[index];
+    fn get(&self, index: usize) -> T* {
+        return self.values[index];
     }
 }
 
@@ -2848,7 +2857,7 @@ This illustrates the design; it is not a finished, safety-checked container:
 ## 9. Large case study: embedded register map
 
 A hardware description often needs many nearly identical volatile accessors.
-The bootstrap reflection library is not available yet, so HUC0 text generation
+The bootstrap reflection library is not available yet, so HUC1 text generation
 can serve as the initial mechanism.
 
 The probable compiler text helper `format` below is illustrative.
@@ -2863,7 +2872,7 @@ struct RegisterSpec<> {
     let offset: usize;
     let writable: bool;
 
-    fn init(
+    fn init(&mut self,
         name: compiler::Text,
         offset: usize,
         writable: bool,
@@ -2875,35 +2884,25 @@ struct RegisterSpec<> {
     }
 }
 
-fn register_code<>(spec: RegisterSpec<>) -> compiler::Code {
-    let read: compiler::Code = compiler::module(
-        compiler::format(
-            "fn read_{0}(base: u32*) -> u32 { "
-            "return base[{1}]; "
-            "}",
+fn register_text<>(spec: RegisterSpec<>) -> compiler::Text {
+    let read: compiler::Text = compiler::format(
+        "fn read_{0}(base: u32*) -> u32 { return base[{1}]; }",
+        spec.name,
+        spec.offset / 4,
+    );
+    if (spec.writable) {
+        return compiler::format(
+            "fn write_{0}(base: mut u32*, value: u32) -> void { base[{1}] = value; }",
             spec.name,
             spec.offset / 4,
-        ),
-    );
-
-    if (spec.writable) {
-        return compiler::module(
-            compiler::format(
-                "fn write_{0}(base: mut u32*, value: u32) -> void { "
-                "base[{1}] = value; "
-                "}",
-                spec.name,
-                spec.offset / 4,
-            ),
         ) + read;
     }
-
     return read;
 }
 
-#register_code(RegisterSpec<>("status", 0x00, false));
-#register_code(RegisterSpec<>("control", 0x04, true));
-#register_code(RegisterSpec<>("baud", 0x08, true));
+@compiler::module(register_text(RegisterSpec<>("status", 0x00, false)));
+@compiler::module(register_text(RegisterSpec<>("control", 0x04, true)));
+@compiler::module(register_text(RegisterSpec<>("baud", 0x08, true)));
 
 fn initialize_uart(base: mut u32*, baud: u32) -> void {
     write_control(base, 0);
@@ -2966,14 +2965,14 @@ let1 protocol_has_checksum: bool = true;
 struct WireInteger<Bits: usize> {
     if1 (Bits == 8) {
         let value: u8;
-        fn init(value: u8) : value = value {}
+        fn init(&mut self, value: u8) : value = value {}
     } else {
         if1 (Bits == 16) {
             let value: u16;
-            fn init(value: u16) : value = value {}
+            fn init(&mut self, value: u16) : value = value {}
         } else {
             let value: u32;
-            fn init(value: u32) : value = value {}
+            fn init(&mut self, value: u32) : value = value {}
         }
     }
 }
@@ -2987,14 +2986,14 @@ struct MessageHeader {
     }
 
     if1 (protocol_has_checksum) {
-        fn init(kind: u16, payload_size: u16, checksum: u32)
+        fn init(&mut self, kind: u16, payload_size: u16, checksum: u32)
             : kind = WireInteger<16>(kind),
               payload_size = WireInteger<16>(payload_size),
               checksum = WireInteger<32>(checksum),
         {
         }
     } else {
-        fn init(kind: u16, payload_size: u16)
+        fn init(&mut self, kind: u16, payload_size: u16)
             : kind = WireInteger<16>(kind),
               payload_size = WireInteger<16>(payload_size),
         {
@@ -3006,7 +3005,7 @@ struct Packet {
     let header: MessageHeader;
     let mut payload: net::ByteBuffer;
 
-    fn init(header: MessageHeader, mut payload: net::ByteBuffer)
+    fn init(&mut self, header: MessageHeader, mut payload: net::ByteBuffer)
         : header = header,
           payload = payload,
     {
@@ -3087,8 +3086,8 @@ fn command_test(arguments: text::Text) -> i32 {
     return 0;
 }
 
-fn dispatcher_code<>() -> compiler::Code {
-    return compiler::module(
+fn dispatcher_text<>() -> compiler::Text {
+    return
         "fn dispatch(name: std::text::Text, "
         "mut arguments: std::text::Text) -> i32 {"
         "  if (name == \"build\") { return command_build(arguments); }"
@@ -3096,11 +3095,10 @@ fn dispatcher_code<>() -> compiler::Code {
         "  if (name == \"test\") { return command_test(arguments); }"
         "  std::io::error_line(\"unknown command\");"
         "  return 2;"
-        "}",
-    );
+        "}";
 }
 
-#dispatcher_code();
+@compiler::module(dispatcher_text());
 ```
 
 The generated text spells `std::text::Text` and `std::io::error_line` in
@@ -3134,14 +3132,14 @@ import std.memory as memory;
 struct Position {
     let mut x: f32;
     let mut y: f32;
-    fn init(x: f32, y: f32) : x = x, y = y {}
+    fn init(&mut self, x: f32, y: f32) : x = x, y = y {}
 }
 
 struct Sprite {
     let texture: u32;
     let mut pixels: memory::ByteBuffer;
 
-    fn init(texture: u32, mut pixels: memory::ByteBuffer)
+    fn init(&mut self, texture: u32, mut pixels: memory::ByteBuffer)
         : texture = texture,
           pixels = pixels,
     {
@@ -3152,28 +3150,28 @@ struct ComponentStore<T: auto> {
     if1 (compiler::type<T>().is_advanced()) {
         let mut values: collections::Vector<T>;
 
-        fn add(mut value: T) mut -> usize {
-            this->values.push(value);
-            return this->values.size() - 1;
+        fn add(&mut self, mut value: T) -> usize {
+            self.values.push(value);
+            return self.values.size() - 1;
         }
 
-        fn get(index: usize) -> T* {
-            return this->values.pointer_at(index);
+        fn get(&self, index: usize) -> T* {
+            return self.values.pointer_at(index);
         }
     } else {
         let mut values: collections::Vector<T>;
 
-        fn add(value: T) mut -> usize {
-            this->values.push(value);
-            return this->values.size() - 1;
+        fn add(&mut self, value: T) -> usize {
+            self.values.push(value);
+            return self.values.size() - 1;
         }
 
-        fn get(index: usize) -> T* {
-            return this->values.pointer_at(index);
+        fn get(&self, index: usize) -> T* {
+            return self.values.pointer_at(index);
         }
     }
 
-    fn init() {
+    fn init(&mut self) {
     }
 }
 
@@ -3181,7 +3179,7 @@ struct World {
     let mut positions: ComponentStore<Position>;
     let mut sprites: ComponentStore<Sprite>;
 
-    fn init() {
+    fn init(&mut self) {
     }
 }
 ```
@@ -3341,7 +3339,7 @@ Possible tools include:
 | generic `fn` partial specialization | overloads, traits, macros | Same primary/partial/full mechanism as structure and variable families |
 | generic `let` | variable templates, macros, generated locals | Selected leaf is a complete ordinary `let`, including type and mutation permissions |
 | `@family<T>(...)` | constant evaluation or interpreter call | Same family either residualizes or must fully execute |
-| Text generation | macros, mixins, compiler plugins | Functions return code values; `#` inserts them where it appears; inserted HUC0 is parsed and checked |
+| Text generation | macros, mixins, compiler plugins | Functions return local Code or module Text; explicit sites prepare generated HUC1 |
 | Printable HUC0 boundary | internal compiler IR or generated source | Second public translator parses the exact intermediate source |
 | Future semantic reflection | procedural macros, plugins, build generators | Stable compiler-only semantic snapshots plus explicit insertion |
 

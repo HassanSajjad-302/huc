@@ -9,22 +9,22 @@ struct Widget {
     let value: i32;
     let mut native_handle: i32;
 
-    fn init(value: i32)
+    fn init(&mut self, value: i32)
         : value = value,
           native_handle = probable_open_widget(value),
     {
     }
 
     // This customizes explicit `copy`. Declaring it makes Widget Advanced.
-    fn copy() -> Widget {
-        return Widget(this->value); // opens an independent native handle
+    fn copy(&self) -> Widget {
+        return Widget(self.value); // opens an independent native handle
     }
 
     // This customizes destruction. Fields are cleaned after drop returns.
-    fn drop() mut -> void {
-        if (this->native_handle >= 0) {
-            probable_close_widget(this->native_handle);
-            this->native_handle = -1;
+    fn drop(&mut self) -> void {
+        if (self.native_handle >= 0) {
+            probable_close_widget(self.native_handle);
+            self.native_handle = -1;
         }
     }
 }

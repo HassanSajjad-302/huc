@@ -12,12 +12,12 @@ let mut basic_initializations: i32 = 0;
 struct Probe {
     let mut id: i32;
 
-    fn init() {
-        last_default = ptr_as<usize>(this);
+    fn init(&mut self) {
+        last_default = ptr_as<usize>(&self);
         events = events * 10 + 1;
     }
 
-    fn drop() mut -> void {
+    fn drop(&mut self) -> void {
         events = events * 10 + 2;
     }
 }
@@ -25,14 +25,14 @@ struct Probe {
 struct Envelope {
     let mut item: Probe;
 
-    fn init() {
+    fn init(&mut self) {
     }
 }
 
 struct Holder {
     let mut envelope: Envelope;
 
-    fn init() {
+    fn init(&mut self) {
     }
 }
 
@@ -40,7 +40,7 @@ struct Holder {
 struct Number {
     let value: i32;
 
-    fn init(value: i32) : value = value {
+    fn init(&mut self, value: i32) : value = value {
         basic_initializations += 1;
     }
 }
@@ -48,8 +48,8 @@ struct Number {
 struct Flags {
     let [bits(3)] mut mode: u32;
 
-    fn init() {
-        this->mode = 5;
+    fn init(&mut self) {
+        self.mode = 5;
     }
 }
 
@@ -57,8 +57,8 @@ struct [pack(1)] Packed {
     let mut tag: u8;
     let mut number: u64;
 
-    fn init() {
-        this->number = 9;
+    fn init(&mut self) {
+        self.number = 9;
     }
 }
 

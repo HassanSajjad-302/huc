@@ -17,10 +17,10 @@ fn identity<T: auto>(mut value: T) -> T {
 struct Token {
     let value: i32;
 
-    fn init(value: i32) : value = value {
+    fn init(&mut self, value: i32) : value = value {
     }
 
-    fn drop() mut -> void {
+    fn drop(&mut self) -> void {
         drops += 1;
     }
 }
@@ -70,11 +70,11 @@ fn mixed_bindings<>(first: i32, second: i32) -> bool {
 struct Count {
     let value: i32;
 
-    fn init(value: i32) : value = value {
+    fn init(&mut self, value: i32) : value = value {
     }
 
-    fn read() -> i32 {
-        return this->value;
+    fn read(&self) -> i32 {
+        return self.value;
     }
 }
 

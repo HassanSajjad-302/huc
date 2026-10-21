@@ -1,0 +1,83 @@
+module examples.declarations_and_impl;
+
+// Standalone runtime counterpart; shortened concrete names for readability.
+let mut drops: i32 = 0;
+
+struct Ticket {
+    let mut value: i32;
+
+    fn drop(&mut self) -> void;
+    fn read(&self) -> i32;
+}
+
+impl Ticket {
+    fn drop(&mut self) -> void {
+        drops += 1;
+    }
+
+    fn read(&self) -> i32 {
+        return self.value;
+    }
+
+    fn renew(mut self) -> Ticket {
+        self.value += 1;
+        return self;
+    }
+
+    fn finish(self) -> i32 {
+        return self.value;
+    }
+
+    fn close(mut self) -> void {
+        drop self;
+    }
+
+    fn make(value: i32) -> Ticket {
+        return Ticket(value);
+    }
+}
+
+fn answer() -> i32;
+
+// struct Cell<i32>
+struct __huc_cell_i32 {
+    let value: i32;
+    fn address(&self) -> i32*;
+}
+
+// fn read<i32>(value: i32*) -> i32
+fn __huc_read_i32(value: i32*) -> i32;
+
+fn main() -> i32 {
+    let expected: i32 = 42;
+    let mut first: Ticket = Ticket::make(1);
+    first = first.renew();
+    let pointer: mut Ticket* = &first;
+    let two: i32 = pointer->finish();
+    construct_at(pointer, Ticket(3));
+    let three: i32 = (*pointer).finish();
+    construct_at(pointer, Ticket(4));
+    first.close();
+
+    let cell: __huc_cell_i32 = __huc_cell_i32(7);
+    let mut number: i32 = *cell.address();
+    let copied: i32 = __huc_read_i32(&number);
+    return answer() == expected && two == 2 && three == 3
+        && copied == 7 && drops == 3 ? 0 : 1;
+}
+
+fn answer() -> i32 {
+    return 42;
+}
+
+// struct Cell<i32>
+impl __huc_cell_i32 {
+    fn address(&self) -> i32* {
+        return &self.value;
+    }
+}
+
+// fn read<i32>(value: i32*) -> i32
+fn __huc_read_i32(value: i32*) -> i32 {
+    return *value;
+}

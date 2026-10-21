@@ -164,6 +164,12 @@ on the same line, as with a control-flow body:
 
 ## Lists and trailing commas
 
+Write the explicit receiver first, with no type annotation. Use `self.field`
+inside methods, `&self` for its address, and `Type::function()` for static
+functions. Put implementation bodies in `impl Type { ... }` when they need a
+complete type. For a foreign specialization, put `specialize canonical.module`
+on the preceding line when the combined declaration would be long.
+
 Keep a short list on one line without a trailing comma. When a list wraps,
 normally put each item on its own line and include a trailing comma:
 
@@ -188,7 +194,7 @@ patterns, and constructor initializer lists. In a multiline constructor
 initializer list, put the body brace on the next line after the final comma:
 
 ```huc
-fn init(x: i32, y: i32)
+fn init(&mut self, x: i32, y: i32)
     : x = x,
       y = y,
 {

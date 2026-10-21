@@ -10,15 +10,15 @@ let mut temporary_drop_order: i32 = 0;
 struct TemporaryProbe {
     let id: i32;
 
-    fn init(id: i32) : id = id {
+    fn init(&mut self, id: i32) : id = id {
     }
 
-    fn view() -> i32* {
-        return &this->id;
+    fn view(&self) -> i32* {
+        return &self.id;
     }
 
-    fn drop() mut -> void {
-        temporary_drop_order = temporary_drop_order * 10 + this->id;
+    fn drop(&mut self) -> void {
+        temporary_drop_order = temporary_drop_order * 10 + self.id;
     }
 }
 
@@ -27,7 +27,7 @@ struct Point {
     let x: i32;
     let y: i32;
 
-    fn init(x: i32, y: i32)
+    fn init(&mut self, x: i32, y: i32)
         : x = x,
           y = y,
     {
@@ -39,35 +39,35 @@ struct NativeBuffer {
     let mut data: mut u8*;
     let size: usize;
 
-    fn init(size: usize)
+    fn init(&mut self, size: usize)
         : data = memory::allocate_zeroed_bytes(size),
           size = size,
     {
     }
 
-    fn first() -> u8 {
-        if (this->size == 0) {
+    fn first(&self) -> u8 {
+        if (self.size == 0) {
             return 0;
         }
-        return this->data[0];
+        return self.data[0];
     }
 
-    fn fill(value: u8) mut -> void {
-        memory::fill_bytes(this->data, value, this->size);
+    fn fill(&mut self, value: u8) -> void {
+        memory::fill_bytes(self.data, value, self.size);
     }
 
     // Only an explicit copy expression calls this method.
-    fn copy() -> NativeBuffer {
-        let mut result: NativeBuffer = NativeBuffer(this->size);
-        memory::copy_bytes(result.data, this->data, this->size);
+    fn copy(&self) -> NativeBuffer {
+        let mut result: NativeBuffer = NativeBuffer(self.size);
+        memory::copy_bytes(result.data, self.data, self.size);
         return result;
     }
 
     // The compiler calls this, then cleans up fields in reverse order.
-    fn drop() mut -> void {
-        if (this->data) {
-            memory::free_raw_bytes(this->data, this->size);
-            this->data = null;
+    fn drop(&mut self) -> void {
+        if (self.data) {
+            memory::free_raw_bytes(self.data, self.size);
+            self.data = null;
         }
     }
 }
@@ -78,7 +78,7 @@ struct Packet {
     let tag: i32;
     let mut payload: NativeBuffer;
 
-    fn init(tag: i32, mut payload: NativeBuffer)
+    fn init(&mut self, tag: i32, mut payload: NativeBuffer)
         : tag = tag,
           payload = payload,
     {
@@ -89,13 +89,13 @@ struct Packet {
 // Transferring it inline leaves a stale self pointer. This is invalid unless the
 // programmer can prove the pointer will never be used afterward.
 struct AddressDependent {
-    let mut self: AddressDependent*;
+    let mut self_pointer: AddressDependent*;
 
-    fn init() : self = null {
-        this->self = this;
+    fn init(&mut self) : self_pointer = null {
+        self.self_pointer = &self;
     }
 
-    fn drop() mut -> void {
+    fn drop(&mut self) -> void {
     }
 }
 
@@ -194,7 +194,7 @@ fn demonstrate_address_stability() -> void {
     let fixed: AddressDependent = AddressDependent();
     let observer: AddressDependent* = &fixed;
     let second_observer: AddressDependent* = observer;
-    io::println(second_observer->self == observer);
+    io::println(second_observer->self_pointer == observer);
 }
 
 fn show_temporary_views(first: i32*, second: i32*) -> void {
